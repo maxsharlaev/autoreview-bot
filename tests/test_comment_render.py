@@ -128,6 +128,79 @@ def test_sticky_comment_resolved_keeps_title() -> None:
     assert "Portuguese blog URLs still indexed" in text
 
 
+def test_sticky_comment_shows_p3_count() -> None:
+    verified = empty_verified(files_total=1, files_reviewed=1, skipped=[], truncated=False)
+    verified.summary = "Code improvement suggestions."
+    verified.findings = [
+        FindingView(
+            stable_id="style-fix",
+            severity="P3",
+            confidence=0.7,
+            category="style",
+            path="src/utils.py",
+            line=10,
+            title="Consider simplifying expression",
+            scenario="Expression could be cleaner.",
+            evidence="Nested conditionals.",
+            recommendation="Use early return pattern.",
+            blocking_candidate=False,
+        )
+    ]
+    text = render_sticky_comment(_render(verified=verified))
+    assert "P0=0" in text
+    assert "P1=0" in text
+    assert "P2=0" in text
+    assert "P3=1" in text
+    assert "**Verdict:** clean" in text
+
+
+def test_sticky_comment_verdict_clean_with_only_p3() -> None:
+    """PR with only P3 findings should have verdict 'clean', not 'findings'."""
+    verified = empty_verified(files_total=1, files_reviewed=1, skipped=[], truncated=False)
+    verified.summary = "Minor suggestions only."
+    verified.findings = [
+        FindingView(
+            stable_id="p3-only",
+            severity="P3",
+            confidence=0.6,
+            category="style",
+            path="src/main.py",
+            line=20,
+            title="Variable naming",
+            scenario="Name could be clearer.",
+            evidence="Single letter variable.",
+            recommendation="Use descriptive name.",
+            blocking_candidate=False,
+        )
+    ]
+    text = render_sticky_comment(_render(verified=verified))
+    assert "**Verdict:** clean" in text
+
+
+def test_jira_comment_shows_p3_count() -> None:
+    verified = empty_verified(files_total=1, files_reviewed=1, skipped=[], truncated=False)
+    verified.findings = [
+        FindingView(
+            stable_id="p3-jira",
+            severity="P3",
+            confidence=0.5,
+            category="style",
+            path="src/api.py",
+            line=5,
+            title="Style suggestion",
+            scenario="Minor improvement.",
+            evidence="Old pattern.",
+            recommendation="New pattern.",
+            blocking_candidate=False,
+        )
+    ]
+    text = render_jira_comment(_render(verified=verified))
+    assert "P0=0" in text
+    assert "P1=0" in text
+    assert "P2=0" in text
+    assert "P3=1" in text
+
+
 def test_carry_rehydrates_open_blocker() -> None:
     from types import SimpleNamespace
 

@@ -138,6 +138,7 @@ def render_sticky_comment(data: RenderInput) -> str:
     p0 = _count(verified.findings, "P0")
     p1 = _count(verified.findings, "P1")
     p2 = _count(verified.findings, "P2")
+    p3 = _count(verified.findings, "P3")
     verdict = "findings" if (p0 or p1 or p2) else "clean"
     if data.error_code:
         verdict = data.error_code
@@ -152,7 +153,7 @@ def render_sticky_comment(data: RenderInput) -> str:
         f"**SHA:** `{data.head_sha}`",
         f"**{labels['mode']}:** `{data.mode}`",
         f"**{labels['alignment']}:** `{alignment}` (`{issue}`)",
-        f"**{labels['findings']}:** P0={p0} · P1={p1} · P2={p2}",
+        f"**{labels['findings']}:** P0={p0} · P1={p1} · P2={p2} · P3={p3}",
         (
             f"**{labels['coverage']}:** {verified.coverage.get('files_reviewed', 0)}/"
             f"{verified.coverage.get('files_total', 0)} {labels['files']}"
@@ -233,12 +234,13 @@ def render_jira_comment(data: RenderInput) -> str:
     p0 = _count(verified.findings, "P0")
     p1 = _count(verified.findings, "P1")
     p2 = _count(verified.findings, "P2")
+    p3 = _count(verified.findings, "P3")
     return "\n".join(
         [
             "AI Review",
             f"Caught: PR #{data.pr_number} ({data.repository}) sha {data.head_sha[:12]}",
             f"Checked: task {data.issue_key or 'none'}, alignment {verified.task_alignment_status}",
-            f"Result: P0={p0} P1={p1} P2={p2} mode={data.mode}",
+            f"Result: P0={p0} P1={p1} P2={p2} P3={p3} mode={data.mode}",
             f"Run: {data.run_id}",
         ]
     )

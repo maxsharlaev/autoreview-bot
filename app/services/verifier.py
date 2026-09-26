@@ -9,7 +9,7 @@ import jsonschema
 
 from app.paths import data_file
 
-SEVERITIES = {"P0", "P1", "P2"}
+SEVERITIES = {"P0", "P1", "P2", "P3"}
 ALIGNMENT = {"satisfied", "unclear", "unmet"}
 PREV_STATUSES = {"resolved", "still_open", "regressed", "obsolete", "needs_human"}
 
