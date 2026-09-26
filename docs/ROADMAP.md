@@ -1,4 +1,4 @@
-# Roadmap: Open PR Review
+# Roadmap: autoreview-bot
 
 This is a five-month sequence of verifiable milestones, not fixed release dates. The service is intended for any self-hosting team. GitHub, Jira and Codex are the first implementations. See the [Russian translation](ru/ROADMAP.md); the English roadmap is canonical.
 

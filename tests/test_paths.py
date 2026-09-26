@@ -9,7 +9,7 @@ def test_prompt_and_schema_are_found() -> None:
     schema = data_file("schemas", "review_output.json")
     assert prompt.is_file()
     assert schema.is_file()
-    assert "Open PR Review" in prompt.read_text(encoding="utf-8")
+    assert "autoreview-bot" in prompt.read_text(encoding="utf-8")
 
 
 def test_data_file_uses_override_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

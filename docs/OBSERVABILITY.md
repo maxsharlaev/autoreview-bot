@@ -26,7 +26,7 @@ Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`Op
 ## Grafana (existing)
 
 1. Datasource Prometheus → the Prometheus that scrapes Open PR Review. Optional Loki for logs.
-2. **Dashboards → Import** → [observability/grafana/dashboards/open-pr-review.json](../observability/grafana/dashboards/open-pr-review.json).
+2. **Dashboards → Import** → [observability/grafana/dashboards/autoreview-bot.json](../observability/grafana/dashboards/autoreview-bot.json).
 3. Dashboard expects datasource UIDs `prometheus` and `loki`. Remap if yours differ.
 
 ## Loki (existing)

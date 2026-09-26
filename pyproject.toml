@@ -1,7 +1,7 @@
 [project]
-name = "open-pr-review"
+name = "autoreview-bot"
 version = "0.1.0"
-description = "Centralized AI pull-request review service (FastAPI + Codex CLI)"
+description = "Self-hosted AI pull-request review service (FastAPI + Codex CLI)"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
