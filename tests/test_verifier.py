@@ -76,3 +76,59 @@ def test_keeps_finding_on_previous_path() -> None:
 def test_parse_fenced_json() -> None:
     payload = parse_json_payload('```json\n{"ok": true}\n```')
     assert payload == {"ok": True}
+
+
+def test_p3_severity_accepted() -> None:
+    """P3 (code improvement) severity should be accepted without coercion."""
+    findings = [
+        {
+            "id": "style-fix",
+            "severity": "P3",
+            "confidence": 0.7,
+            "category": "style",
+            "path": "app/utils.py",
+            "line": 5,
+            "title": "Consider using list comprehension",
+            "scenario": "Loop could be more pythonic.",
+            "evidence": "for loop with append",
+            "recommendation": "Use [x for x in items].",
+            "blocking_candidate": False,
+        }
+    ]
+    verified = verify_review(
+        _payload(findings=findings),
+        expected_head_sha=HEAD,
+        changed_paths={"app/utils.py"},
+        max_findings=20,
+    )
+    assert len(verified.findings) == 1
+    assert verified.findings[0].severity == "P3"
+
+
+def test_unknown_severity_rejected_by_schema() -> None:
+    """Unknown severities should be rejected by schema validation."""
+    import jsonschema
+    import pytest
+
+    findings = [
+        {
+            "id": "unknown-sev",
+            "severity": "P9",
+            "confidence": 0.5,
+            "category": "misc",
+            "path": "app/other.py",
+            "line": 1,
+            "title": "Unknown severity finding",
+            "scenario": "Something unusual.",
+            "evidence": "Unusual code.",
+            "recommendation": "Review manually.",
+            "blocking_candidate": False,
+        }
+    ]
+    with pytest.raises(jsonschema.ValidationError):
+        verify_review(
+            _payload(findings=findings),
+            expected_head_sha=HEAD,
+            changed_paths={"app/other.py"},
+            max_findings=20,
+        )

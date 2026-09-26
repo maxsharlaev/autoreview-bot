@@ -645,4 +645,5 @@ def _counts(findings: list[FindingView]) -> dict[str, int]:
         "P0": sum(1 for item in findings if item.severity == "P0"),
         "P1": sum(1 for item in findings if item.severity == "P1"),
         "P2": sum(1 for item in findings if item.severity == "P2"),
+        "P3": sum(1 for item in findings if item.severity == "P3"),
     }

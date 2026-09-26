@@ -108,3 +108,30 @@ def test_codex_log_bwrap_userns_once(caplog) -> None:
 def test_progress_prefix() -> None:
     progress = ReviewProgress(uuid.UUID("7222443c-2058-4bd1-8484-135a55126482"), "org/repo", 12)
     assert progress._prefix() == "[7222443c org/repo#12]"
+
+
+def test_codex_log_does_not_warn_on_source_code_error_lines(caplog) -> None:
+    """Lines from code search results that start with 'error:' but are source code
+    should not be logged as warnings."""
+    caplog.set_level("INFO", logger="app.services.codex_runner")
+    filt = CodexLogFilter()
+    filt.emit("error: function () {")
+    filt.emit("error: const foo = bar;")
+    filt.emit("error: let x = 1;")
+    filt.emit("error: if (condition) {")
+    filt.emit("error: return value;")
+    assert "WARNING" not in caplog.text
+    assert "function ()" not in caplog.text
+    assert "const foo" not in caplog.text
+
+
+def test_codex_log_warns_on_real_errors(caplog) -> None:
+    """Real error messages should still be logged as warnings."""
+    caplog.set_level("WARNING", logger="app.services.codex_runner")
+    filt = CodexLogFilter()
+    filt.emit("Error: CODEX_UNAVAILABLE")
+    filt.emit("error: stream disconnected before completion")
+    filt.emit("Error: no credits remaining")
+    assert "CODEX_UNAVAILABLE" in caplog.text
+    assert "stream disconnected" in caplog.text
+    assert "no credits remaining" in caplog.text

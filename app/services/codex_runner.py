@@ -110,6 +110,44 @@ def _is_session_boundary(line: str) -> bool:
     return low.startswith(("warning:", "error:", "exited "))
 
 
+_SOURCE_CODE_PATTERNS = (
+    "function",
+    "const ",
+    "let ",
+    "var ",
+    "if ",
+    "if(",
+    "for ",
+    "for(",
+    "while ",
+    "while(",
+    "return ",
+    "class ",
+    "async ",
+    "await ",
+    "import ",
+    "export ",
+    "def ",
+    "try ",
+    "try:",
+    "catch ",
+    "catch(",
+    "=>",
+    "() {",
+    "(){",
+    ") {",
+    "){",
+)
+
+
+def _looks_like_source_code(text_after_prefix: str) -> bool:
+    """Check if text looks like source code rather than an error message."""
+    text = text_after_prefix.strip().lower()
+    if not text:
+        return False
+    return any(text.startswith(pattern) for pattern in _SOURCE_CODE_PATTERNS)
+
+
 class CodexLogFilter:
     """Codex writes the session, prompt echo, and tool output to stderr."""
 
@@ -182,7 +220,9 @@ class CodexLogFilter:
             logger.info("codex json payload (%s chars)", len(stripped))
             return
         if low.startswith("error:"):
-            logger.warning("codex %s", stripped[:400])
+            text_after = stripped[6:]
+            if not _looks_like_source_code(text_after):
+                logger.warning("codex %s", stripped[:400])
             return
         if low.startswith(("warning:", "exited ")):
             logger.info("codex %s", stripped[:240])
