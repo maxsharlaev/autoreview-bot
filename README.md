@@ -1,4 +1,8 @@
-# Open PR Review
+# autoreview-bot
+
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/maxsharlaev/autoreview-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/maxsharlaev/autoreview-bot/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
 Self-hosted FastAPI service for advisory pull request reviews. The current implementation reads GitHub PRs, runs Codex CLI, records findings, and updates a PR comment. It can read a linked Jira issue; Jira comments and status transitions are configurable. Slack notifications are disabled by default.
 
@@ -123,7 +127,7 @@ Same SHA after a successful review: the webhook path reuses `completed`. The man
 
 5. Send. Expect **202** and `review_run_id`. Then **GET** `http://localhost:8000/api/v1/reviews/<review_run_id>` with the same Bearer token.
 
-Watch progress in the worker container (`docker compose logs -f worker`). Lines look like `[7222443c org/repo#12] clone …` plus Codex stdout/stderr and a heartbeat every 20s.
+Watch progress in the worker container (`docker compose logs -f worker`). The worker logs review progress plus Codex stdout/stderr and a heartbeat every 20 s.
 
 Optional fields if you already know the SHAs (then the enqueue path does not call GitHub; the worker still does): `head_sha`, `base_sha`, `head_ref`, `title`, `html_url`.
 
@@ -175,6 +179,6 @@ Service account needs browse + comment + transition on the listed projects. The 
 - `GET /is-ready` — Postgres + Redis
 - `GET /metrics` — Prometheus (API). Worker: `http://localhost:9100/metrics`
 
-**Observability:** scrape `GET /metrics` (API `:8000`, worker `:9100`) with **your** Prometheus. Import [observability/grafana/dashboards/open-pr-review.json](observability/grafana/dashboards/open-pr-review.json) into existing Grafana. Setup: [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md). On-call: [docs/OPERATIONS.md](docs/OPERATIONS.md).
+**Observability:** scrape `GET /metrics` (API `:8000`, worker `:9100`) with **your** Prometheus. Import [observability/grafana/dashboards/autoreview-bot.json](observability/grafana/dashboards/autoreview-bot.json) into existing Grafana. Setup: [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md). On-call: [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the pipeline and data model, and [docs/ROADMAP.md](docs/ROADMAP.md) for planned work. Licensed under [Apache-2.0](LICENSE). Copyright 2026 Maksim Sharlaev.
