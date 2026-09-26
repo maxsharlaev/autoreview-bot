@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-logger = logging.getLogger("open_pr_review.review")
+logger = logging.getLogger("autoreview_bot.review")
 
 
 class ReviewProgress:
