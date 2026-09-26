@@ -1,0 +1,53 @@
+# Copy this file into a PRODUCT repository as `.github/workflows/ai-review.yml`.
+# Do not add it to open_pr_review CI — that workflow only tests this service.
+#
+# Filters (`paths`, `branches`, `types`) live HERE, not in the review service.
+# The service still allowlists the repo in config.yaml (`github.allowed_repos`).
+#
+# GitHub → Settings → Secrets and variables → Actions:
+#   Secret:   AI_REVIEW_API_KEY  (same value as REVIEW_API_KEY on the server)
+#   Variable: AI_REVIEW_URL      (https://review.example.com — no trailing slash)
+
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Which target branches enqueue a review. Omit = every base branch.
+    # branches:
+    #   - main
+    #   - develop
+    #   - "release/**"
+    # Which changed files enqueue a review. Omit = every path.
+    # paths:
+    #   - "src/**"
+    #   - "apps/**"
+    #   - "package.json"
+    #   - "pyproject.toml"
+    # Skip review when ONLY these paths change (docs-only PR, etc.).
+    # paths-ignore:
+    #   - "docs/**"
+    #   - "**/*.md"
+    #   - ".github/workflows/**"
+  workflow_dispatch:
+    inputs:
+      pull_url:
+        description: PR URL if you run this manually (https://github.com/org/repo/pull/123)
+        required: true
+        type: string
+
+jobs:
+  review:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.draft != true &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
+    uses: maxsharlaev/autoreview-bot/.github/workflows/ai-review-trigger.yml@main
+    secrets:
+      AI_REVIEW_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+    with:
+      review_url: ${{ vars.AI_REVIEW_URL }}
+      pull_url: ${{ github.event.pull_request.html_url || inputs.pull_url }}
+      force: false

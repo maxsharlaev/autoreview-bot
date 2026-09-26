@@ -1,0 +1,48 @@
+# Reusable job: POST a PR to the AI Review service.
+# Product repos do not enable this on their own `on:` here — they call it
+# (see examples/github/ai-review-trigger.yml) and keep path/branch filters in the caller.
+#
+# This reusable workflow does not trigger itself on PRs to this repository.
+
+name: AI Review trigger
+
+on:
+  workflow_call:
+    inputs:
+      review_url:
+        description: AI Review base URL, no trailing slash (e.g. https://review.example.com)
+        required: true
+        type: string
+      pull_url:
+        description: https://github.com/owner/repo/pull/123
+        required: true
+        type: string
+      force:
+        description: Start a new run even if this SHA already completed
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AI_REVIEW_API_KEY:
+        required: true
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify AI Review Service
+        env:
+          AI_REVIEW_URL: ${{ inputs.review_url }}
+          AI_REVIEW_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+          PULL_URL: ${{ inputs.pull_url }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AI_REVIEW_URL}" ] || [ -z "${PULL_URL}" ]; then
+            echo "review_url and pull_url are required" >&2
+            exit 1
+          fi
+          curl -fsS -X POST "${AI_REVIEW_URL%/}/api/v1/reviews" \
+            -H "Authorization: Bearer ${AI_REVIEW_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg url "${PULL_URL}" --argjson force "${FORCE:-false}" '{pull_url: $url, force: $force}')"

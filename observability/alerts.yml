@@ -1,0 +1,46 @@
+groups:
+  - name: open-pr-review
+    rules:
+      - alert: OpenPrReviewWorkerDown
+        expr: up{job="open-pr-review-worker"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Worker metrics endpoint is down
+          description: Prometheus cannot scrape worker:9100. Reviews will queue and never run.
+
+      - alert: OpenPrReviewApiDown
+        expr: up{job="open-pr-review-api"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: API metrics endpoint is down
+
+      - alert: OpenPrReviewCodexQuota
+        expr: increase(open_pr_review_codex_attempts_total{result="CODEX_QUOTA"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: OpenAI quota exhausted
+          description: Codex returned CODEX_QUOTA. Top up https://platform.openai.com/settings/organization/billing/ — reviews will keep failing.
+
+      - alert: OpenPrReviewQueueNotDraining
+        expr: open_pr_review_arq_queue_jobs > 0 and open_pr_review_review_in_flight{status="running"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Jobs queued but no worker is running them
+          description: ARQ has waiting jobs and zero running review_runs. Check worker logs and `docker compose ps worker`.
+
+      - alert: OpenPrReviewStaleReviews
+        expr: open_pr_review_review_stale_in_flight > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Review runs stuck in pending/running
+          description: One or more review_runs have not updated for 15+ minutes. Worker crash, Codex hang, or dead ARQ job.

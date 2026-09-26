@@ -1,0 +1,152 @@
+"""Application settings: env secrets plus versioned YAML."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import AliasChoices, BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class GitHubYaml(BaseModel):
+    app_id: int = 0
+    installation_id: int = 0
+    allowed_repos: list[str] = Field(default_factory=list)
+
+
+class JiraProjectYaml(BaseModel):
+    rework_status: str = "In Progress"
+
+
+class JiraYaml(BaseModel):
+    base_url: str = ""
+    email: str = ""
+    projects: dict[str, JiraProjectYaml] = Field(default_factory=dict)
+
+
+class SlackYaml(BaseModel):
+    enabled: bool = False
+    channel: str = ""
+
+
+class DigestScheduleYaml(BaseModel):
+    enabled: bool = True
+    cron: str = "0 * * * *"
+
+
+class ScheduleYaml(BaseModel):
+    review_digest: DigestScheduleYaml = Field(default_factory=DigestScheduleYaml)
+
+
+class FeaturesYaml(BaseModel):
+    jira_comment: bool = True
+    jira_transition: bool = True
+    digest_enabled: bool = True
+
+
+class LanguageYaml(BaseModel):
+    summary: Literal["en", "ru"] = "en"
+    details: Literal["en", "ru"] = "en"
+
+
+class CodexYaml(BaseModel):
+    model: str = "gpt-5.6-sol"
+    prompt_file: str = ""
+    reasoning_effort: str = "medium"
+    sandbox: str = "read-only"
+    approval_policy: str = "never"
+    timeout_seconds: int = 600
+    max_files: int = 100
+    max_diff_lines: int = 20000
+    max_findings: int = 20
+    max_file_bytes: int = 524288
+
+
+class AppConfig(BaseModel):
+    github: GitHubYaml = Field(default_factory=GitHubYaml)
+    jira: JiraYaml = Field(default_factory=JiraYaml)
+    slack: SlackYaml = Field(default_factory=SlackYaml)
+    schedule: ScheduleYaml = Field(default_factory=ScheduleYaml)
+    features: FeaturesYaml = Field(default_factory=FeaturesYaml)
+    language: LanguageYaml = Field(default_factory=LanguageYaml)
+    codex: CodexYaml = Field(default_factory=CodexYaml)
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    database_url: str = "postgresql+asyncpg://review:review@localhost:5432/review"
+    redis_url: str = "redis://localhost:6379/0"
+    github_app_id: int = 0
+    github_app_private_key: str = ""
+    github_webhook_secret: str = ""
+    github_installation_id: int = 0
+    github_token: str = Field(default="", validation_alias=AliasChoices("GITHUB_TOKEN", "GITHUB_PAT"))
+    jira_base_url: str = ""
+    jira_email: str = ""
+    jira_api_token: str = ""
+    slack_bot_token: str = ""
+    openai_api_key: str = ""
+    review_api_key: str = ""
+    worker_max_jobs: int = 4
+    worker_job_timeout: int = 900
+    config_path: str = "config.yaml"
+    log_level: str = "INFO"
+    log_format: str = "text"
+    metrics_port: int = 9100
+    run_migrations: bool = False
+
+    def github_private_key_pem(self) -> str:
+        key = self.github_app_private_key.replace("\\n", "\n").strip()
+        if key.startswith("-----"):
+            return key
+        path = Path(key)
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+        return key
+
+
+def load_yaml_config(path: str | Path) -> AppConfig:
+    config_path = Path(path)
+    if not config_path.is_file():
+        return AppConfig()
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    return AppConfig.model_validate(data)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+@lru_cache
+def get_app_config() -> AppConfig:
+    settings = get_settings()
+    config = load_yaml_config(settings.config_path)
+    github = config.github.model_copy()
+    if settings.github_app_id:
+        github.app_id = settings.github_app_id
+    if settings.github_installation_id:
+        github.installation_id = settings.github_installation_id
+    jira = config.jira.model_copy()
+    if settings.jira_base_url:
+        jira.base_url = settings.jira_base_url.rstrip("/")
+    if settings.jira_email:
+        jira.email = settings.jira_email
+    return config.model_copy(update={"github": github, "jira": jira})
+
+
+def repo_allowed(full_name: str, config: AppConfig | None = None) -> bool:
+    cfg = config or get_app_config()
+    allow = [item.lower() for item in cfg.github.allowed_repos]
+    if not allow:
+        return True
+    return full_name.lower() in allow

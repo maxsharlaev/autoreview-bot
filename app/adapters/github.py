@@ -1,0 +1,242 @@
+"""GitHub REST adapter (App installation token or fine-grained PAT)."""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+import jwt
+
+from app.config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+
+API = "https://api.github.com"
+MARKER = "<!-- open-pr-review -->"
+
+
+class GitHubError(RuntimeError):
+    pass
+
+
+@dataclass
+class PullRequestInfo:
+    number: int
+    title: str
+    body: str
+    html_url: str
+    author: str
+    assignee: str | None
+    state: str
+    draft: bool
+    is_fork: bool
+    base_sha: str
+    head_sha: str
+    head_ref: str
+    base_ref: str
+    owner: str
+    repo: str
+    full_name: str
+
+
+@dataclass
+class ChangedFile:
+    path: str
+    status: str
+    patch: str
+    additions: int
+    deletions: int
+
+
+@dataclass
+class GitHubAppClient:
+    settings: Settings = field(default_factory=get_settings)
+    _token: str | None = None
+    _token_expires: float = 0.0
+    _installation_id: int = 0
+
+    def _personal_token(self) -> str:
+        return (self.settings.github_token or "").strip()
+
+    def _jwt(self) -> str:
+        now = int(time.time())
+        payload = {"iat": now - 60, "exp": now + 540, "iss": str(self.settings.github_app_id)}
+        return jwt.encode(payload, self.settings.github_private_key_pem(), algorithm="RS256")
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        token: str | None = None,
+        json: dict | None = None,
+        params: dict | None = None,
+        accept: str = "application/vnd.github+json",
+    ) -> httpx.Response:
+        headers = {
+            "Accept": accept,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "open-pr-review",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(method, url, headers=headers, json=json, params=params)
+        if response.status_code >= 400:
+            raise GitHubError(f"{method} {url} -> {response.status_code}: {response.text[:500]}")
+        return response
+
+    async def resolve_installation_id(self, owner: str, repo: str) -> int:
+        if self._installation_id:
+            return self._installation_id
+        configured = self.settings.github_installation_id
+        if configured:
+            self._installation_id = configured
+            return configured
+        response = await self._request(
+            "GET",
+            f"{API}/repos/{owner}/{repo}/installation",
+            token=self._jwt(),
+        )
+        self._installation_id = int(response.json()["id"])
+        return self._installation_id
+
+    async def installation_token(self, owner: str, repo: str) -> str:
+        pat = self._personal_token()
+        if pat:
+            return pat
+        if self._token and time.time() < self._token_expires - 60:
+            return self._token
+        if not self.settings.github_app_id or not self.settings.github_app_private_key.strip():
+            raise GitHubError("GitHub credentials missing: set GITHUB_TOKEN (PAT) or GitHub App id + private key")
+        installation_id = await self.resolve_installation_id(owner, repo)
+        response = await self._request(
+            "POST",
+            f"{API}/app/installations/{installation_id}/access_tokens",
+            token=self._jwt(),
+        )
+        data = response.json()
+        self._token = data["token"]
+        self._token_expires = time.time() + 3500
+        return self._token
+
+    async def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestInfo:
+        token = await self.installation_token(owner, repo)
+        data = (await self._request("GET", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token)).json()
+        head_repo = data.get("head", {}).get("repo") or {}
+        base_repo = data.get("base", {}).get("repo") or {}
+        is_fork = bool(head_repo.get("fork")) or head_repo.get("full_name") != base_repo.get("full_name")
+        assignee = None
+        if data.get("assignee"):
+            assignee = data["assignee"].get("login")
+        elif data.get("assignees"):
+            assignee = data["assignees"][0].get("login")
+        return PullRequestInfo(
+            number=data["number"],
+            title=data.get("title") or "",
+            body=data.get("body") or "",
+            html_url=data.get("html_url") or "",
+            author=(data.get("user") or {}).get("login") or "",
+            assignee=assignee,
+            state=data.get("state") or "open",
+            draft=bool(data.get("draft")),
+            is_fork=is_fork,
+            base_sha=data.get("base", {}).get("sha") or "",
+            head_sha=data.get("head", {}).get("sha") or "",
+            head_ref=data.get("head", {}).get("ref") or "",
+            base_ref=data.get("base", {}).get("ref") or "",
+            owner=owner,
+            repo=repo,
+            full_name=f"{owner}/{repo}",
+        )
+
+    async def list_files(self, owner: str, repo: str, number: int) -> list[ChangedFile]:
+        token = await self.installation_token(owner, repo)
+        files: list[ChangedFile] = []
+        page = 1
+        while True:
+            response = await self._request(
+                "GET",
+                f"{API}/repos/{owner}/{repo}/pulls/{number}/files",
+                token=token,
+                params={"per_page": 100, "page": page},
+            )
+            batch = response.json()
+            if not batch:
+                break
+            for item in batch:
+                files.append(
+                    ChangedFile(
+                        path=item.get("filename") or "",
+                        status=item.get("status") or "modified",
+                        patch=item.get("patch") or "",
+                        additions=int(item.get("additions") or 0),
+                        deletions=int(item.get("deletions") or 0),
+                    )
+                )
+            if len(batch) < 100:
+                break
+            page += 1
+        return files
+
+    async def collaborator_permission(self, owner: str, repo: str, username: str) -> str:
+        token = await self.installation_token(owner, repo)
+        try:
+            response = await self._request(
+                "GET",
+                f"{API}/repos/{owner}/{repo}/collaborators/{username}/permission",
+                token=token,
+            )
+        except GitHubError:
+            return "none"
+        return (response.json().get("permission") or "none").lower()
+
+    async def upsert_sticky_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+        token = await self.installation_token(owner, repo)
+        page = 1
+        comment_id: int | None = None
+        while True:
+            response = await self._request(
+                "GET",
+                f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
+                token=token,
+                params={"per_page": 100, "page": page},
+            )
+            batch = response.json()
+            if not batch:
+                break
+            for comment in batch:
+                if MARKER in (comment.get("body") or ""):
+                    comment_id = int(comment["id"])
+                    break
+            if comment_id or len(batch) < 100:
+                break
+            page += 1
+        payload = {"body": body}
+        if comment_id:
+            await self._request(
+                "PATCH",
+                f"{API}/repos/{owner}/{repo}/issues/comments/{comment_id}",
+                token=token,
+                json=payload,
+            )
+            return
+        await self._request(
+            "POST",
+            f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
+            token=token,
+            json=payload,
+        )
+
+    async def list_open_pulls(self, owner: str, repo: str) -> list[dict[str, Any]]:
+        token = await self.installation_token(owner, repo)
+        response = await self._request(
+            "GET",
+            f"{API}/repos/{owner}/{repo}/pulls",
+            token=token,
+            params={"state": "open", "per_page": 100},
+        )
+        return response.json()

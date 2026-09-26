@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "reviewed_head_sha",
+    "previous_reviewed_head_sha",
+    "summary",
+    "task_alignment",
+    "previous_findings",
+    "findings",
+    "coverage"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "reviewed_head_sha": { "type": "string", "minLength": 7 },
+    "previous_reviewed_head_sha": { "type": ["string", "null"] },
+    "summary": { "type": "string" },
+    "task_alignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue_key", "status", "unmet_acceptance_criteria"],
+      "properties": {
+        "issue_key": { "type": ["string", "null"] },
+        "status": { "type": "string", "enum": ["satisfied", "unclear", "unmet"] },
+        "unmet_acceptance_criteria": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "previous_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "evidence", "path", "line"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["resolved", "still_open", "regressed", "obsolete", "needs_human"]
+          },
+          "evidence": { "type": "string" },
+          "path": { "type": "string" },
+          "line": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "severity",
+          "confidence",
+          "category",
+          "path",
+          "line",
+          "title",
+          "scenario",
+          "evidence",
+          "recommendation",
+          "blocking_candidate"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "category": { "type": "string" },
+          "path": { "type": "string" },
+          "line": { "type": ["integer", "null"] },
+          "title": { "type": "string" },
+          "scenario": { "type": "string" },
+          "evidence": { "type": "string" },
+          "recommendation": { "type": "string" },
+          "blocking_candidate": { "type": "boolean" }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files_total", "files_reviewed", "truncated", "skipped_paths"],
+      "properties": {
+        "files_total": { "type": "integer", "minimum": 0 },
+        "files_reviewed": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "skipped_paths": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

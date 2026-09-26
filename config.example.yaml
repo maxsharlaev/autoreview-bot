@@ -1,0 +1,43 @@
+github:
+  app_id: 0
+  installation_id: 0
+  allowed_repos:
+    - example-org/example-repo
+    # - example-org/another-repo
+
+jira:
+  base_url: https://example.atlassian.net
+  email: ai-review@example.com
+  projects:
+    ABC:
+      rework_status: "In Progress"
+
+slack:
+  enabled: false
+  channel: "#ai-review"
+
+schedule:
+  review_digest:
+    enabled: true
+    cron: "0 * * * *"
+
+features:
+  jira_comment: true
+  jira_transition: true
+  digest_enabled: true
+
+language:
+  summary: en
+  details: en
+
+codex:
+  model: gpt-5.6-sol
+  prompt_file: "" # optional: prompts/local/review.md (relative to the service working directory)
+  reasoning_effort: medium
+  sandbox: read-only
+  approval_policy: never
+  timeout_seconds: 600
+  max_files: 100
+  max_diff_lines: 20000
+  max_findings: 20
+  max_file_bytes: 524288

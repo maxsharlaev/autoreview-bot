@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: review
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+      POSTGRES_DB: review
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U review -d review"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      target: api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://review:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/review"
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://review:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/review"
+      REDIS_URL: redis://redis:6379/0
+      OPEN_PR_REVIEW_SERVICE: api
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      target: worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://review:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/review"
+      REDIS_URL: redis://redis:6379/0
+      OPEN_PR_REVIEW_SERVICE: worker
+      METRICS_PORT: "9100"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./prompts:/app/prompts:ro
+    ports:
+      - "127.0.0.1:9100:9100"
+    # Docker's default seccomp/AppArmor block bubblewrap (CLONE_NEWUSER). Codex
+    # still sandboxes itself with bwrap; this only relaxes the outer profile.
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
