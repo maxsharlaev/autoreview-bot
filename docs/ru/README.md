@@ -7,5 +7,6 @@
 - [GitHub App, PAT и секреты](GITHUB_SETUP.md)
 - [Эксплуатация](OPERATIONS.md)
 - [Роадмап](ROADMAP.md)
+- [Черновик описания PR](PR_DESCRIPTION.md)
 
 Наблюдаемость и чеклист публикации пока доступны [на английском](../OBSERVABILITY.md) и [на английском](../PUBLIC_RELEASE_CHECKLIST.md).

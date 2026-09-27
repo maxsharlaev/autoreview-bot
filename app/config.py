@@ -52,6 +52,12 @@ class LanguageYaml(BaseModel):
     details: Literal["en", "ru"] = "en"
 
 
+class PrDescriptionYaml(BaseModel):
+    enabled: bool = False
+    mode: Literal["comment", "fill_empty", "append"] = "comment"
+    prompt_file: str = ""
+
+
 class CodexYaml(BaseModel):
     model: str = "gpt-5.6-sol"
     prompt_file: str = ""
@@ -72,6 +78,7 @@ class AppConfig(BaseModel):
     schedule: ScheduleYaml = Field(default_factory=ScheduleYaml)
     features: FeaturesYaml = Field(default_factory=FeaturesYaml)
     language: LanguageYaml = Field(default_factory=LanguageYaml)
+    pr_description: PrDescriptionYaml = Field(default_factory=PrDescriptionYaml)
     codex: CodexYaml = Field(default_factory=CodexYaml)
 
 

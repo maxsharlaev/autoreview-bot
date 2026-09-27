@@ -1,0 +1,176 @@
+"""Build, validate, and safely publish an optional PR description draft."""
+
+from __future__ import annotations
+
+import hashlib
+import html
+import json
+import re
+from pathlib import Path
+from typing import Any, Literal
+
+import jsonschema
+
+from app.adapters.github import ChangedFile
+from app.adapters.jira import JiraIssue
+from app.paths import data_file
+
+COMMENT_MARKER = "<!-- autoreview-bot:pr-description -->"
+BLOCK_END = "<!-- autoreview-bot:pr-description:end -->"
+_BLOCK_START = "<!-- autoreview-bot:pr-description:start sha256="
+_COMMENT_PATTERN = re.compile(
+    r"<!-- autoreview-bot:pr-description -->\n"
+    r"<!-- autoreview-bot:pr-description-sha256:([0-9a-f]{64}) -->\n\n"
+)
+_BLOCK_PATTERN = re.compile(
+    r"<!-- autoreview-bot:pr-description:start sha256=([0-9a-f]{64}) -->\n(.*?)\n"
+    r"<!-- autoreview-bot:pr-description:end -->",
+    re.DOTALL,
+)
+_HEADINGS = {
+    "en": ("Summary", "Changes", "Linked task", "Testing", "Notes / risks"),
+    "ru": ("Кратко", "Изменения", "Связанная задача", "Проверка", "Примечания и риски"),
+}
+
+
+def _untrusted(tag: str, text: str, limit: int) -> str:
+    value = (text or "")[:limit].replace(f"</{tag}>", "")
+    return f"<{tag}>\n{value}\n</{tag}>"
+
+
+def build_pr_description_context(
+    *,
+    title: str,
+    body: str,
+    head_ref: str,
+    base_sha: str,
+    head_sha: str,
+    files: list[ChangedFile],
+    commit_messages: list[str],
+    jira_issue: JiraIssue | None,
+    language: Literal["en", "ru"],
+    prompt_file: str = "",
+) -> str:
+    custom = prompt_file.strip()
+    prompt_path = Path(custom).expanduser() if custom else data_file("prompts", "pr_description.md")
+    if custom and not prompt_path.is_file():
+        raise FileNotFoundError(f"PR description prompt file does not exist: {prompt_path}")
+    instructions = prompt_path.read_text(encoding="utf-8").replace(
+        "{{details_language}}", {"en": "English", "ru": "Russian"}[language]
+    )
+
+    areas: dict[str, list[int]] = {}
+    for item in files:
+        area = item.path.split("/", 1)[0][:100] or "root"
+        counts = areas.setdefault(area, [0, 0, 0])
+        counts[0] += 1
+        counts[1] += item.additions
+        counts[2] += item.deletions
+    area_lines = [f"{name}: {count} files, +{added}/-{removed}" for name, (count, added, removed) in areas.items()]
+    file_lines = [f"{item.status} {item.path[:500]} (+{item.additions}/-{item.deletions})" for item in files[:100]]
+    file_summary = "\n".join(
+        [
+            f"total_files: {len(files)}",
+            f"total_additions: {sum(item.additions for item in files)}",
+            f"total_deletions: {sum(item.deletions for item in files)}",
+            "areas:",
+            *area_lines[:50],
+            "files:",
+            *file_lines,
+            f"files_truncated: {str(len(files) > 100).lower()}",
+        ]
+    )
+    commits = "\n".join(message[:500] for message in commit_messages[:100]) or "none"
+    issue_text = "none"
+    if jira_issue is not None:
+        issue_text = (
+            f"key: {jira_issue.key}\nsummary: {jira_issue.summary}\n"
+            f"acceptance_criteria: {jira_issue.acceptance_criteria}"
+        )
+    return "\n\n".join(
+        [
+            instructions,
+            f"base_sha: {base_sha}",
+            f"head_sha: {head_sha}",
+            _untrusted("untrusted_pr_title", title, 1000),
+            _untrusted("untrusted_pr_body", body, 6000),
+            _untrusted("untrusted_branch", head_ref, 500),
+            _untrusted("untrusted_commit_messages", commits, 50000),
+            _untrusted("untrusted_diff_summary", file_summary, 50000),
+            _untrusted("untrusted_jira_issue", issue_text, 6000),
+        ]
+    )
+
+
+def validate_pr_description(payload: dict[str, Any]) -> dict[str, str]:
+    schema = json.loads(data_file("schemas", "pr_description_output.json").read_text(encoding="utf-8"))
+    jsonschema.validate(payload, schema)
+    return payload
+
+
+def _plain_text(value: str) -> str:
+    cleaned = "".join(char for char in value if char == "\n" or ord(char) >= 32).strip()
+    cleaned = html.escape(cleaned, quote=False)
+    cleaned = re.sub(r"([\\`*_\[\]()#!>|~])", r"\\\1", cleaned)
+    return cleaned.replace("@", "@\u200b")
+
+
+def render_pr_description(payload: dict[str, str], *, language: Literal["en", "ru"], linked_task: bool) -> str:
+    headings = _HEADINGS[language]
+    fields = ("summary", "changes", "linked_task", "testing", "notes_risks")
+    parts = []
+    for name, heading in zip(fields, headings, strict=True):
+        if name == "linked_task" and (not linked_task or not payload[name].strip()):
+            continue
+        parts.append(f"## {heading}\n\n{_plain_text(payload[name])}")
+    return "\n\n".join(parts).strip()
+
+
+def render_pr_description_comment(draft: str) -> str:
+    checksum = hashlib.sha256(draft.encode("utf-8")).hexdigest()
+    return f"{COMMENT_MARKER}\n<!-- autoreview-bot:pr-description-sha256:{checksum} -->\n\n{draft}\n"
+
+
+def description_comment_is_intact(body: str) -> bool:
+    match = _COMMENT_PATTERN.match(body)
+    if match is None:
+        return False
+    content = body[match.end() :].rstrip("\n")
+    return hashlib.sha256(content.encode("utf-8")).hexdigest() == match.group(1)
+
+
+def _managed_block(draft: str) -> str:
+    checksum = hashlib.sha256(draft.encode("utf-8")).hexdigest()
+    return f"{_BLOCK_START}{checksum} -->\n{draft}\n{BLOCK_END}"
+
+
+def _normalize_template(text: str) -> str:
+    return text.replace("\r\n", "\n").strip()
+
+
+def plan_pr_body_update(
+    body: str,
+    draft: str,
+    *,
+    mode: Literal["fill_empty", "append"],
+    template: str | None = None,
+) -> str | None:
+    """Return a safe new body, or None when author changes must be left alone."""
+    matches = list(_BLOCK_PATTERN.finditer(body))
+    if len(matches) == 1:
+        match = matches[0]
+        existing = match.group(2)
+        if hashlib.sha256(existing.encode("utf-8")).hexdigest() != match.group(1):
+            return None
+        outside = body[: match.start()] + body[match.end() :]
+        if mode == "fill_empty" and outside.strip():
+            return None
+        return body[: match.start()] + _managed_block(draft) + body[match.end() :]
+    if matches or _BLOCK_START in body or BLOCK_END in body:
+        return None
+
+    if mode == "fill_empty":
+        if body.strip() and (template is None or _normalize_template(body) != _normalize_template(template)):
+            return None
+        return _managed_block(draft)
+    return f"{body}\n\n{_managed_block(draft)}" if body else _managed_block(draft)

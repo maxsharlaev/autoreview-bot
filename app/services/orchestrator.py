@@ -11,8 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.adapters.github import GitHubAppClient, GitHubError
-from app.adapters.jira import JiraClient, JiraError
+from app.adapters.github import ChangedFile, GitHubAppClient, GitHubError, PullRequestInfo
+from app.adapters.jira import JiraClient, JiraError, JiraIssue
 from app.config import AppConfig, Settings, get_app_config, get_settings
 from app.metrics import record_review_finished
 from app.models import Finding, FindingTransition, PullRequest, ReviewRun, TaskSnapshot
@@ -34,6 +34,15 @@ from app.services.constants import (
 from app.services.context_builder import PreviousFinding, build_context
 from app.services.git_clone import GitCloneError, cleanup_checkout, clone_head
 from app.services.issue_key import extract_issue_key
+from app.services.pr_description import (
+    COMMENT_MARKER,
+    build_pr_description_context,
+    description_comment_is_intact,
+    plan_pr_body_update,
+    render_pr_description,
+    render_pr_description_comment,
+    validate_pr_description,
+)
 from app.services.publisher import Publisher, empty_verified
 from app.services.verifier import FindingView, PreviousFindingView, VerifiedReview, parse_json_payload, verify_review
 
@@ -107,12 +116,14 @@ async def run_review(
     progress.event(f"diff files={len(files)} issue_key={issue_key or 'none'}")
 
     jira_text = None
+    jira_issue: JiraIssue | None = None
     jira_warning = None
     jira_status = None
     if issue_key:
         try:
             if jira.enabled() and jira.project_allowed(issue_key):
                 issue = await jira.get_issue(issue_key)
+                jira_issue = issue
                 jira_status = issue.status
                 jira_text = (
                     f"key: {issue.key}\n"
@@ -291,6 +302,23 @@ async def run_review(
                 error_code=error_code,
             )
             return await _fail(session, run, started, error_code)
+        if config.pr_description.enabled:
+            try:
+                await _publish_pr_description(
+                    github=github,
+                    codex_fn=codex_fn,
+                    checkout=checkout,
+                    info=info,
+                    files=files,
+                    jira_issue=jira_issue,
+                    config=config,
+                    settings=settings,
+                )
+                progress.event("PR description step finished")
+            except Exception:
+                # Description drafting is optional; its failure must not discard the code review.
+                logger.exception("PR description step failed for %s#%s", pr.repository.full_name, pr.number)
+                progress.event("PR description step failed; review continues")
     finally:
         if checkout is not None:
             cleanup_checkout(checkout)
@@ -322,6 +350,81 @@ async def run_review(
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
     return await _complete(session, run, started, None, verified, config, context.prompt_version)
+
+
+async def _publish_pr_description(
+    *,
+    github: GitHubAppClient,
+    codex_fn,
+    checkout,
+    info: PullRequestInfo,
+    files: list[ChangedFile],
+    jira_issue: JiraIssue | None,
+    config: AppConfig,
+    settings: Settings,
+) -> None:
+    current = await github.get_pull_request(info.owner, info.repo, info.number)
+    if current.head_sha != info.head_sha or current.state != "open" or current.draft or current.is_fork:
+        logger.info("PR description skipped: PR head or eligibility changed")
+        return
+    commits = await github.list_pull_commit_messages(info.owner, info.repo, info.number)
+    prompt = build_pr_description_context(
+        title=current.title,
+        body=current.body,
+        head_ref=current.head_ref,
+        base_sha=current.base_sha,
+        head_sha=current.head_sha,
+        files=files,
+        commit_messages=commits,
+        jira_issue=jira_issue,
+        language=config.language.details,
+        prompt_file=config.pr_description.prompt_file,
+    )
+    schema_path = checkout / ".open-pr-review-pr-description-schema.json"
+    output_path = checkout / ".open-pr-review-pr-description-out.json"
+    shutil.copyfile(data_file("schemas", "pr_description_output.json"), schema_path)
+    raw = await codex_fn(
+        checkout=checkout,
+        prompt=prompt,
+        schema_path=schema_path,
+        output_path=output_path,
+        model=config.codex.model,
+        timeout_seconds=config.codex.timeout_seconds,
+        openai_api_key=settings.openai_api_key,
+        reasoning_effort=config.codex.reasoning_effort,
+        sandbox="read-only",
+        approval_policy="never",
+    )
+    payload = validate_pr_description(parse_json_payload(raw))
+    draft = render_pr_description(payload, language=config.language.details, linked_task=jira_issue is not None)
+    latest = await github.get_pull_request(info.owner, info.repo, info.number)
+    if latest.head_sha != info.head_sha or latest.state != "open" or latest.draft or latest.is_fork:
+        logger.info("PR description skipped: PR changed while generating")
+        return
+    mode = config.pr_description.mode
+    if mode == "comment":
+        await github.upsert_sticky_comment(
+            info.owner,
+            info.repo,
+            info.number,
+            render_pr_description_comment(draft),
+            marker=COMMENT_MARKER,
+            can_replace=description_comment_is_intact,
+        )
+        return
+    updated = plan_pr_body_update(latest.body, draft, mode=mode)
+    if updated is None and mode == "fill_empty" and latest.body.strip():
+        template = await github.get_matching_pr_template(info.owner, info.repo, latest.base_ref, latest.body)
+        updated = plan_pr_body_update(latest.body, draft, mode=mode, template=template)
+    if updated is None:
+        logger.info("PR description skipped: author text or managed block changed")
+        return
+    if updated != latest.body:
+        confirmation = await github.get_pull_request(info.owner, info.repo, info.number)
+        if confirmation.head_sha != info.head_sha or confirmation.state != "open" or confirmation.body != latest.body:
+            logger.info("PR description skipped: body changed before publication")
+            return
+        await github.update_pull_request_body(info.owner, info.repo, info.number, updated)
 
 
 def _sync_pr(pr: PullRequest, info) -> None:

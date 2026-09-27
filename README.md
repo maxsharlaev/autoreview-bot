@@ -68,6 +68,10 @@ Copy `config.example.yaml` → `config.yaml`. Restart the API and worker after c
 
 To replace the review instructions without editing the repository's default, copy `prompts/review.md` to `prompts/local/review.md`, edit the copy, and set `codex.prompt_file: prompts/local/review.md` in `config.yaml`. The custom file replaces the entire instruction section; keep the JSON schema, trust-boundary and output-language rules you need. `{{summary_language}}` and `{{details_language}}` are substituted from `language` settings. `prompts/local/` is excluded from Git and Docker build context, then mounted read-only into the worker by Compose. A missing configured file fails the review rather than silently using the default. Completed runs record a hash of custom instructions as `prompt_version`. Restart the worker after changing the YAML; edits to the prompt file itself are read on the next review.
 
+## Optional PR description draft
+
+Set `pr_description.enabled: true` in `config.yaml` to draft a description from the PR title, branch, commit messages, changed-file summary and an available Jira issue. The feature is off by default. `pr_description.mode` selects `comment` (a separate sticky suggestion), `fill_empty` (an empty body or unchanged default repository template), or `append` (a marked block below the author's text). Only an intact generated block is updated on later runs; edits by the author cause the update to be skipped. The model runs in the read-only sandbox and cannot write to GitHub directly. Draft sections use `language.details`; without Jira, the linked-task section is omitted. See [PR description configuration](docs/PR_DESCRIPTION.md).
+
 ## Manual local review (no GitHub webhook)
 
 The GitHub webhook is optional for a first test. Call the local API yourself. The worker still uses `GITHUB_TOKEN` (or GitHub App) to **read the PR, clone the SHA, and post the sticky comment** — you only skip GitHub delivering the event.

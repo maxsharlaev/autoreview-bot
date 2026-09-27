@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "changes", "linked_task", "testing", "notes_risks"],
+  "properties": {
+    "summary": { "type": "string", "pattern": "\\S", "maxLength": 2000 },
+    "changes": { "type": "string", "pattern": "\\S", "maxLength": 4000 },
+    "linked_task": { "type": "string", "maxLength": 2000 },
+    "testing": { "type": "string", "maxLength": 2000 },
+    "notes_risks": { "type": "string", "maxLength": 2000 }
+  }
+}

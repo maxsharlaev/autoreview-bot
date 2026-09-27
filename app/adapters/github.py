@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -182,6 +184,85 @@ class GitHubAppClient:
             page += 1
         return files
 
+    async def list_pull_commit_messages(self, owner: str, repo: str, number: int) -> list[str]:
+        token = await self.installation_token(owner, repo)
+        messages: list[str] = []
+        for page in range(1, 11):
+            response = await self._request(
+                "GET",
+                f"{API}/repos/{owner}/{repo}/pulls/{number}/commits",
+                token=token,
+                params={"per_page": 100, "page": page},
+            )
+            batch = response.json()
+            messages.extend(str((item.get("commit") or {}).get("message") or "") for item in batch)
+            if len(batch) < 100:
+                break
+        return messages[-100:]
+
+    async def get_default_pr_template(self, owner: str, repo: str, base_ref: str) -> str | None:
+        token = await self.installation_token(owner, repo)
+        for directory in (".github/", "", "docs/"):
+            for filename in ("pull_request_template.md", "PULL_REQUEST_TEMPLATE.md"):
+                path = directory + filename
+                try:
+                    response = await self._request(
+                        "GET",
+                        f"{API}/repos/{owner}/{repo}/contents/{path}",
+                        token=token,
+                        params={"ref": base_ref},
+                    )
+                except GitHubError as exc:
+                    if "-> 404:" in str(exc):
+                        continue
+                    raise
+                data = response.json()
+                if data.get("encoding") == "base64":
+                    return base64.b64decode(data.get("content") or "").decode("utf-8")
+        return None
+
+    async def get_matching_pr_template(self, owner: str, repo: str, base_ref: str, body: str) -> str | None:
+        normalized_body = body.replace("\r\n", "\n").strip()
+        default = await self.get_default_pr_template(owner, repo, base_ref)
+        if default is not None and default.replace("\r\n", "\n").strip() == normalized_body:
+            return default
+        token = await self.installation_token(owner, repo)
+        for directory in (".github/PULL_REQUEST_TEMPLATE", ".github/pull_request_template"):
+            try:
+                response = await self._request(
+                    "GET",
+                    f"{API}/repos/{owner}/{repo}/contents/{directory}",
+                    token=token,
+                    params={"ref": base_ref},
+                )
+            except GitHubError as exc:
+                if "-> 404:" in str(exc):
+                    continue
+                raise
+            entries = response.json()
+            if not isinstance(entries, list):
+                continue
+            for entry in entries[:30]:
+                if entry.get("type") != "file" or not str(entry.get("name") or "").lower().endswith(".md"):
+                    continue
+                file_response = await self._request(
+                    "GET",
+                    f"{API}/repos/{owner}/{repo}/contents/{entry['path']}",
+                    token=token,
+                    params={"ref": base_ref},
+                )
+                data = file_response.json()
+                if data.get("encoding") != "base64":
+                    continue
+                template = base64.b64decode(data.get("content") or "").decode("utf-8")
+                if template.replace("\r\n", "\n").strip() == normalized_body:
+                    return template
+        return None
+
+    async def update_pull_request_body(self, owner: str, repo: str, number: int, body: str) -> None:
+        token = await self.installation_token(owner, repo)
+        await self._request("PATCH", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, json={"body": body})
+
     async def collaborator_permission(self, owner: str, repo: str, username: str) -> str:
         token = await self.installation_token(owner, repo)
         try:
@@ -194,7 +275,16 @@ class GitHubAppClient:
             return "none"
         return (response.json().get("permission") or "none").lower()
 
-    async def upsert_sticky_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+    async def upsert_sticky_comment(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        body: str,
+        *,
+        marker: str = MARKER,
+        can_replace: Callable[[str], bool] | None = None,
+    ) -> None:
         token = await self.installation_token(owner, repo)
         page = 1
         comment_id: int | None = None
@@ -209,7 +299,10 @@ class GitHubAppClient:
             if not batch:
                 break
             for comment in batch:
-                if MARKER in (comment.get("body") or ""):
+                if marker in (comment.get("body") or ""):
+                    if can_replace is not None and not can_replace(comment.get("body") or ""):
+                        logger.info("Sticky comment was edited; leaving it unchanged")
+                        return
                     comment_id = int(comment["id"])
                     break
             if comment_id or len(batch) < 100:
