@@ -73,7 +73,10 @@ async def run_review(
 ) -> ReviewRun:
     settings = settings or get_settings()
     config = config or get_app_config()
-    github = github or GitHubAppClient(settings)
+    github = github or GitHubAppClient(
+        settings,
+        previous_comment_authors=tuple(config.github.previous_comment_authors),
+    )
     jira = jira or JiraClient(config)
     publisher = publisher or Publisher(github, jira=jira, config=config)
 

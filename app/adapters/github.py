@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import time
 from collections.abc import Callable
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 API = "https://api.github.com"
 MARKER = "<!-- open-pr-review -->"
+_COMMENT_AUTHOR_LOGINS: dict[str, str] = {}
 
 
 class GitHubError(RuntimeError):
@@ -63,10 +65,10 @@ class ChangedFile:
 @dataclass
 class GitHubAppClient:
     settings: Settings = field(default_factory=get_settings)
+    previous_comment_authors: tuple[str, ...] = ()
     _token: str | None = None
     _token_expires: float = 0.0
     _installation_id: int = 0
-    _comment_author_login: str | None = None
 
     def _personal_token(self) -> str:
         return (self.settings.github_token or "").strip()
@@ -299,9 +301,13 @@ class GitHubAppClient:
         return (response.json().get("permission") or "none").lower()
 
     async def comment_author_login(self, token: str) -> str:
-        if self._comment_author_login:
-            return self._comment_author_login
-        if self._personal_token():
+        personal = bool(self._personal_token())
+        cache_key = (
+            f"pat:{hashlib.sha256(token.encode()).hexdigest()}" if personal else f"app:{self.settings.github_app_id}"
+        )
+        if cached := _COMMENT_AUTHOR_LOGINS.get(cache_key):
+            return cached
+        if personal:
             data = (await self._request("GET", f"{API}/user", token=token)).json()
             login = str(data.get("login") or "")
         else:
@@ -310,7 +316,7 @@ class GitHubAppClient:
             login = f"{slug}[bot]" if slug else ""
         if not login:
             raise GitHubError("Could not identify GitHub comment author")
-        self._comment_author_login = login
+        _COMMENT_AUTHOR_LOGINS[cache_key] = login
         return login
 
     async def upsert_sticky_comment(
@@ -324,7 +330,14 @@ class GitHubAppClient:
         can_replace: Callable[[str], bool] | None = None,
     ) -> None:
         token = await self.installation_token(owner, repo)
-        author_login = (await self.comment_author_login(token)).casefold()
+        try:
+            author_login = (await self.comment_author_login(token)).casefold()
+        except Exception as exc:
+            logger.warning("Could not verify sticky comment author; using marker lookup: %s", exc)
+            author_login = None
+        trusted_logins = {login.casefold() for login in self.previous_comment_authors if login.strip()}
+        if author_login is not None:
+            trusted_logins.add(author_login)
         page = 1
         comment_id: int | None = None
         while True:
@@ -339,7 +352,7 @@ class GitHubAppClient:
                 break
             for comment in batch:
                 comment_login = str((comment.get("user") or {}).get("login") or "").casefold()
-                if comment_login != author_login:
+                if author_login is not None and comment_login not in trusted_logins:
                     continue
                 if marker in (comment.get("body") or ""):
                     if can_replace is not None and not can_replace(comment.get("body") or ""):

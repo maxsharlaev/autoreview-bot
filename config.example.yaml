@@ -4,6 +4,7 @@ github:
   allowed_repos:
     - example-org/example-repo
     # - example-org/another-repo
+  previous_comment_authors: [] # GitHub logins used by this bot before changing PAT or GitHub App
 
 jira:
   base_url: https://example.atlassian.net

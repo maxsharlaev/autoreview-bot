@@ -11,10 +11,9 @@ from app.services.size_guard import SIZE_SKIP_MARKER
 
 
 def _client() -> GitHubAppClient:
-    return GitHubAppClient(
-        settings=Settings.model_construct(github_token="test-token"),
-        _comment_author_login="review-bot",
-    )
+    client = GitHubAppClient(settings=Settings.model_construct(github_token="test-token"))
+    client.comment_author_login = AsyncMock(return_value="review-bot")
+    return client
 
 
 def _comment(comment_id: int, body: str, author: str = "review-bot") -> dict:
@@ -89,23 +88,70 @@ async def test_own_comment_is_selected_after_foreign_marker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_comment_author_is_resolved_from_pat() -> None:
-    client = GitHubAppClient(settings=Settings.model_construct(github_token="test-token"))
+async def test_comment_author_is_cached_across_clients_for_pat() -> None:
+    client = GitHubAppClient(settings=Settings.model_construct(github_token="cache-test-token"))
     client._request = AsyncMock(return_value=_response({"login": "review-bot"}))
-    assert await client.comment_author_login("test-token") == "review-bot"
+    assert await client.comment_author_login("cache-test-token") == "review-bot"
     assert client._request.await_args.args == ("GET", "https://api.github.com/user")
-    assert await client.comment_author_login("test-token") == "review-bot"
+    next_client = GitHubAppClient(settings=Settings.model_construct(github_token="cache-test-token"))
+    next_client._request = AsyncMock(side_effect=AssertionError("unexpected identity request"))
+    assert await next_client.comment_author_login("cache-test-token") == "review-bot"
     assert client._request.await_count == 1
+    next_client._request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_comment_author_is_resolved_from_github_app() -> None:
-    client = GitHubAppClient(settings=Settings.model_construct(github_token=""))
+    client = GitHubAppClient(settings=Settings.model_construct(github_token="", github_app_id=8971))
     client._jwt = lambda: "app-jwt"
     client._request = AsyncMock(return_value=_response({"slug": "review-app"}))
     assert await client.comment_author_login("installation-token") == "review-app[bot]"
     assert client._request.await_args.args == ("GET", "https://api.github.com/app")
     assert client._request.await_args.kwargs["token"] == "app-jwt"
+    next_client = GitHubAppClient(settings=Settings.model_construct(github_token="", github_app_id=8971))
+    next_client._request = AsyncMock(side_effect=AssertionError("unexpected identity request"))
+    assert await next_client.comment_author_login("another-installation-token") == "review-app[bot]"
+    next_client._request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_previous_comment_author_is_reused_after_credentials_change() -> None:
+    client = GitHubAppClient(
+        settings=Settings.model_construct(github_token="new-token"),
+        previous_comment_authors=("old-bot",),
+    )
+    client.comment_author_login = AsyncMock(return_value="new-bot")
+    client._request = AsyncMock(
+        side_effect=[
+            _response([_comment(42, render_pr_description_comment("old"), author="old-bot")]),
+            _response({}),
+        ]
+    )
+    await client.upsert_sticky_comment(
+        "org",
+        "repo",
+        7,
+        render_pr_description_comment("new"),
+        marker=COMMENT_MARKER,
+        can_replace=description_comment_is_intact,
+    )
+    assert client._request.await_args.args[:2] == ("PATCH", "https://api.github.com/repos/org/repo/issues/comments/42")
+
+
+@pytest.mark.asyncio
+async def test_identity_lookup_failure_uses_marker_and_logs_warning(caplog) -> None:
+    client = GitHubAppClient(settings=Settings.model_construct(github_token="failure-token"))
+    client._request = AsyncMock(
+        side_effect=[
+            GitHubError("identity unavailable"),
+            _response([_comment(42, "<!-- open-pr-review -->", author="old-bot")]),
+            _response({}),
+        ]
+    )
+    with caplog.at_level("WARNING"):
+        await client.upsert_sticky_comment("org", "repo", 7, "<!-- open-pr-review -->\nUpdated")
+    assert "using marker lookup" in caplog.text
+    assert client._request.await_args.args[:2] == ("PATCH", "https://api.github.com/repos/org/repo/issues/comments/42")
 
 
 @pytest.mark.asyncio
