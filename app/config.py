@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class GitHubYaml(BaseModel):
@@ -55,9 +59,35 @@ class LanguageYaml(BaseModel):
 class PrDescriptionYaml(BaseModel):
     enabled: bool = False
     mode: Literal["comment", "fill_empty", "append"] = "comment"
-    title_mode: Literal["off", "always", "when_invalid_or_inconsistent"] = "off"
+    title_mode: Literal["off", "until_human_edit", "when_invalid_or_inconsistent"] = "off"
     check_title_relevance: bool = True
+    timeout_seconds: int = Field(default=180, gt=0, le=600)
+    max_commit_messages: int = Field(default=250, gt=0)
     prompt_file: str = ""
+
+    @field_validator("title_mode", mode="before")
+    @classmethod
+    def normalize_title_mode(cls, value: object) -> object:
+        if value is False:
+            return "off"
+        if value == "always":
+            logger.warning("pr_description.title_mode=always is deprecated; use until_human_edit")
+            return "until_human_edit"
+        return value
+
+
+class PrTextYaml(BaseModel):
+    language: str | None = None
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        code = value.strip().lower()
+        if code != "auto" and not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*", code):
+            raise ValueError("pr_text.language must be 'auto' or a BCP 47 language code such as en, ru, fr, or pt-BR")
+        return code
 
 
 class CodexYaml(BaseModel):
@@ -81,6 +111,7 @@ class AppConfig(BaseModel):
     features: FeaturesYaml = Field(default_factory=FeaturesYaml)
     language: LanguageYaml = Field(default_factory=LanguageYaml)
     pr_description: PrDescriptionYaml = Field(default_factory=PrDescriptionYaml)
+    pr_text: PrTextYaml = Field(default_factory=PrTextYaml)
     codex: CodexYaml = Field(default_factory=CodexYaml)
 
 

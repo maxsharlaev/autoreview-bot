@@ -44,6 +44,16 @@ async def test_commit_messages_are_loaded_from_pr() -> None:
 
 
 @pytest.mark.asyncio
+async def test_commit_messages_paginate_without_fixed_page_cap() -> None:
+    client = _client()
+    full_page = [{"commit": {"message": f"feat: item {i}"}} for i in range(100)]
+    client._request = AsyncMock(side_effect=[_response(full_page)] * 11 + [_response([])])
+    messages = await client.list_pull_commit_messages("org", "repo", 7)
+    assert len(messages) == 1100
+    assert client._request.await_count == 12
+
+
+@pytest.mark.asyncio
 async def test_default_template_is_read_from_base_branch() -> None:
     client = _client()
     encoded = base64.b64encode(b"## Summary\n\nFill me in").decode()
@@ -55,8 +65,16 @@ async def test_default_template_is_read_from_base_branch() -> None:
 @pytest.mark.asyncio
 async def test_missing_template_is_not_treated_as_author_text() -> None:
     client = _client()
-    client._request = AsyncMock(side_effect=GitHubError("GET template -> 404: Not Found"))
+    client._request = AsyncMock(side_effect=GitHubError("GET template -> 404: Not Found", status_code=404))
     assert await client.get_default_pr_template("org", "repo", "main") is None
+
+
+@pytest.mark.asyncio
+async def test_template_error_with_404_text_but_other_status_is_not_ignored() -> None:
+    client = _client()
+    client._request = AsyncMock(side_effect=GitHubError("body says 404", status_code=403))
+    with pytest.raises(GitHubError):
+        await client.get_default_pr_template("org", "repo", "main")
 
 
 @pytest.mark.asyncio

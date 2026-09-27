@@ -33,9 +33,14 @@ language:
 pr_description:
   enabled: false
   mode: comment # comment | fill_empty | append
-  title_mode: "off" # off | always | when_invalid_or_inconsistent
+  title_mode: "off" # off | until_human_edit | when_invalid_or_inconsistent (quotes recommended)
   check_title_relevance: true # compare PR title with commit messages
+  timeout_seconds: 180 # total budget after review publication
+  max_commit_messages: 250 # older messages are omitted with a truncation notice
   prompt_file: "" # optional: prompts/local/pr_description.md
+
+pr_text:
+  language: auto # auto | en | ru; omit to use language.details
 
 codex:
   model: gpt-5.6-sol

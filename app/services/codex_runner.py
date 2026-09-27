@@ -345,6 +345,10 @@ async def run_codex(
         process.kill()
         record_codex_attempt(result=CODEX_TIMEOUT, duration_s=time.monotonic() - started)
         raise CodexRunnerError(CODEX_TIMEOUT, f"codex timed out after {timeout_seconds}s") from exc
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):

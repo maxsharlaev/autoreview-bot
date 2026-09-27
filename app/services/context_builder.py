@@ -8,6 +8,7 @@ from app.adapters.github import ChangedFile
 from app.config import CodexYaml, LanguageYaml
 from app.paths import data_file
 from app.services.constants import PROMPT_VERSION, SKIP_LOCKFILES, SKIP_SUFFIXES, SKIP_TOO_LARGE
+from app.services.untrusted import strip_boundary_tags
 
 
 @dataclass
@@ -54,7 +55,7 @@ def _clip(text: str, limit: int = 800) -> str:
 
 
 def _wrap(tag: str, value: str) -> str:
-    cleaned = (value or "").replace(f"</{tag}>", "")
+    cleaned = strip_boundary_tags(value or "")
     return f"<{tag}>\n{cleaned}\n</{tag}>"
 
 

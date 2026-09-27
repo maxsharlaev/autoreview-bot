@@ -13,3 +13,5 @@ Rules:
 - Assess whether the current PR title describes the intent evident in commit subjects and bodies. Use `uncertain` when commit evidence is weak or mixed; use `irrelevant` only for a clear mismatch or placeholder such as `Dev`. A branch name alone is not a useful title.
 - Suggest a specific, single-line PR title grounded in the commits and changed code. If the intent is unclear, return an empty `suggested_title` instead of guessing. Keep it under 120 characters and avoid mentions, links, HTML, and Markdown.
 - Explain the title assessment briefly in `title_reason`, using the same output language.
+- Use English for the conventional-commit type and scope in `suggested_title`; translate only the subject to {{details_language}}.
+- Set `output_language` to the requested language code (for example `en`, `ru`, or `fr`). All prose fields and the title subject must use that language.

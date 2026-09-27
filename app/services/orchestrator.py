@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 
 import jsonschema
 from sqlalchemy import select
@@ -43,8 +45,11 @@ from app.services.pr_description import (
     render_pr_description,
     render_pr_description_comment,
     render_title_relevance_note,
+    title_source_hash,
     validate_pr_description,
+    without_managed_block,
 )
+from app.services.pr_text_language import output_language_matches, resolve_pr_language
 from app.services.publisher import Publisher, empty_verified
 from app.services.verifier import FindingView, PreviousFindingView, VerifiedReview, parse_json_payload, verify_review
 
@@ -78,7 +83,7 @@ async def run_review(
             .where(ReviewRun.id == review_run_id)
         )
     ).scalar_one()
-    if run.status == "cancelled":
+    if run.status in {"cancelled", "completed", "skipped"}:
         return run
 
     pr = run.pull_request
@@ -113,7 +118,8 @@ async def run_review(
         return await _skip(session, run, started, SKIP_NO_WRITE)
 
     files = await github.list_files(owner, repo, pr.number)
-    issue_key = extract_issue_key(info.head_ref, info.title, info.body)
+    human_title = "" if pr.bot_title and info.title == pr.bot_title else info.title
+    issue_key = extract_issue_key(human_title, info.head_ref, without_managed_block(info.body))
     pr.issue_key = issue_key
     progress.event(f"diff files={len(files)} issue_key={issue_key or 'none'}")
 
@@ -304,24 +310,6 @@ async def run_review(
                 error_code=error_code,
             )
             return await _fail(session, run, started, error_code)
-        if config.pr_description.enabled:
-            try:
-                await _publish_pr_description(
-                    github=github,
-                    codex_fn=codex_fn,
-                    checkout=checkout,
-                    info=info,
-                    files=files,
-                    jira_issue=jira_issue,
-                    config=config,
-                    settings=settings,
-                    pr=pr,
-                )
-                progress.event("PR description step finished")
-            except Exception:
-                # Description drafting is optional; its failure must not discard the code review.
-                logger.exception("PR description step failed for %s#%s", pr.repository.full_name, pr.number)
-                progress.event("PR description step failed; review continues")
     finally:
         if checkout is not None:
             cleanup_checkout(checkout)
@@ -352,7 +340,88 @@ async def run_review(
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
-    return await _complete(session, run, started, None, verified, config, context.prompt_version)
+    return await _complete_then_describe(
+        session=session,
+        run=run,
+        started=started,
+        verified=verified,
+        config=config,
+        prompt_version=context.prompt_version,
+        progress=progress,
+        description_step=lambda: _run_pr_description_after_review(
+            github=github,
+            codex_fn=codex_fn,
+            info=info,
+            files=files,
+            jira_issue=jira_issue,
+            config=config,
+            settings=settings,
+            pr=pr,
+        ),
+    )
+
+
+async def _complete_then_describe(
+    *,
+    session: AsyncSession,
+    run: ReviewRun,
+    started: float,
+    verified: VerifiedReview,
+    config: AppConfig,
+    prompt_version: str,
+    progress: ReviewProgress,
+    description_step: Callable[[], Awaitable[None]],
+) -> ReviewRun:
+    completed = await _complete(session, run, started, None, verified, config, prompt_version)
+    if not config.pr_description.enabled:
+        return completed
+    try:
+        await asyncio.wait_for(description_step(), timeout=config.pr_description.timeout_seconds)
+        await session.commit()
+        progress.event("PR description step finished")
+    except TimeoutError:
+        logger.warning("PR description step timed out after review publication")
+        progress.event("PR description step timed out; review remains published")
+    except Exception:
+        logger.exception("PR description step failed after review publication")
+        progress.event("PR description step failed; review remains published")
+    return completed
+
+
+async def _run_pr_description_after_review(
+    *,
+    github: GitHubAppClient,
+    codex_fn,
+    info: PullRequestInfo,
+    files: list[ChangedFile],
+    jira_issue: JiraIssue | None,
+    config: AppConfig,
+    settings: Settings,
+    pr: PullRequest,
+) -> None:
+    token = await github.installation_token(info.owner, info.repo)
+    checkout = await clone_head(
+        owner=info.owner,
+        repo=info.repo,
+        sha=info.head_sha,
+        token=token,
+        head_ref=info.head_ref or None,
+        pr_number=info.number,
+    )
+    try:
+        await _publish_pr_description(
+            github=github,
+            codex_fn=codex_fn,
+            checkout=checkout,
+            info=info,
+            files=files,
+            jira_issue=jira_issue,
+            config=config,
+            settings=settings,
+            pr=pr,
+        )
+    finally:
+        cleanup_checkout(checkout)
 
 
 async def _publish_pr_description(
@@ -372,6 +441,13 @@ async def _publish_pr_description(
         logger.info("PR description skipped: PR head or eligibility changed")
         return
     commits = await github.list_pull_commit_messages(info.owner, info.repo, info.number)
+    human_title = "" if pr is not None and pr.bot_title == current.title else current.title
+    language = resolve_pr_language(
+        config,
+        human_title=human_title,
+        human_body=without_managed_block(current.body),
+        commits=commits,
+    )
     prompt = build_pr_description_context(
         title=current.title,
         body=current.body,
@@ -381,26 +457,37 @@ async def _publish_pr_description(
         files=files,
         commit_messages=commits,
         jira_issue=jira_issue,
-        language=config.language.details,
+        language=language,
         prompt_file=config.pr_description.prompt_file,
+        max_commit_messages=config.pr_description.max_commit_messages,
+        commit_total=current.commits_count,
     )
     schema_path = checkout / ".open-pr-review-pr-description-schema.json"
     output_path = checkout / ".open-pr-review-pr-description-out.json"
     shutil.copyfile(data_file("schemas", "pr_description_output.json"), schema_path)
-    raw = await codex_fn(
-        checkout=checkout,
-        prompt=prompt,
-        schema_path=schema_path,
-        output_path=output_path,
-        model=config.codex.model,
-        timeout_seconds=config.codex.timeout_seconds,
-        openai_api_key=settings.openai_api_key,
-        reasoning_effort=config.codex.reasoning_effort,
-        sandbox="read-only",
-        approval_policy="never",
-    )
-    payload = validate_pr_description(parse_json_payload(raw))
-    draft = render_pr_description(payload, language=config.language.details, linked_task=jira_issue is not None)
+    payload = None
+    for attempt in range(2):
+        raw = await codex_fn(
+            checkout=checkout,
+            prompt=prompt,
+            schema_path=schema_path,
+            output_path=output_path,
+            model=config.codex.model,
+            timeout_seconds=config.codex.timeout_seconds,
+            openai_api_key=settings.openai_api_key,
+            reasoning_effort=config.codex.reasoning_effort,
+            sandbox="read-only",
+            approval_policy="never",
+        )
+        candidate = validate_pr_description(parse_json_payload(raw))
+        if output_language_matches(candidate, language):
+            payload = candidate
+            break
+        logger.warning("PR text language mismatch for %s#%s (attempt %s)", info.full_name, info.number, attempt + 1)
+    if payload is None:
+        logger.warning("PR description skipped after two language mismatches for %s#%s", info.full_name, info.number)
+        return
+    draft = render_pr_description(payload, language=language, linked_task=jira_issue is not None)
     latest = await github.get_pull_request(info.owner, info.repo, info.number)
     if (
         latest.head_sha != info.head_sha
@@ -418,6 +505,19 @@ async def _publish_pr_description(
         mode=config.pr_description.title_mode,
         check_relevance=config.pr_description.check_title_relevance,
         relevance=payload["title_relevance"],
+        bot_title=pr.bot_title if pr is not None else None,
+        source_unchanged=(
+            pr.bot_title_source_hash
+            == title_source_hash(
+                head_sha=info.head_sha,
+                commits=commits,
+                files=files,
+                jira_issue=jira_issue,
+                human_body=without_managed_block(latest.body),
+            )
+            if pr is not None
+            else False
+        ),
     )
     logger.info("PR title relevance for %s#%s: %s", info.full_name, info.number, payload["title_relevance"])
     title_updated = False
@@ -436,10 +536,18 @@ async def _publish_pr_description(
                 title_updated = True
                 if pr is not None:
                     pr.title = proposed_title
+                    pr.bot_title = proposed_title
+                    pr.bot_title_source_hash = title_source_hash(
+                        head_sha=info.head_sha,
+                        commits=commits,
+                        files=files,
+                        jira_issue=jira_issue,
+                        human_body=without_managed_block(latest.body),
+                    )
         else:
             logger.info("PR title update skipped: title or head changed before publication")
     if config.pr_description.check_title_relevance and payload["title_relevance"] == "irrelevant" and not title_updated:
-        draft += "\n\n" + render_title_relevance_note(payload["title_reason"], language=config.language.details)
+        draft += "\n\n" + render_title_relevance_note(payload["title_reason"], language=language)
     mode = config.pr_description.mode
     if mode == "comment":
         await github.upsert_sticky_comment(
@@ -464,6 +572,14 @@ async def _publish_pr_description(
             logger.info("PR description skipped: body changed before publication")
             return
         await github.update_pull_request_body(info.owner, info.repo, info.number, updated)
+        if pr is not None and title_updated:
+            pr.bot_title_source_hash = title_source_hash(
+                head_sha=info.head_sha,
+                commits=commits,
+                files=files,
+                jira_issue=jira_issue,
+                human_body=without_managed_block(updated),
+            )
 
 
 def _sync_pr(pr: PullRequest, info) -> None:

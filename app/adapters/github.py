@@ -21,7 +21,9 @@ MARKER = "<!-- open-pr-review -->"
 
 
 class GitHubError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass
@@ -42,6 +44,7 @@ class PullRequestInfo:
     owner: str
     repo: str
     full_name: str
+    commits_count: int = 0
 
 
 @dataclass
@@ -88,7 +91,9 @@ class GitHubAppClient:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.request(method, url, headers=headers, json=json, params=params)
         if response.status_code >= 400:
-            raise GitHubError(f"{method} {url} -> {response.status_code}: {response.text[:500]}")
+            raise GitHubError(
+                f"{method} {url} -> {response.status_code}: {response.text[:500]}", status_code=response.status_code
+            )
         return response
 
     async def resolve_installation_id(self, owner: str, repo: str) -> int:
@@ -153,6 +158,7 @@ class GitHubAppClient:
             owner=owner,
             repo=repo,
             full_name=f"{owner}/{repo}",
+            commits_count=int(data.get("commits") or 0),
         )
 
     async def list_files(self, owner: str, repo: str, number: int) -> list[ChangedFile]:
@@ -187,7 +193,8 @@ class GitHubAppClient:
     async def list_pull_commit_messages(self, owner: str, repo: str, number: int) -> list[str]:
         token = await self.installation_token(owner, repo)
         messages: list[str] = []
-        for page in range(1, 11):
+        page = 1
+        while True:
             response = await self._request(
                 "GET",
                 f"{API}/repos/{owner}/{repo}/pulls/{number}/commits",
@@ -198,7 +205,8 @@ class GitHubAppClient:
             messages.extend(str((item.get("commit") or {}).get("message") or "") for item in batch)
             if len(batch) < 100:
                 break
-        return messages[-100:]
+            page += 1
+        return messages
 
     async def get_default_pr_template(self, owner: str, repo: str, base_ref: str) -> str | None:
         token = await self.installation_token(owner, repo)
@@ -213,7 +221,7 @@ class GitHubAppClient:
                         params={"ref": base_ref},
                     )
                 except GitHubError as exc:
-                    if "-> 404:" in str(exc):
+                    if exc.status_code == 404:
                         continue
                     raise
                 data = response.json()
@@ -236,7 +244,7 @@ class GitHubAppClient:
                     params={"ref": base_ref},
                 )
             except GitHubError as exc:
-                if "-> 404:" in str(exc):
+                if exc.status_code == 404:
                     continue
                 raise
             entries = response.json()

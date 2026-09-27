@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,6 +15,8 @@ import jsonschema
 from app.adapters.github import ChangedFile
 from app.adapters.jira import JiraIssue
 from app.paths import data_file
+from app.services.issue_key import ISSUE_KEY_RE
+from app.services.untrusted import strip_boundary_tags
 
 COMMENT_MARKER = "<!-- autoreview-bot:pr-description -->"
 BLOCK_END = "<!-- autoreview-bot:pr-description:end -->"
@@ -26,6 +29,11 @@ _BLOCK_PATTERN = re.compile(
     r"<!-- autoreview-bot:pr-description:start sha256=([0-9a-f]{64}) -->\n(.*?)\n"
     r"<!-- autoreview-bot:pr-description:end -->",
     re.DOTALL,
+)
+_BOT_BLOCK = re.compile(
+    r"<!-- autoreview-bot:pr-description:start\b[^>]*-->.*?"
+    r"(?:<!-- autoreview-bot:pr-description:end -->|\Z)",
+    re.DOTALL | re.IGNORECASE,
 )
 _HEADINGS = {
     "en": ("Summary", "Changes", "Linked task", "Testing", "Notes / risks"),
@@ -45,10 +53,30 @@ _PLACEHOLDER_TITLES = {
     "pr",
     "pull request",
 }
+_CONVENTIONAL_TITLE = re.compile(r"^[a-z][a-z0-9-]*(?:\([a-z0-9._/-]+\))?!?: \S.+$")
+_TITLE_URL = re.compile(r"(?:://|\bmailto:|www\.|\b[a-z0-9-]+\.(?:com|org|net|io|dev|ru|ai|co)\b)", re.IGNORECASE)
+_LINK_DOMAIN = re.compile(r"\b([a-z0-9-]+)\.(com|org|net|io|dev|ru|ai|co)\b", re.IGNORECASE)
+
+
+def strip_format_controls(value: str) -> str:
+    return "".join(char for char in value if unicodedata.category(char) != "Cf")
+
+
+def title_source_hash(
+    *, head_sha: str, commits: list[str], files: list[ChangedFile], jira_issue: JiraIssue | None, human_body: str
+) -> str:
+    source = {
+        "head_sha": head_sha,
+        "commits": commits,
+        "files": [(item.path, item.status, item.additions, item.deletions) for item in files],
+        "jira": (jira_issue.key, jira_issue.summary) if jira_issue else None,
+        "human_body": human_body,
+    }
+    return hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def _untrusted(tag: str, text: str, limit: int) -> str:
-    value = (text or "")[:limit].replace(f"</{tag}>", "")
+    value = strip_boundary_tags((text or "")[:limit])
     return f"<{tag}>\n{value}\n</{tag}>"
 
 
@@ -62,16 +90,17 @@ def build_pr_description_context(
     files: list[ChangedFile],
     commit_messages: list[str],
     jira_issue: JiraIssue | None,
-    language: Literal["en", "ru"],
+    language: str,
     prompt_file: str = "",
+    max_commit_messages: int = 250,
+    commit_total: int | None = None,
 ) -> str:
     custom = prompt_file.strip()
     prompt_path = Path(custom).expanduser() if custom else data_file("prompts", "pr_description.md")
     if custom and not prompt_path.is_file():
         raise FileNotFoundError(f"PR description prompt file does not exist: {prompt_path}")
-    instructions = prompt_path.read_text(encoding="utf-8").replace(
-        "{{details_language}}", {"en": "English", "ru": "Russian"}[language]
-    )
+    language_name = {"en": "English", "ru": "Russian"}.get(language, f"language code {language}")
+    instructions = prompt_path.read_text(encoding="utf-8").replace("{{details_language}}", language_name)
 
     areas: dict[str, list[int]] = {}
     for item in files:
@@ -94,7 +123,11 @@ def build_pr_description_context(
             f"files_truncated: {str(len(files) > 100).lower()}",
         ]
     )
-    commits = "\n".join(message[:500] for message in commit_messages[:100]) or "none"
+    selected_commits = commit_messages[-max_commit_messages:]
+    commits = "\n".join(message[:500] for message in selected_commits) or "none"
+    total_commits = max(commit_total or 0, len(commit_messages))
+    commits_truncated = total_commits > len(selected_commits) or any(len(m) > 500 for m in selected_commits)
+    commits = f"total_commits: {total_commits}\ncommits_truncated: {str(commits_truncated).lower()}\n{commits}"
     issue_text = "none"
     if jira_issue is not None:
         issue_text = (
@@ -133,22 +166,35 @@ def plan_pr_title_update(
     suggested: str,
     *,
     head_ref: str,
-    mode: Literal["off", "always", "when_invalid_or_inconsistent"],
+    mode: Literal["off", "until_human_edit", "when_invalid_or_inconsistent"],
     check_relevance: bool,
     relevance: Literal["relevant", "irrelevant", "uncertain"],
+    bot_title: str | None = None,
+    source_unchanged: bool = False,
 ) -> str | None:
     if mode == "off":
         return None
-    candidate = suggested.strip()
+    branch_title = title.strip().casefold() == head_ref.strip().casefold()
+    editable = not title.strip() or branch_title
+    editable = editable or bool(bot_title and title == bot_title)
+    if not editable or (source_unchanged and bot_title == title):
+        return None
+    candidate = strip_format_controls(suggested).strip()
+    key = ISSUE_KEY_RE.search(title)
+    if key:
+        candidate_keys = ISSUE_KEY_RE.findall(candidate)
+        if any(candidate_key != key.group(1) for candidate_key in candidate_keys):
+            return None
+        if key.group(1) not in candidate_keys:
+            candidate += f" {key.group(1)}"
     if (
         not candidate
         or len(candidate) > 120
         or candidate == title.strip()
-        or title_is_invalid(candidate, head_ref)
+        or not _CONVENTIONAL_TITLE.fullmatch(candidate)
         or any(ord(char) < 32 for char in candidate)
         or any(char in candidate for char in ("@", "<", ">", "`", "[", "]"))
-        or "http://" in candidate.lower()
-        or "https://" in candidate.lower()
+        or _TITLE_URL.search(candidate)
     ):
         return None
     if mode == "when_invalid_or_inconsistent" and not (
@@ -159,29 +205,32 @@ def plan_pr_title_update(
 
 
 def _plain_text(value: str) -> str:
-    cleaned = "".join(char for char in value if char == "\n" or ord(char) >= 32).strip()
+    cleaned = strip_format_controls("".join(char for char in value if char == "\n" or ord(char) >= 32)).strip()
     cleaned = html.escape(cleaned, quote=False)
     cleaned = re.sub(r"([\\`*_\[\]()#!>|~])", r"\\\1", cleaned)
-    return cleaned.replace("@", "@\u200b")
+    cleaned = cleaned.replace("@", "\\@")
+    cleaned = re.sub(r"(?i)\b([a-z][a-z0-9+.-]*)://", r"\1&#58;//", cleaned)
+    cleaned = re.sub(r"(?i)\bwww\.", "www&#46;", cleaned)
+    return _LINK_DOMAIN.sub(r"\1&#46;\2", cleaned)
 
 
-def render_pr_description(payload: dict[str, str], *, language: Literal["en", "ru"], linked_task: bool) -> str:
-    headings = _HEADINGS[language]
+def render_pr_description(payload: dict[str, str], *, language: str, linked_task: bool) -> str:
+    headings = _HEADINGS.get(language, _HEADINGS["en"])
     fields = ("summary", "changes", "linked_task", "testing", "notes_risks")
     parts = []
     for name, heading in zip(fields, headings, strict=True):
-        if name == "linked_task" and (not linked_task or not payload[name].strip()):
+        if not payload[name].strip() or name == "linked_task" and not linked_task:
             continue
         parts.append(f"## {heading}\n\n{_plain_text(payload[name])}")
     return "\n\n".join(parts).strip()
 
 
-def render_title_relevance_note(reason: str, *, language: Literal["en", "ru"]) -> str:
-    heading = "Title check" if language == "en" else "Проверка заголовка"
+def render_title_relevance_note(reason: str, *, language: str) -> str:
+    heading = "Проверка заголовка" if language == "ru" else "Title check"
     fallback = (
-        "The PR title does not match the commit messages."
-        if language == "en"
-        else "Заголовок PR не соответствует коммитам."
+        "Заголовок PR не соответствует коммитам."
+        if language == "ru"
+        else "The PR title does not match the commit messages."
     )
     return f"## {heading}\n\n{_plain_text(reason or fallback)}"
 
@@ -208,6 +257,12 @@ def _normalize_template(text: str) -> str:
     return text.replace("\r\n", "\n").strip()
 
 
+def without_managed_block(body: str) -> str:
+    """Remove bot-owned text before deriving links or prompts from human input."""
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    return _BOT_BLOCK.sub("", normalized)
+
+
 def plan_pr_body_update(
     body: str,
     draft: str,
@@ -216,6 +271,7 @@ def plan_pr_body_update(
     template: str | None = None,
 ) -> str | None:
     """Return a safe new body, or None when author changes must be left alone."""
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
     matches = list(_BLOCK_PATTERN.finditer(body))
     if len(matches) == 1:
         match = matches[0]

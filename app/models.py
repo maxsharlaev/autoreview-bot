@@ -41,6 +41,8 @@ class PullRequest(TimestampMixin, Base):
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     html_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     title: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    bot_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    bot_title_source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     author: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     assignee: Mapped[str | None] = mapped_column(String(255), nullable=True)
     state: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
