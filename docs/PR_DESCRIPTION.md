@@ -9,11 +9,14 @@ pr_description:
   title_mode: "off" # off | until_human_edit | when_invalid_or_inconsistent
   check_title_relevance: true
   timeout_seconds: 180
-  max_commit_messages: 250
+  max_commit_chars: 12000
+  language: auto # auto or any BCP 47 language code
   prompt_file: "" # optional: prompts/local/pr_description.md
 
-pr_text:
-  language: auto # auto or a language code; omit to use language.details
+size_guard:
+  soft: {commits: 50, changed_lines: 5000}
+  hard: {commits: 150, changed_lines: 20000}
+  override_label: autoreview:force
 ```
 
 | Mode | Behavior |
@@ -30,4 +33,8 @@ Template detection checks `pull_request_template.md` in `.github/`, the reposito
 
 The default prompt is [`prompts/pr_description.md`](../prompts/pr_description.md). To override it, copy it to `prompts/local/pr_description.md` and set `pr_description.prompt_file` to that path. The directory is ignored by Git and Docker build context but mounted read-only into the worker. Changes to the file are read on the next review; changing `config.yaml` needs a worker restart. Keep the JSON-only and untrusted-input rules in custom prompts. Custom prompts must produce the current schema, including `output_language` and title assessment fields.
 
-Output is checked against [`schemas/pr_description_output.json`](../schemas/pr_description_output.json). Sections are rendered as plain text with HTML and mentions escaped; bare URLs are broken up to prevent automatic linking. Empty sections and the linked-task section without Jira are omitted. `pr_text.language: auto` detects English or Russian from human title, then human body, then commits; sparse input falls back to `language.details`. Explicit language codes are passed to the model. Section headings come from fixed English/Russian dictionaries, with English headings for other language codes. English and Russian output is checked by script plus the model's declared language; other language codes use a separate read-only Codex language check. A mismatch causes one regeneration, then publication is skipped. Conventional-commit type and scope remain English. The bot does not claim tests passed without evidence. `max_commit_messages` limits prompt size and marks truncation explicitly. GitHub's PR commits endpoint returns at most 250 commits; a larger count from the PR metadata is also marked as truncated.
+Output is checked against [`schemas/pr_description_output.json`](../schemas/pr_description_output.json). Sections are rendered as plain text with HTML and mentions escaped; bare URLs are broken up to prevent automatic linking. Empty sections and the linked-task section without Jira are omitted. `pr_description.language: auto` detects English or Russian from human title, then human body, then commits; sparse input falls back to `language.details`. Explicit language codes are passed to the model. The former `pr_text.language` key remains a fallback for existing installations. Section headings come from fixed English/Russian dictionaries, with English headings for other language codes. English and Russian output is checked by script plus the model's declared language; other language codes use a separate read-only Codex language check. A mismatch causes one regeneration, then publication is skipped. Conventional-commit type and scope remain English. The bot does not claim tests passed without evidence.
+
+The size guard uses PR commit and line totals from the webhook before any model call. If a webhook omits these fields, or for a manual run, it uses the PR metadata already loaded for the review, without another request. Above a soft threshold, review runs but description and title generation are skipped. Above a hard threshold, the run is skipped with one sticky notice; later pushes do not repeat that notice. Adding the `autoreview:force` label triggers a new run and bypasses both thresholds. At an exact threshold, the PR is still allowed.
+
+The commit prompt contains only the first line of each useful commit message, grouped by conventional type. Fixup, squash, merge and WIP messages are omitted. `max_commit_chars` bounds the selected subjects; the prompt states the total and how many commits were not shown. The adapter reads no more than GitHub's 250 PR commits.

@@ -7,6 +7,7 @@ import pytest
 from app.adapters.github import GitHubAppClient, GitHubError
 from app.config import Settings
 from app.services.pr_description import COMMENT_MARKER, description_comment_is_intact, render_pr_description_comment
+from app.services.size_guard import SIZE_SKIP_MARKER
 
 
 def _client() -> GitHubAppClient:
@@ -44,13 +45,30 @@ async def test_commit_messages_are_loaded_from_pr() -> None:
 
 
 @pytest.mark.asyncio
-async def test_commit_messages_paginate_without_fixed_page_cap() -> None:
+async def test_commit_messages_stop_at_github_cap() -> None:
     client = _client()
     full_page = [{"commit": {"message": f"feat: item {i}"}} for i in range(100)]
-    client._request = AsyncMock(side_effect=[_response(full_page)] * 11 + [_response([])])
+    client._request = AsyncMock(side_effect=[_response(full_page)] * 4)
     messages = await client.list_pull_commit_messages("org", "repo", 7)
-    assert len(messages) == 1100
-    assert client._request.await_count == 12
+    assert len(messages) == 250
+    assert client._request.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_size_skip_comment_is_not_repeated_on_later_pushes() -> None:
+    client = _client()
+    client._request = AsyncMock(
+        return_value=_response([{"id": 12, "body": SIZE_SKIP_MARKER + "\nPrevious size warning"}])
+    )
+    await client.upsert_sticky_comment(
+        "org",
+        "repo",
+        7,
+        SIZE_SKIP_MARKER + "\nNew warning",
+        marker=SIZE_SKIP_MARKER,
+        can_replace=lambda _body: False,
+    )
+    assert client._request.await_count == 1
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from app.api.v1.pull_request import classify_pull_request_event
+from app.config import AppConfig
 from app.services.constants import SKIP_DRAFT, SKIP_FORK
 
 
@@ -52,4 +53,15 @@ def test_skips_fork() -> None:
 def test_opened_is_accepted_when_allowlisted() -> None:
     payload = _payload()
     with patch("app.api.v1.pull_request.repo_allowed", return_value=True):
+        assert classify_pull_request_event("pull_request", payload) is None
+
+
+def test_only_override_label_triggers_review() -> None:
+    payload = _payload(action="labeled", label={"name": "other"})
+    with (
+        patch("app.api.v1.pull_request.get_app_config", return_value=AppConfig()),
+        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
+    ):
+        assert classify_pull_request_event("pull_request", payload)["reason"] == "ignored_label"
+        payload["label"]["name"] = "autoreview:force"
         assert classify_pull_request_event("pull_request", payload) is None

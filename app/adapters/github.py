@@ -45,6 +45,10 @@ class PullRequestInfo:
     repo: str
     full_name: str
     commits_count: int = 0
+    additions: int = 0
+    deletions: int = 0
+    changed_files: int = 0
+    labels: tuple[str, ...] = ()
 
 
 @dataclass
@@ -159,6 +163,10 @@ class GitHubAppClient:
             repo=repo,
             full_name=f"{owner}/{repo}",
             commits_count=int(data.get("commits") or 0),
+            additions=int(data.get("additions") or 0),
+            deletions=int(data.get("deletions") or 0),
+            changed_files=int(data.get("changed_files") or 0),
+            labels=tuple(str(item.get("name") or "") for item in data.get("labels") or []),
         )
 
     async def list_files(self, owner: str, repo: str, number: int) -> list[ChangedFile]:
@@ -194,7 +202,7 @@ class GitHubAppClient:
         token = await self.installation_token(owner, repo)
         messages: list[str] = []
         page = 1
-        while True:
+        while page <= 3 and len(messages) < 250:
             response = await self._request(
                 "GET",
                 f"{API}/repos/{owner}/{repo}/pulls/{number}/commits",
@@ -202,8 +210,10 @@ class GitHubAppClient:
                 params={"per_page": 100, "page": page},
             )
             batch = response.json()
-            messages.extend(str((item.get("commit") or {}).get("message") or "") for item in batch)
-            if len(batch) < 100:
+            messages.extend(
+                str((item.get("commit") or {}).get("message") or "") for item in batch[: 250 - len(messages)]
+            )
+            if len(batch) < 100 or len(messages) >= 250:
                 break
             page += 1
         return messages

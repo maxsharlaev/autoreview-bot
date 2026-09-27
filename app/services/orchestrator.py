@@ -7,6 +7,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 import jsonschema
 from sqlalchemy import select
@@ -45,12 +46,14 @@ from app.services.pr_description import (
     render_pr_description,
     render_pr_description_comment,
     render_title_relevance_note,
+    title_is_invalid,
     title_source_hash,
     validate_pr_description,
     without_managed_block,
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
 from app.services.publisher import Publisher, empty_verified
+from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
 from app.services.verifier import FindingView, PreviousFindingView, VerifiedReview, parse_json_payload, verify_review
 
@@ -117,6 +120,34 @@ async def run_review(
     if permission not in WRITE_PERMISSIONS:
         progress.event(f"skipped: {SKIP_NO_WRITE}")
         return await _skip(session, run, started, SKIP_NO_WRITE)
+
+    webhook_metrics = (run.summary or {}).get("size_metrics") if run.head_sha == info.head_sha else None
+    size_info = info
+    if isinstance(webhook_metrics, dict):
+        size_info = replace(
+            info,
+            commits_count=int(webhook_metrics.get("commits") or 0),
+            additions=int(webhook_metrics.get("additions") or 0),
+            deletions=int(webhook_metrics.get("deletions") or 0),
+            changed_files=int(webhook_metrics.get("changed_files") or 0),
+        )
+    size_decision = classify_pr_size(size_info, config.size_guard)
+    if size_decision == "hard":
+        try:
+            await github.upsert_sticky_comment(
+                owner,
+                repo,
+                pr.number,
+                hard_skip_comment(size_info, override_label=config.size_guard.override_label),
+                marker=SIZE_SKIP_MARKER,
+                can_replace=lambda _body: False,
+            )
+        except GitHubError:
+            logger.exception("Failed to post size-guard skip comment for %s#%s", info.full_name, info.number)
+        progress.event(f"skipped: {SKIP_TOO_LARGE} (size guard)")
+        return await _skip(session, run, started, SKIP_TOO_LARGE)
+    if size_decision == "soft":
+        progress.event("size guard soft limit: review enabled, PR description disabled")
 
     files = await github.list_files(owner, repo, pr.number)
     human_title = "" if pr.bot_title and info.title == pr.bot_title else info.title
@@ -349,6 +380,7 @@ async def run_review(
         config=config,
         prompt_version=context.prompt_version,
         progress=progress,
+        skip_description=size_decision == "soft",
         description_step=lambda: _run_pr_description_after_review(
             github=github,
             codex_fn=codex_fn,
@@ -372,9 +404,10 @@ async def _complete_then_describe(
     prompt_version: str,
     progress: ReviewProgress,
     description_step: Callable[[], Awaitable[None]],
+    skip_description: bool = False,
 ) -> ReviewRun:
     completed = await _complete(session, run, started, None, verified, config, prompt_version)
-    if not config.pr_description.enabled:
+    if not config.pr_description.enabled or skip_description:
         return completed
     try:
         await asyncio.wait_for(description_step(), timeout=config.pr_description.timeout_seconds)
@@ -461,6 +494,7 @@ async def _publish_pr_description(
         language=language,
         prompt_file=config.pr_description.prompt_file,
         max_commit_messages=config.pr_description.max_commit_messages,
+        max_commit_chars=config.pr_description.max_commit_chars,
         commit_total=current.commits_count,
     )
     schema_path = checkout / ".open-pr-review-pr-description-schema.json"
@@ -563,8 +597,25 @@ async def _publish_pr_description(
                     )
         else:
             logger.info("PR title update skipped: title or head changed before publication")
-    if config.pr_description.check_title_relevance and payload["title_relevance"] == "irrelevant" and not title_updated:
-        draft += "\n\n" + render_title_relevance_note(payload["title_reason"], language=language)
+    needs_title_note = (config.pr_description.check_title_relevance and payload["title_relevance"] == "irrelevant") or (
+        config.pr_description.title_mode == "when_invalid_or_inconsistent"
+        and title_is_invalid(latest.title, latest.head_ref)
+    )
+    if needs_title_note and not title_updated:
+        safe_suggestion = plan_pr_title_update(
+            latest.title,
+            payload["suggested_title"],
+            head_ref=latest.head_ref,
+            mode="until_human_edit",
+            check_relevance=True,
+            relevance=payload["title_relevance"],
+            bot_title=latest.title,
+        )
+        draft += "\n\n" + render_title_relevance_note(
+            payload["title_reason"],
+            language=language,
+            suggested_title=safe_suggestion,
+        )
     mode = config.pr_description.mode
     if mode == "comment":
         await github.upsert_sticky_comment(

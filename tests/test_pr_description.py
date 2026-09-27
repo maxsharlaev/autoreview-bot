@@ -16,6 +16,7 @@ from app.services.pr_description import (
     COMMENT_MARKER,
     build_pr_description_context,
     description_comment_is_intact,
+    format_commit_summary,
     plan_pr_body_update,
     plan_pr_title_update,
     render_pr_description,
@@ -155,7 +156,8 @@ def test_schema_rejects_extra_fields_and_invalid_types() -> None:
 def test_title_modes_and_relevance_guard() -> None:
     assert title_is_invalid("Dev", "feature/form")
     assert title_is_invalid("feature/form", "feature/form")
-    assert not title_is_invalid("Validate form inputs", "feature/form")
+    assert title_is_invalid("Validate form inputs", "feature/form")
+    assert not title_is_invalid("feat: validate form inputs", "feature/form")
     options = dict(head_ref="feature/form", check_relevance=True)
     suggestion = "feat: validate form inputs"
     assert plan_pr_title_update("Dev", suggestion, mode="off", relevance="irrelevant", **options) is None
@@ -225,11 +227,14 @@ def test_title_requires_conventional_format_and_preserves_jira_key() -> None:
     assert plan_pr_title_update("ABC-7-work", "feat: validate forms XYZ-9", **options) is None
     assert plan_pr_title_update("ABC-7-work", "Validate forms", **options) is None
     assert plan_pr_title_update("ABC-7-work", "feat: see example.com", **options) is None
+    assert plan_pr_title_update("ABC-7-work", "feat: see example.technology", **options) is None
     assert plan_pr_title_update("ABC-7-work", "feat: see www.example", **options) is None
     assert (
         plan_pr_title_update("ABC-7-work", "feat: val\u202e\u200bidate forms", **options)
         == "feat: validate forms ABC-7"
     )
+    assert title_is_invalid("Validate forms", "feature/forms")
+    assert not title_is_invalid("feat: validate forms", "feature/forms")
 
 
 def test_empty_sections_and_bare_urls_are_not_published_as_links() -> None:
@@ -239,6 +244,11 @@ def test_empty_sections_and_bare_urls_are_not_published_as_links() -> None:
     assert "https://" not in draft
     assert "www.example.com" not in draft
     assert "&#58;" in draft and "&#46;" in draft
+
+
+def test_human_title_note_can_include_safe_suggestion() -> None:
+    note = render_title_relevance_note("The title is vague", language="en", suggested_title="feat: validate inputs")
+    assert "Suggested title: feat: validate inputs" in note
 
 
 def test_commit_list_truncation_is_explicit() -> None:
@@ -272,6 +282,32 @@ def test_commit_list_truncation_is_explicit() -> None:
     )
     assert "total_commits: 300" in limited_by_github
     assert "commits_truncated: true" in limited_by_github
+
+
+def test_commit_budget_filters_noise_groups_subjects_and_reports_omissions() -> None:
+    summary = format_commit_summary(
+        [
+            "fixup! feat: old change",
+            "feat: add form\nprivate body text",
+            "squash! feat: merge",
+            "fix: reject bad values",
+            "Merge branch main",
+            "WIP temporary",
+        ],
+        total=8,
+        max_chars=28,
+    )
+    assert "fix:\n- fix: reject bad values" in summary
+    assert "private body text" not in summary
+    assert "fixup!" not in summary and "squash!" not in summary
+    assert "7 more commits not shown" in summary
+
+
+def test_pr_description_language_key_takes_precedence() -> None:
+    from app.services.pr_text_language import resolve_pr_language
+
+    config = AppConfig(pr_description=PrDescriptionYaml(language="fr"), pr_text=PrTextYaml(language="ru"))
+    assert resolve_pr_language(config, human_title="Dev", human_body="", commits=[]) == "fr"
 
 
 def test_fill_empty_updates_only_intact_generated_body() -> None:
@@ -488,6 +524,31 @@ async def test_title_update_failure_still_posts_description(tmp_path) -> None:
         pr=pr,
     )
     assert "## Title check" in github.upsert_sticky_comment.await_args.args[-1]
+
+
+@pytest.mark.asyncio
+async def test_human_title_is_preserved_and_suggestion_is_visible(tmp_path) -> None:
+    info = _info()
+    info.title = "Dev"
+    github = SimpleNamespace(
+        get_pull_request=AsyncMock(side_effect=[info, info]),
+        list_pull_commit_messages=AsyncMock(return_value=["feat: validate form inputs"]),
+        update_pull_request_title=AsyncMock(),
+        upsert_sticky_comment=AsyncMock(),
+    )
+    await _publish_pr_description(
+        github=github,
+        codex_fn=AsyncMock(return_value=json.dumps(PAYLOAD)),
+        checkout=tmp_path,
+        info=info,
+        files=[],
+        jira_issue=None,
+        config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, title_mode="when_invalid_or_inconsistent")),
+        settings=Settings.model_construct(openai_api_key="test"),
+        pr=SimpleNamespace(bot_title=None, bot_title_source_hash=None, title="Dev"),
+    )
+    github.update_pull_request_title.assert_not_awaited()
+    assert "Suggested title: feat: validate form inputs" in github.upsert_sticky_comment.await_args.args[-1]
 
 
 @pytest.mark.asyncio

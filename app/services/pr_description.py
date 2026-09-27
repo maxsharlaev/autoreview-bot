@@ -54,8 +54,10 @@ _PLACEHOLDER_TITLES = {
     "pull request",
 }
 _CONVENTIONAL_TITLE = re.compile(r"^[a-z][a-z0-9-]*(?:\([a-z0-9._/-]+\))?!?: \S.+$")
-_TITLE_URL = re.compile(r"(?:://|\bmailto:|www\.|\b[a-z0-9-]+\.(?:com|org|net|io|dev|ru|ai|co)\b)", re.IGNORECASE)
-_LINK_DOMAIN = re.compile(r"\b([a-z0-9-]+)\.(com|org|net|io|dev|ru|ai|co)\b", re.IGNORECASE)
+_TITLE_URL = re.compile(r"(?:://|\bmailto:|\bwww\.|\b[a-z0-9-]+\.(?:[a-z]{2,63}|xn--[a-z0-9-]+)\b)", re.IGNORECASE)
+_LINK_DOMAIN = re.compile(r"\b([a-z0-9-]+)\.([a-z]{2,63}|xn--[a-z0-9-]+)\b", re.IGNORECASE)
+_COMMIT_TYPE = re.compile(r"^([a-z][a-z0-9-]*)(?:\([^)]+\))?!?:\s", re.IGNORECASE)
+_NOISE_COMMIT = re.compile(r"^(?:fixup!|squash!|merge(?:\s|:|$)|wip(?:\([^)]*\))?(?:\s|:|$))", re.IGNORECASE)
 
 
 def strip_format_controls(value: str) -> str:
@@ -80,6 +82,35 @@ def _untrusted(tag: str, text: str, limit: int) -> str:
     return f"<{tag}>\n{value}\n</{tag}>"
 
 
+def format_commit_summary(messages: list[str], *, total: int, max_chars: int, max_messages: int = 250) -> str:
+    """Group recent, useful commit subjects within a strict character budget."""
+    available = messages[-max_messages:]
+    subjects = [message.splitlines()[0].strip() for message in available if message.strip()]
+    useful = [subject for subject in subjects if not _NOISE_COMMIT.match(subject)]
+    selected: list[str] = []
+    used = 0
+    for subject in reversed(useful):
+        cost = len(subject) + 3  # bullet plus newline
+        if used + cost > max_chars:
+            continue
+        selected.append(subject)
+        used += cost
+    grouped: dict[str, list[str]] = {}
+    for subject in reversed(selected):
+        match = _COMMIT_TYPE.match(subject)
+        grouped.setdefault(match.group(1).lower() if match else "other", []).append(subject)
+    lines = [f"{kind}:\n" + "\n".join(f"- {subject}" for subject in items) for kind, items in grouped.items()]
+    not_shown = max(total, len(messages)) - len(selected)
+    return "\n".join(
+        [
+            f"total_commits: {max(total, len(messages))}",
+            f"commits_truncated: {str(not_shown > 0).lower()}",
+            *(lines or ["none"]),
+            *([f"{not_shown} more commits not shown"] if not_shown else []),
+        ]
+    )
+
+
 def build_pr_description_context(
     *,
     title: str,
@@ -93,6 +124,7 @@ def build_pr_description_context(
     language: str,
     prompt_file: str = "",
     max_commit_messages: int = 250,
+    max_commit_chars: int = 12000,
     commit_total: int | None = None,
 ) -> str:
     custom = prompt_file.strip()
@@ -123,11 +155,12 @@ def build_pr_description_context(
             f"files_truncated: {str(len(files) > 100).lower()}",
         ]
     )
-    selected_commits = commit_messages[-max_commit_messages:]
-    commits = "\n".join(message[:500] for message in selected_commits) or "none"
-    total_commits = max(commit_total or 0, len(commit_messages))
-    commits_truncated = total_commits > len(selected_commits) or any(len(m) > 500 for m in selected_commits)
-    commits = f"total_commits: {total_commits}\ncommits_truncated: {str(commits_truncated).lower()}\n{commits}"
+    commits = format_commit_summary(
+        commit_messages,
+        total=commit_total or 0,
+        max_chars=max_commit_chars,
+        max_messages=max_commit_messages,
+    )
     issue_text = "none"
     if jira_issue is not None:
         issue_text = (
@@ -158,7 +191,12 @@ def validate_pr_description(payload: dict[str, Any]) -> dict[str, str]:
 def title_is_invalid(title: str, head_ref: str) -> bool:
     normalized = re.sub(r"[\s_/-]+", " ", title.strip()).casefold()
     branch = re.sub(r"[\s_/-]+", " ", head_ref.strip()).casefold()
-    return not normalized or normalized in _PLACEHOLDER_TITLES or normalized == branch
+    return (
+        not normalized
+        or normalized in _PLACEHOLDER_TITLES
+        or normalized == branch
+        or not _CONVENTIONAL_TITLE.fullmatch(title.strip())
+    )
 
 
 def plan_pr_title_update(
@@ -225,14 +263,18 @@ def render_pr_description(payload: dict[str, str], *, language: str, linked_task
     return "\n\n".join(parts).strip()
 
 
-def render_title_relevance_note(reason: str, *, language: str) -> str:
+def render_title_relevance_note(reason: str, *, language: str, suggested_title: str | None = None) -> str:
     heading = "Проверка заголовка" if language == "ru" else "Title check"
     fallback = (
         "Заголовок PR не соответствует коммитам."
         if language == "ru"
         else "The PR title does not match the commit messages."
     )
-    return f"## {heading}\n\n{_plain_text(reason or fallback)}"
+    note = f"## {heading}\n\n{_plain_text(reason or fallback)}"
+    if suggested_title:
+        label = "Предлагаемый заголовок" if language == "ru" else "Suggested title"
+        note += f"\n\n{label}: {_plain_text(suggested_title)}"
+    return note
 
 
 def render_pr_description_comment(draft: str) -> str:

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -62,8 +62,15 @@ class PrDescriptionYaml(BaseModel):
     title_mode: Literal["off", "until_human_edit", "when_invalid_or_inconsistent"] = "off"
     check_title_relevance: bool = True
     timeout_seconds: int = Field(default=180, gt=0, le=600)
-    max_commit_messages: int = Field(default=250, gt=0)
+    max_commit_messages: int = Field(default=250, gt=0, le=250)  # legacy count cap
+    max_commit_chars: int = Field(default=12000, gt=0, le=50000)
+    language: str | None = None
     prompt_file: str = ""
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str | None) -> str | None:
+        return PrTextYaml.validate_language(value)
 
     @field_validator("title_mode", mode="before")
     @classmethod
@@ -86,8 +93,27 @@ class PrTextYaml(BaseModel):
             return None
         code = value.strip().lower()
         if code != "auto" and not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*", code):
-            raise ValueError("pr_text.language must be 'auto' or a BCP 47 language code such as en, ru, fr, or pt-BR")
+            raise ValueError("language must be 'auto' or a BCP 47 language code such as en, ru, fr, or pt-BR")
         return code
+
+
+class SizeLimitYaml(BaseModel):
+    commits: int = Field(gt=0)
+    changed_lines: int = Field(gt=0)
+
+
+class SizeGuardYaml(BaseModel):
+    soft: SizeLimitYaml = Field(default_factory=lambda: SizeLimitYaml(commits=50, changed_lines=5000))
+    hard: SizeLimitYaml = Field(default_factory=lambda: SizeLimitYaml(commits=150, changed_lines=20000))
+    override_label: str = "autoreview:force"
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> SizeGuardYaml:
+        if self.hard.commits < self.soft.commits or self.hard.changed_lines < self.soft.changed_lines:
+            raise ValueError("size_guard.hard thresholds must be at least size_guard.soft thresholds")
+        if not self.override_label.strip():
+            raise ValueError("size_guard.override_label must not be empty")
+        return self
 
 
 class CodexYaml(BaseModel):
@@ -112,6 +138,7 @@ class AppConfig(BaseModel):
     language: LanguageYaml = Field(default_factory=LanguageYaml)
     pr_description: PrDescriptionYaml = Field(default_factory=PrDescriptionYaml)
     pr_text: PrTextYaml = Field(default_factory=PrTextYaml)
+    size_guard: SizeGuardYaml = Field(default_factory=SizeGuardYaml)
     codex: CodexYaml = Field(default_factory=CodexYaml)
 
 

@@ -24,7 +24,7 @@ def _detect(text: str) -> str | None:
 
 
 def resolve_pr_language(config: AppConfig, *, human_title: str, human_body: str, commits: list[str]) -> str:
-    configured = config.pr_text.language or config.language.details
+    configured = config.pr_description.language or config.pr_text.language or config.language.details
     if configured != "auto":
         return configured
     for text in (human_title, human_body, "\n".join(_CONVENTIONAL_PREFIX.sub("", item) for item in commits)):

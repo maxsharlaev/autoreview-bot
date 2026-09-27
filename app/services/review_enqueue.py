@@ -118,6 +118,11 @@ async def queue_review(
         await abort_job(redis, old.arq_job_id)
         old.status = "cancelled"
 
+    metric_keys = ("commits", "additions", "deletions", "changed_files")
+    webhook_size = None
+    if trigger == "webhook" and all(pr_payload.get(key) is not None for key in metric_keys):
+        webhook_size = {"size_metrics": {key: int(pr_payload[key]) for key in metric_keys}}
+
     run = ReviewRun(
         id=uuid.uuid4(),
         pull_request_id=pr.id,
@@ -125,6 +130,7 @@ async def queue_review(
         base_sha=base_sha,
         head_sha=head_sha,
         status="pending",
+        summary=webhook_size,
     )
     session.add(run)
     await session.flush()
