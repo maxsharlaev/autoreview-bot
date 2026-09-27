@@ -92,6 +92,14 @@ async def test_edited_description_comment_is_preserved() -> None:
     assert client._request.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_title_update_changes_only_title() -> None:
+    client = _client()
+    client._request = AsyncMock(return_value=_response({}))
+    await client.update_pull_request_title("org", "repo", 7, "Validate form inputs")
+    assert client._request.await_args.kwargs["json"] == {"title": "Validate form inputs"}
+
+
 def _response(value):
     class Response:
         def json(self):

@@ -33,6 +33,8 @@ language:
 pr_description:
   enabled: false
   mode: comment # comment | fill_empty | append
+  title_mode: "off" # off | always | when_invalid_or_inconsistent
+  check_title_relevance: true # compare PR title with commit messages
   prompt_file: "" # optional: prompts/local/pr_description.md
 
 codex:

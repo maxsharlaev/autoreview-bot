@@ -39,8 +39,10 @@ from app.services.pr_description import (
     build_pr_description_context,
     description_comment_is_intact,
     plan_pr_body_update,
+    plan_pr_title_update,
     render_pr_description,
     render_pr_description_comment,
+    render_title_relevance_note,
     validate_pr_description,
 )
 from app.services.publisher import Publisher, empty_verified
@@ -313,6 +315,7 @@ async def run_review(
                     jira_issue=jira_issue,
                     config=config,
                     settings=settings,
+                    pr=pr,
                 )
                 progress.event("PR description step finished")
             except Exception:
@@ -362,6 +365,7 @@ async def _publish_pr_description(
     jira_issue: JiraIssue | None,
     config: AppConfig,
     settings: Settings,
+    pr: PullRequest | None = None,
 ) -> None:
     current = await github.get_pull_request(info.owner, info.repo, info.number)
     if current.head_sha != info.head_sha or current.state != "open" or current.draft or current.is_fork:
@@ -398,9 +402,44 @@ async def _publish_pr_description(
     payload = validate_pr_description(parse_json_payload(raw))
     draft = render_pr_description(payload, language=config.language.details, linked_task=jira_issue is not None)
     latest = await github.get_pull_request(info.owner, info.repo, info.number)
-    if latest.head_sha != info.head_sha or latest.state != "open" or latest.draft or latest.is_fork:
+    if (
+        latest.head_sha != info.head_sha
+        or latest.state != "open"
+        or latest.draft
+        or latest.is_fork
+        or latest.title != current.title
+    ):
         logger.info("PR description skipped: PR changed while generating")
         return
+    proposed_title = plan_pr_title_update(
+        latest.title,
+        payload["suggested_title"],
+        head_ref=latest.head_ref,
+        mode=config.pr_description.title_mode,
+        check_relevance=config.pr_description.check_title_relevance,
+        relevance=payload["title_relevance"],
+    )
+    logger.info("PR title relevance for %s#%s: %s", info.full_name, info.number, payload["title_relevance"])
+    title_updated = False
+    if proposed_title is not None:
+        confirmation = await github.get_pull_request(info.owner, info.repo, info.number)
+        if (
+            confirmation.head_sha == info.head_sha
+            and confirmation.state == "open"
+            and confirmation.title == latest.title
+        ):
+            try:
+                await github.update_pull_request_title(info.owner, info.repo, info.number, proposed_title)
+            except GitHubError:
+                logger.exception("PR title update failed for %s#%s", info.full_name, info.number)
+            else:
+                title_updated = True
+                if pr is not None:
+                    pr.title = proposed_title
+        else:
+            logger.info("PR title update skipped: title or head changed before publication")
+    if config.pr_description.check_title_relevance and payload["title_relevance"] == "irrelevant" and not title_updated:
+        draft += "\n\n" + render_title_relevance_note(payload["title_reason"], language=config.language.details)
     mode = config.pr_description.mode
     if mode == "comment":
         await github.upsert_sticky_comment(

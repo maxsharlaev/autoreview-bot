@@ -72,6 +72,8 @@ To replace the review instructions without editing the repository's default, cop
 
 Set `pr_description.enabled: true` in `config.yaml` to draft a description from the PR title, branch, commit messages, changed-file summary and an available Jira issue. The feature is off by default. `pr_description.mode` selects `comment` (a separate sticky suggestion), `fill_empty` (an empty body or unchanged default repository template), or `append` (a marked block below the author's text). Only an intact generated block is updated on later runs; edits by the author cause the update to be skipped. The model runs in the read-only sandbox and cannot write to GitHub directly. Draft sections use `language.details`; without Jira, the linked-task section is omitted. See [PR description configuration](docs/PR_DESCRIPTION.md).
 
+Optional `pr_description.title_mode` supports `off` (default), `always`, and `when_invalid_or_inconsistent`. With `check_title_relevance: true`, the draft also checks the PR title against commit subjects and bodies; unresolved mismatches appear in the draft.
+
 ## Manual local review (no GitHub webhook)
 
 The GitHub webhook is optional for a first test. Call the local API yourself. The worker still uses `GITHUB_TOKEN` (or GitHub App) to **read the PR, clone the SHA, and post the sticky comment** — you only skip GitHub delivering the event.

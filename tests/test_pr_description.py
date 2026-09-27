@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import jsonschema
 import pytest
-from app.adapters.github import ChangedFile, PullRequestInfo
+from app.adapters.github import ChangedFile, GitHubError, PullRequestInfo
 from app.adapters.jira import JiraIssue
 from app.config import AppConfig, LanguageYaml, PrDescriptionYaml, Settings, load_yaml_config
 from app.services.orchestrator import _publish_pr_description
@@ -17,8 +17,11 @@ from app.services.pr_description import (
     build_pr_description_context,
     description_comment_is_intact,
     plan_pr_body_update,
+    plan_pr_title_update,
     render_pr_description,
     render_pr_description_comment,
+    render_title_relevance_note,
+    title_is_invalid,
     validate_pr_description,
 )
 
@@ -28,13 +31,19 @@ PAYLOAD = {
     "linked_task": "ABC-1 acceptance criteria covered",
     "testing": "Tests were not run",
     "notes_risks": "Check migration",
+    "suggested_title": "Validate form inputs",
+    "title_relevance": "irrelevant",
+    "title_reason": "The title is a placeholder; commits describe form validation.",
 }
 
 
 def test_feature_is_off_by_default_and_modes_are_validated() -> None:
     assert load_yaml_config(Path("config.example.yaml")).pr_description.enabled is False
+    assert load_yaml_config(Path("config.example.yaml")).pr_description.title_mode == "off"
     with pytest.raises(ValueError):
         PrDescriptionYaml(mode="overwrite")
+    with pytest.raises(ValueError):
+        PrDescriptionYaml(title_mode="sometimes")
 
 
 def _issue() -> JiraIssue:
@@ -129,6 +138,37 @@ def test_schema_rejects_extra_fields_and_invalid_types() -> None:
         validate_pr_description(PAYLOAD | {"testing": ["not a string"]})
     with pytest.raises(jsonschema.ValidationError):
         validate_pr_description(PAYLOAD | {"summary": "   "})
+
+
+def test_title_modes_and_relevance_guard() -> None:
+    assert title_is_invalid("Dev", "feature/form")
+    assert title_is_invalid("feature/form", "feature/form")
+    assert not title_is_invalid("Validate form inputs", "feature/form")
+    options = dict(head_ref="feature/form", check_relevance=True)
+    suggestion = "Validate form inputs"
+    assert plan_pr_title_update("Dev", suggestion, mode="off", relevance="irrelevant", **options) is None
+    assert (
+        plan_pr_title_update("Dev", suggestion, mode="when_invalid_or_inconsistent", relevance="uncertain", **options)
+        == suggestion
+    )
+    assert (
+        plan_pr_title_update(
+            "Improve logging", suggestion, mode="when_invalid_or_inconsistent", relevance="irrelevant", **options
+        )
+        == suggestion
+    )
+    assert (
+        plan_pr_title_update(
+            "Improve logging", suggestion, mode="when_invalid_or_inconsistent", relevance="uncertain", **options
+        )
+        is None
+    )
+    assert (
+        plan_pr_title_update("Improve logging", suggestion, mode="always", relevance="uncertain", **options)
+        == suggestion
+    )
+    assert plan_pr_title_update("Dev", "@team please review", mode="always", relevance="irrelevant", **options) is None
+    assert "## Title check" in render_title_relevance_note("Mismatch", language="en")
 
 
 def test_fill_empty_updates_only_intact_generated_body() -> None:
@@ -253,3 +293,50 @@ async def test_comment_mode_uses_separate_sticky_comment(tmp_path) -> None:
     )
     assert github.upsert_sticky_comment.await_args.kwargs["marker"] == COMMENT_MARKER
     github.update_pull_request_body.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_title_is_replaced_without_title_warning(tmp_path) -> None:
+    info = _info()
+    info.title = "Dev"
+    github = SimpleNamespace(
+        get_pull_request=AsyncMock(side_effect=[info, info, info]),
+        list_pull_commit_messages=AsyncMock(return_value=["feat: validate form inputs"]),
+        update_pull_request_title=AsyncMock(),
+        upsert_sticky_comment=AsyncMock(),
+    )
+    await _publish_pr_description(
+        github=github,
+        codex_fn=AsyncMock(return_value=json.dumps(PAYLOAD)),
+        checkout=tmp_path,
+        info=info,
+        files=[],
+        jira_issue=None,
+        config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, title_mode="when_invalid_or_inconsistent")),
+        settings=Settings.model_construct(openai_api_key="test"),
+    )
+    assert github.update_pull_request_title.await_args.args[-1] == "Validate form inputs"
+    assert "## Title check" not in github.upsert_sticky_comment.await_args.args[-1]
+
+
+@pytest.mark.asyncio
+async def test_title_update_failure_still_posts_description(tmp_path) -> None:
+    info = _info()
+    info.title = "Dev"
+    github = SimpleNamespace(
+        get_pull_request=AsyncMock(side_effect=[info, info, info]),
+        list_pull_commit_messages=AsyncMock(return_value=["feat: validate form inputs"]),
+        update_pull_request_title=AsyncMock(side_effect=GitHubError("PATCH failed")),
+        upsert_sticky_comment=AsyncMock(),
+    )
+    await _publish_pr_description(
+        github=github,
+        codex_fn=AsyncMock(return_value=json.dumps(PAYLOAD)),
+        checkout=tmp_path,
+        info=info,
+        files=[],
+        jira_issue=None,
+        config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, title_mode="always")),
+        settings=Settings.model_construct(openai_api_key="test"),
+    )
+    assert "## Title check" in github.upsert_sticky_comment.await_args.args[-1]

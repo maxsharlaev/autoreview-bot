@@ -263,6 +263,10 @@ class GitHubAppClient:
         token = await self.installation_token(owner, repo)
         await self._request("PATCH", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, json={"body": body})
 
+    async def update_pull_request_title(self, owner: str, repo: str, number: int, title: str) -> None:
+        token = await self.installation_token(owner, repo)
+        await self._request("PATCH", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, json={"title": title})
+
     async def collaborator_permission(self, owner: str, repo: str, username: str) -> str:
         token = await self.installation_token(owner, repo)
         try:

@@ -31,6 +31,20 @@ _HEADINGS = {
     "en": ("Summary", "Changes", "Linked task", "Testing", "Notes / risks"),
     "ru": ("Кратко", "Изменения", "Связанная задача", "Проверка", "Примечания и риски"),
 }
+_PLACEHOLDER_TITLES = {
+    "dev",
+    "develop",
+    "development",
+    "test",
+    "testing",
+    "update",
+    "changes",
+    "wip",
+    "draft",
+    "untitled",
+    "pr",
+    "pull request",
+}
 
 
 def _untrusted(tag: str, text: str, limit: int) -> str:
@@ -108,6 +122,42 @@ def validate_pr_description(payload: dict[str, Any]) -> dict[str, str]:
     return payload
 
 
+def title_is_invalid(title: str, head_ref: str) -> bool:
+    normalized = re.sub(r"[\s_/-]+", " ", title.strip()).casefold()
+    branch = re.sub(r"[\s_/-]+", " ", head_ref.strip()).casefold()
+    return not normalized or normalized in _PLACEHOLDER_TITLES or normalized == branch
+
+
+def plan_pr_title_update(
+    title: str,
+    suggested: str,
+    *,
+    head_ref: str,
+    mode: Literal["off", "always", "when_invalid_or_inconsistent"],
+    check_relevance: bool,
+    relevance: Literal["relevant", "irrelevant", "uncertain"],
+) -> str | None:
+    if mode == "off":
+        return None
+    candidate = suggested.strip()
+    if (
+        not candidate
+        or len(candidate) > 120
+        or candidate == title.strip()
+        or title_is_invalid(candidate, head_ref)
+        or any(ord(char) < 32 for char in candidate)
+        or any(char in candidate for char in ("@", "<", ">", "`", "[", "]"))
+        or "http://" in candidate.lower()
+        or "https://" in candidate.lower()
+    ):
+        return None
+    if mode == "when_invalid_or_inconsistent" and not (
+        title_is_invalid(title, head_ref) or (check_relevance and relevance == "irrelevant")
+    ):
+        return None
+    return candidate
+
+
 def _plain_text(value: str) -> str:
     cleaned = "".join(char for char in value if char == "\n" or ord(char) >= 32).strip()
     cleaned = html.escape(cleaned, quote=False)
@@ -124,6 +174,16 @@ def render_pr_description(payload: dict[str, str], *, language: Literal["en", "r
             continue
         parts.append(f"## {heading}\n\n{_plain_text(payload[name])}")
     return "\n\n".join(parts).strip()
+
+
+def render_title_relevance_note(reason: str, *, language: Literal["en", "ru"]) -> str:
+    heading = "Title check" if language == "en" else "Проверка заголовка"
+    fallback = (
+        "The PR title does not match the commit messages."
+        if language == "en"
+        else "Заголовок PR не соответствует коммитам."
+    )
+    return f"## {heading}\n\n{_plain_text(reason or fallback)}"
 
 
 def render_pr_description_comment(draft: str) -> str:

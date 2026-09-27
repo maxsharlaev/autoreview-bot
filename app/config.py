@@ -55,6 +55,8 @@ class LanguageYaml(BaseModel):
 class PrDescriptionYaml(BaseModel):
     enabled: bool = False
     mode: Literal["comment", "fill_empty", "append"] = "comment"
+    title_mode: Literal["off", "always", "when_invalid_or_inconsistent"] = "off"
+    check_title_relevance: bool = True
     prompt_file: str = ""
 
 
