@@ -545,3 +545,44 @@ async def test_two_wrong_language_outputs_do_not_publish(tmp_path) -> None:
     )
     assert codex.await_count == 2
     github.upsert_sticky_comment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_other_language_uses_independent_check_and_retries(tmp_path) -> None:
+    info = _info()
+    french = PAYLOAD | {
+        "summary": "Vérifier les données saisies",
+        "changes": "Ajouter une validation du formulaire",
+        "testing": "Les tests ne sont pas exécutés",
+        "notes_risks": "Aucun risque identifié",
+        "suggested_title": "feat(form): vérifier les données saisies",
+        "title_reason": "Le titre ne décrit pas les commits",
+        "output_language": "fr",
+    }
+    github = SimpleNamespace(
+        get_pull_request=AsyncMock(side_effect=[info, info]),
+        list_pull_commit_messages=AsyncMock(return_value=["feat: validate form inputs"]),
+        upsert_sticky_comment=AsyncMock(),
+    )
+    codex = AsyncMock(
+        side_effect=[
+            json.dumps(PAYLOAD | {"output_language": "fr"}),
+            json.dumps({"matches": False}),
+            json.dumps(french),
+            json.dumps({"matches": True}),
+        ]
+    )
+    await _publish_pr_description(
+        github=github,
+        codex_fn=codex,
+        checkout=tmp_path,
+        info=info,
+        files=[],
+        jira_issue=None,
+        config=AppConfig(pr_text=PrTextYaml(language="fr"), pr_description=PrDescriptionYaml(enabled=True)),
+        settings=Settings.model_construct(openai_api_key="test"),
+    )
+    assert codex.await_count == 4
+    assert "language code fr" in codex.await_args_list[0].kwargs["prompt"]
+    assert "predominantly in language code fr" in codex.await_args_list[1].kwargs["prompt"]
+    assert "Vérifier les données" in github.upsert_sticky_comment.await_args.args[-1]
