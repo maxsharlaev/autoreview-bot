@@ -11,7 +11,14 @@ from app.services.size_guard import SIZE_SKIP_MARKER
 
 
 def _client() -> GitHubAppClient:
-    return GitHubAppClient(settings=Settings.model_construct(github_token="test-token"))
+    return GitHubAppClient(
+        settings=Settings.model_construct(github_token="test-token"),
+        _comment_author_login="review-bot",
+    )
+
+
+def _comment(comment_id: int, body: str, author: str = "review-bot") -> dict:
+    return {"id": comment_id, "body": body, "user": {"login": author}}
 
 
 @pytest.mark.asyncio
@@ -19,9 +26,7 @@ async def test_description_comment_updates_existing_marker() -> None:
     client = _client()
     request = AsyncMock()
     request.side_effect = [
-        _response(
-            [{"id": 10, "body": "<!-- open-pr-review -->"}, {"id": 11, "body": render_pr_description_comment("old")}]
-        ),
+        _response([_comment(10, "<!-- open-pr-review -->"), _comment(11, render_pr_description_comment("old"))]),
         _response({}),
     ]
     client._request = request
@@ -34,6 +39,73 @@ async def test_description_comment_updates_existing_marker() -> None:
         can_replace=description_comment_is_intact,
     )
     assert request.await_args_list[1].args[:2] == ("PATCH", "https://api.github.com/repos/org/repo/issues/comments/11")
+
+
+@pytest.mark.asyncio
+async def test_comment_with_matching_marker_from_another_author_is_ignored() -> None:
+    client = _client()
+    request = AsyncMock(
+        side_effect=[
+            _response([_comment(10, render_pr_description_comment("old"), author="another-user")]),
+            _response({}),
+        ]
+    )
+    client._request = request
+    await client.upsert_sticky_comment(
+        "org",
+        "repo",
+        7,
+        render_pr_description_comment("new"),
+        marker=COMMENT_MARKER,
+        can_replace=description_comment_is_intact,
+    )
+    assert request.await_args_list[1].args[:2] == ("POST", "https://api.github.com/repos/org/repo/issues/7/comments")
+
+
+@pytest.mark.asyncio
+async def test_own_comment_is_selected_after_foreign_marker() -> None:
+    client = _client()
+    request = AsyncMock(
+        side_effect=[
+            _response(
+                [
+                    _comment(10, render_pr_description_comment("old"), author="another-user"),
+                    _comment(11, render_pr_description_comment("old"), author="review-bot"),
+                ]
+            ),
+            _response({}),
+        ]
+    )
+    client._request = request
+    await client.upsert_sticky_comment(
+        "org",
+        "repo",
+        7,
+        render_pr_description_comment("new"),
+        marker=COMMENT_MARKER,
+        can_replace=description_comment_is_intact,
+    )
+    assert request.await_args_list[1].args[:2] == ("PATCH", "https://api.github.com/repos/org/repo/issues/comments/11")
+
+
+@pytest.mark.asyncio
+async def test_comment_author_is_resolved_from_pat() -> None:
+    client = GitHubAppClient(settings=Settings.model_construct(github_token="test-token"))
+    client._request = AsyncMock(return_value=_response({"login": "review-bot"}))
+    assert await client.comment_author_login("test-token") == "review-bot"
+    assert client._request.await_args.args == ("GET", "https://api.github.com/user")
+    assert await client.comment_author_login("test-token") == "review-bot"
+    assert client._request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_comment_author_is_resolved_from_github_app() -> None:
+    client = GitHubAppClient(settings=Settings.model_construct(github_token=""))
+    client._jwt = lambda: "app-jwt"
+    client._request = AsyncMock(return_value=_response({"slug": "review-app"}))
+    assert await client.comment_author_login("installation-token") == "review-app[bot]"
+    assert client._request.await_args.args == ("GET", "https://api.github.com/app")
+    assert client._request.await_args.kwargs["token"] == "app-jwt"
 
 
 @pytest.mark.asyncio
@@ -57,9 +129,7 @@ async def test_commit_messages_stop_at_github_cap() -> None:
 @pytest.mark.asyncio
 async def test_size_skip_comment_is_not_repeated_on_later_pushes() -> None:
     client = _client()
-    client._request = AsyncMock(
-        return_value=_response([{"id": 12, "body": SIZE_SKIP_MARKER + "\nPrevious size warning"}])
-    )
+    client._request = AsyncMock(return_value=_response([_comment(12, SIZE_SKIP_MARKER + "\nPrevious size warning")]))
     await client.upsert_sticky_comment(
         "org",
         "repo",
@@ -69,6 +139,26 @@ async def test_size_skip_comment_is_not_repeated_on_later_pushes() -> None:
         can_replace=lambda _body: False,
     )
     assert client._request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_foreign_size_marker_does_not_hide_skip_notice() -> None:
+    client = _client()
+    client._request = AsyncMock(
+        side_effect=[
+            _response([_comment(12, SIZE_SKIP_MARKER, author="another-user")]),
+            _response({}),
+        ]
+    )
+    await client.upsert_sticky_comment(
+        "org",
+        "repo",
+        7,
+        SIZE_SKIP_MARKER + "\nSize warning",
+        marker=SIZE_SKIP_MARKER,
+        can_replace=lambda _body: False,
+    )
+    assert client._request.await_args.args[:2] == ("POST", "https://api.github.com/repos/org/repo/issues/7/comments")
 
 
 @pytest.mark.asyncio
@@ -114,9 +204,7 @@ async def test_selected_template_must_match_body() -> None:
 @pytest.mark.asyncio
 async def test_edited_description_comment_is_preserved() -> None:
     client = _client()
-    client._request = AsyncMock(
-        return_value=_response([{"id": 11, "body": render_pr_description_comment("old") + "edited"}])
-    )
+    client._request = AsyncMock(return_value=_response([_comment(11, render_pr_description_comment("old") + "edited")]))
     await client.upsert_sticky_comment(
         "org",
         "repo",

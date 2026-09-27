@@ -188,9 +188,13 @@ def validate_pr_description(payload: dict[str, Any]) -> dict[str, str]:
     return payload
 
 
+def _normalize_branch_title(value: str) -> str:
+    return re.sub(r"[\s_/-]+", " ", value.strip()).casefold()
+
+
 def title_is_invalid(title: str, head_ref: str) -> bool:
-    normalized = re.sub(r"[\s_/-]+", " ", title.strip()).casefold()
-    branch = re.sub(r"[\s_/-]+", " ", head_ref.strip()).casefold()
+    normalized = _normalize_branch_title(title)
+    branch = _normalize_branch_title(head_ref)
     return (
         not normalized
         or normalized in _PLACEHOLDER_TITLES
@@ -212,7 +216,7 @@ def plan_pr_title_update(
 ) -> str | None:
     if mode == "off":
         return None
-    branch_title = title.strip().casefold() == head_ref.strip().casefold()
+    branch_title = _normalize_branch_title(title) == _normalize_branch_title(head_ref)
     editable = not title.strip() or branch_title
     editable = editable or bool(bot_title and title == bot_title)
     if not editable or (source_unchanged and bot_title == title):

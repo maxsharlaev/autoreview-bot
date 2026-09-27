@@ -382,6 +382,7 @@ async def run_review(
         progress=progress,
         skip_description=size_decision == "soft",
         description_step=lambda: _run_pr_description_after_review(
+            session=session,
             github=github,
             codex_fn=codex_fn,
             info=info,
@@ -424,6 +425,7 @@ async def _complete_then_describe(
 
 async def _run_pr_description_after_review(
     *,
+    session: AsyncSession,
     github: GitHubAppClient,
     codex_fn,
     info: PullRequestInfo,
@@ -444,6 +446,7 @@ async def _run_pr_description_after_review(
     )
     try:
         await _publish_pr_description(
+            session=session,
             github=github,
             codex_fn=codex_fn,
             checkout=checkout,
@@ -460,6 +463,7 @@ async def _run_pr_description_after_review(
 
 async def _publish_pr_description(
     *,
+    session: AsyncSession | None = None,
     github: GitHubAppClient,
     codex_fn,
     checkout,
@@ -595,6 +599,8 @@ async def _publish_pr_description(
                         jira_issue=jira_issue,
                         human_body=without_managed_block(latest.body),
                     )
+                    if session is not None:
+                        await session.commit()
         else:
             logger.info("PR title update skipped: title or head changed before publication")
     needs_title_note = (config.pr_description.check_title_relevance and payload["title_relevance"] == "irrelevant") or (

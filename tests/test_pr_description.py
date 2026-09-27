@@ -202,6 +202,20 @@ def test_title_modes_and_relevance_guard() -> None:
     assert "## Title check" in render_title_relevance_note("Mismatch", language="en")
 
 
+def test_github_branch_derived_title_can_be_replaced() -> None:
+    assert (
+        plan_pr_title_update(
+            "Feat/3 pr description",
+            "feat: generate PR description",
+            head_ref="feat/3-pr-description",
+            mode="until_human_edit",
+            check_relevance=True,
+            relevance="uncertain",
+        )
+        == "feat: generate PR description"
+    )
+
+
 def test_bot_title_is_not_rewritten_without_new_source() -> None:
     assert (
         plan_pr_title_update(
@@ -524,6 +538,43 @@ async def test_title_update_failure_still_posts_description(tmp_path) -> None:
         pr=pr,
     )
     assert "## Title check" in github.upsert_sticky_comment.await_args.args[-1]
+
+
+@pytest.mark.asyncio
+async def test_bot_title_is_committed_before_description_update(tmp_path) -> None:
+    info = _info(body="Author notes")
+    info.title = info.head_ref
+    pr = SimpleNamespace(bot_title=None, bot_title_source_hash=None, title=info.title)
+    session = SimpleNamespace(commit=AsyncMock())
+
+    async def fail_body_update(*_args, **_kwargs) -> None:
+        session.commit.assert_awaited_once()
+        raise GitHubError("body update failed")
+
+    github = SimpleNamespace(
+        get_pull_request=AsyncMock(return_value=info),
+        list_pull_commit_messages=AsyncMock(return_value=["feat: validate form inputs"]),
+        update_pull_request_title=AsyncMock(),
+        update_pull_request_body=AsyncMock(side_effect=fail_body_update),
+    )
+    with pytest.raises(GitHubError, match="body update failed"):
+        await _publish_pr_description(
+            session=session,
+            github=github,
+            codex_fn=AsyncMock(return_value=json.dumps(PAYLOAD)),
+            checkout=tmp_path,
+            info=info,
+            files=[],
+            jira_issue=None,
+            config=AppConfig(
+                pr_description=PrDescriptionYaml(enabled=True, mode="append", title_mode="until_human_edit")
+            ),
+            settings=Settings.model_construct(openai_api_key="test"),
+            pr=pr,
+        )
+    assert pr.bot_title == "feat: validate form inputs ABC-1"
+    assert pr.bot_title_source_hash is not None
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

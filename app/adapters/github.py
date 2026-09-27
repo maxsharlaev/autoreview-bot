@@ -66,6 +66,7 @@ class GitHubAppClient:
     _token: str | None = None
     _token_expires: float = 0.0
     _installation_id: int = 0
+    _comment_author_login: str | None = None
 
     def _personal_token(self) -> str:
         return (self.settings.github_token or "").strip()
@@ -297,6 +298,21 @@ class GitHubAppClient:
             return "none"
         return (response.json().get("permission") or "none").lower()
 
+    async def comment_author_login(self, token: str) -> str:
+        if self._comment_author_login:
+            return self._comment_author_login
+        if self._personal_token():
+            data = (await self._request("GET", f"{API}/user", token=token)).json()
+            login = str(data.get("login") or "")
+        else:
+            data = (await self._request("GET", f"{API}/app", token=self._jwt())).json()
+            slug = str(data.get("slug") or "")
+            login = f"{slug}[bot]" if slug else ""
+        if not login:
+            raise GitHubError("Could not identify GitHub comment author")
+        self._comment_author_login = login
+        return login
+
     async def upsert_sticky_comment(
         self,
         owner: str,
@@ -308,6 +324,7 @@ class GitHubAppClient:
         can_replace: Callable[[str], bool] | None = None,
     ) -> None:
         token = await self.installation_token(owner, repo)
+        author_login = (await self.comment_author_login(token)).casefold()
         page = 1
         comment_id: int | None = None
         while True:
@@ -321,6 +338,9 @@ class GitHubAppClient:
             if not batch:
                 break
             for comment in batch:
+                comment_login = str((comment.get("user") or {}).get("login") or "").casefold()
+                if comment_login != author_login:
+                    continue
                 if marker in (comment.get("body") or ""):
                     if can_replace is not None and not can_replace(comment.get("body") or ""):
                         logger.info("Sticky comment was edited; leaving it unchanged")
