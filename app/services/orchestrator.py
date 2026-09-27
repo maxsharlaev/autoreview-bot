@@ -18,7 +18,7 @@ from app.adapters.github import ChangedFile, GitHubAppClient, GitHubError, PullR
 from app.adapters.jira import JiraClient, JiraError, JiraIssue
 from app.config import AppConfig, Settings, get_app_config, get_settings
 from app.metrics import record_review_finished
-from app.models import Finding, FindingTransition, PullRequest, ReviewRun, TaskSnapshot
+from app.models import Finding, FindingTransition, PullRequest, Repository, ReviewRun, TaskSnapshot
 from app.paths import data_file
 from app.progress import ReviewProgress
 from app.services.codex_runner import CodexRunnerError, run_codex
@@ -60,6 +60,36 @@ from app.services.verifier import FindingView, PreviousFindingView, VerifiedRevi
 logger = logging.getLogger(__name__)
 
 
+async def _remember_comment_author(
+    session: AsyncSession,
+    github: GitHubAppClient,
+    repository: Repository,
+    owner: str,
+    repo: str,
+) -> None:
+    try:
+        token = await github.installation_token(owner, repo)
+        login = await github.comment_author_login(token)
+    except Exception as exc:
+        logger.warning("Could not identify GitHub comment author for %s: %s", repository.full_name, exc)
+        return
+
+    locked = (
+        await session.execute(
+            select(Repository)
+            .where(Repository.id == repository.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    authors = list(locked.comment_authors or ())
+    if login.casefold() not in {author.casefold() for author in authors}:
+        locked.comment_authors = [*authors, login]
+        authors.append(login)
+    github.previous_comment_authors = tuple(authors)
+    await session.commit()
+
+
 async def run_review(
     session: AsyncSession,
     review_run_id: uuid.UUID,
@@ -73,10 +103,7 @@ async def run_review(
 ) -> ReviewRun:
     settings = settings or get_settings()
     config = config or get_app_config()
-    github = github or GitHubAppClient(
-        settings,
-        previous_comment_authors=tuple(config.github.previous_comment_authors),
-    )
+    github = github or GitHubAppClient(settings)
     jira = jira or JiraClient(config)
     publisher = publisher or Publisher(github, jira=jira, config=config)
 
@@ -123,6 +150,10 @@ async def run_review(
     if permission not in WRITE_PERMISSIONS:
         progress.event(f"skipped: {SKIP_NO_WRITE}")
         return await _skip(session, run, started, SKIP_NO_WRITE)
+
+    if isinstance(github, GitHubAppClient):
+        github.previous_comment_authors = tuple(pr.repository.comment_authors or ())
+        await _remember_comment_author(session, github, pr.repository, owner, repo)
 
     webhook_metrics = (run.summary or {}).get("size_metrics") if run.head_sha == info.head_sha else None
     size_info = info

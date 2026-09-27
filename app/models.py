@@ -26,6 +26,7 @@ class Repository(TimestampMixin, Base):
     full_name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     policy_profile: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
+    comment_authors: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
 
     pull_requests: Mapped[list[PullRequest]] = relationship(back_populates="repository")
 

@@ -19,7 +19,6 @@ class GitHubYaml(BaseModel):
     app_id: int = 0
     installation_id: int = 0
     allowed_repos: list[str] = Field(default_factory=list)
-    previous_comment_authors: list[str] = Field(default_factory=list)
 
 
 class JiraProjectYaml(BaseModel):
