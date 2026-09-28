@@ -22,7 +22,7 @@ GIT_FORBIDDEN = "GIT_FORBIDDEN"
 GITHUB_UNAVAILABLE = "GITHUB_UNAVAILABLE"
 
 WRITE_PERMISSIONS = {"admin", "write", "maintain"}
-HANDLED_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
+HANDLED_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review", "labeled"}
 ACTIVE_RUN_STATUSES = {"pending", "running", "completed"}
 IN_FLIGHT_STATUSES = {"pending", "running"}
 

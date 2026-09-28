@@ -13,6 +13,7 @@ from app.models import PullRequest, Repository, ReviewRun
 from app.queue import abort_job, enqueue_review, job_is_active
 from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR
 from app.services.issue_key import extract_issue_key
+from app.services.pr_description import without_managed_block
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,8 @@ async def queue_review(
     pr.head_ref = head.get("ref") or ""
     pr.is_draft = bool(pr_payload.get("draft"))
     pr.is_fork = is_fork
-    pr.issue_key = extract_issue_key(pr.head_ref, pr.title, pr_payload.get("body") or "")
+    human_title = "" if pr.bot_title and pr.title == pr.bot_title else pr.title
+    pr.issue_key = extract_issue_key(human_title, pr.head_ref, without_managed_block(pr_payload.get("body") or ""))
     await session.flush()
 
     existing = (
@@ -116,6 +118,11 @@ async def queue_review(
         await abort_job(redis, old.arq_job_id)
         old.status = "cancelled"
 
+    metric_keys = ("commits", "additions", "deletions", "changed_files")
+    webhook_size = None
+    if trigger == "webhook" and all(pr_payload.get(key) is not None for key in metric_keys):
+        webhook_size = {"size_metrics": {key: int(pr_payload[key]) for key in metric_keys}}
+
     run = ReviewRun(
         id=uuid.uuid4(),
         pull_request_id=pr.id,
@@ -123,6 +130,7 @@ async def queue_review(
         base_sha=base_sha,
         head_sha=head_sha,
         status="pending",
+        summary=webhook_size,
     )
     session.add(run)
     await session.flush()

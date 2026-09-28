@@ -26,6 +26,7 @@ class Repository(TimestampMixin, Base):
     full_name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     policy_profile: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
+    comment_authors: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
 
     pull_requests: Mapped[list[PullRequest]] = relationship(back_populates="repository")
 
@@ -41,6 +42,8 @@ class PullRequest(TimestampMixin, Base):
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     html_url: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     title: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    bot_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    bot_title_source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     author: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     assignee: Mapped[str | None] = mapped_column(String(255), nullable=True)
     state: Mapped[str] = mapped_column(String(32), default="open", nullable=False)

@@ -6,7 +6,7 @@ This is a five-month sequence of verifiable milestones, not fixed release dates.
 
 | Area | Available | Gap |
 | --- | --- | --- |
-| Review | GitHub PR → ARQ → Codex CLI → JSON → sticky comment | Final SHA guard, stronger validation and end-to-end tests |
+| Review | GitHub PR → ARQ → Codex CLI → JSON → sticky comment; optional PR description drafts | Final review SHA guard, stronger validation and end-to-end tests |
 | Issues | Jira read, optional comment and P0/P1 status transition | Update policy, audit and contract tests |
 | Code hosts | GitHub App or PAT | Common interface and second adapter |
 | Reviewers | Codex CLI | Runner interface, second CLI and independent validation |
