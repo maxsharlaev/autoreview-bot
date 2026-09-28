@@ -27,7 +27,6 @@ class Repository(TimestampMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     policy_profile: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
     comment_authors: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    last_visibility: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     pull_requests: Mapped[list[PullRequest]] = relationship(back_populates="repository")
 
@@ -82,21 +81,6 @@ class ReviewRun(TimestampMixin, Base):
 
     pull_request: Mapped[PullRequest] = relationship(back_populates="review_runs")
     task_snapshot: Mapped[TaskSnapshot | None] = relationship(back_populates="review_run", uselist=False)
-    result_snapshot: Mapped[ReviewResultSnapshot | None] = relationship(back_populates="review_run", uselist=False)
-
-
-class ReviewResultSnapshot(Base):
-    """Immutable private review payload for one run, saved before publication."""
-
-    __tablename__ = "review_result_snapshots"
-
-    review_run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("review_runs.id", ondelete="CASCADE"), primary_key=True
-    )
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    review_run: Mapped[ReviewRun] = relationship(back_populates="result_snapshot")
 
 
 class Finding(TimestampMixin, Base):

@@ -169,7 +169,6 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     openai_api_key: str = ""
     review_api_key: str = ""
-    result_api_key: str = ""
     worker_max_jobs: int = 4
     worker_job_timeout: int = 900
     config_path: str = "config.yaml"

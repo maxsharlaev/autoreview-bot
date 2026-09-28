@@ -7,7 +7,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, replace
+from dataclasses import replace
 from typing import Literal
 
 import jsonschema
@@ -24,7 +24,6 @@ from app.models import (
     FindingTransition,
     PullRequest,
     Repository,
-    ReviewResultSnapshot,
     ReviewRun,
     TaskSnapshot,
 )
@@ -61,7 +60,6 @@ from app.services.pr_description import (
     without_managed_block,
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
-from app.services.public_cleanup import redact_public_repository
 from app.services.publisher import Publisher, empty_verified
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
@@ -150,17 +148,6 @@ async def run_review(
     _sync_pr(pr, info)
     visibility = confirmed_visibility((run.summary or {}).get("repository_visibility"), info.visibility)
     context_visibility = visibility
-    if visibility == "private":
-        pr.repository.last_visibility = "private"
-    elif (
-        info.visibility == "public"
-        and getattr(pr.repository, "last_visibility", None) != "public"
-        and isinstance(github, GitHubAppClient)
-    ):
-        try:
-            await redact_public_repository(session, github, pr.repository.full_name)
-        except GitHubError:
-            logger.exception("Could not redact previous publications for %s", pr.repository.full_name)
     progress.event(f"repository visibility={visibility}")
     progress.event(f"PR loaded title={info.title!r} sha={info.head_sha[:12]} author={info.author}")
     if info.is_fork:
@@ -303,7 +290,6 @@ async def run_review(
             if publication == "public_fallback":
                 visibility = "public"
         await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
-        await _save_review_result(session, run, verified, [], context_visibility, visibility)
         await _publish(
             publisher,
             owner,
@@ -404,7 +390,6 @@ async def run_review(
                 if publication == "public_fallback":
                     visibility = "public"
             await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
-            await _save_review_result(session, run, verified, [], context_visibility, visibility)
             await _publish(
                 publisher,
                 owner,
@@ -473,7 +458,6 @@ async def run_review(
     )
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
-    await _save_review_result(session, run, verified, transitions, context_visibility, visibility)
     progress.event("publish sticky comment")
     await _publish(
         publisher,
@@ -1158,30 +1142,6 @@ async def _persist_snapshot(
     await session.flush()
 
 
-async def _save_review_result(
-    session: AsyncSession,
-    run: ReviewRun,
-    verified: VerifiedReview,
-    transitions: list[FindingTransitionView],
-    review_visibility: Visibility,
-    publication_visibility: Visibility,
-) -> None:
-    """Commit the full private result before any external publication attempt."""
-    session.add(
-        ReviewResultSnapshot(
-            review_run_id=run.id,
-            payload={
-                "review_visibility": review_visibility,
-                "publication_visibility": publication_visibility,
-                "head_sha": run.head_sha,
-                "verified": asdict(verified),
-                "transitions": [asdict(item) for item in transitions],
-            },
-        )
-    )
-    await session.commit()
-
-
 async def _publish(
     publisher: Publisher,
     owner: str,
@@ -1235,15 +1195,6 @@ async def _publish(
         issue_key=issue_key,
         current_jira_status=jira_status,
     )
-    if visibility == "private" and session is not None and isinstance(publisher.github, GitHubAppClient):
-        try:
-            current = await publisher.github.get_pull_request(owner, repo, pr.number)
-            if current.visibility != "private":
-                await redact_public_repository(session, publisher.github, pr.repository.full_name)
-        except GitHubError:
-            logger.exception(
-                "Could not reconfirm visibility after publishing %s#%s", pr.repository.full_name, pr.number
-            )
     if session is None:
         return
     snapshot = (

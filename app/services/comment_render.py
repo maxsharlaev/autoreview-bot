@@ -68,7 +68,7 @@ _LABELS = {
         "files": "files",
         "model": "model",
         "public_summary": "Review completed. See the findings below.",
-        "public_issue": "Potential issue.",
+        "security_issue": "Potential security issue.",
         "prior_issue": "Previously reported issue.",
         "details_hidden": "Details are hidden because the repository is public.",
     },
@@ -94,7 +94,7 @@ _LABELS = {
         "files": "файлов",
         "model": "модель",
         "public_summary": "Ревью завершено. Замечания приведены ниже.",
-        "public_issue": "Возможная проблема.",
+        "security_issue": "Возможная проблема безопасности.",
         "prior_issue": "Ранее найденная проблема.",
         "details_hidden": "Подробности скрыты, поскольку репозиторий публичный.",
     },
@@ -103,6 +103,10 @@ _LABELS = {
 
 def _count(findings: list[FindingView], severity: str) -> int:
     return sum(1 for item in findings if item.severity == severity)
+
+
+def _security(category: str) -> bool:
+    return category.casefold() == "security" or category.casefold().startswith("security/")
 
 
 def _public_alignment(status: str) -> str:
@@ -114,9 +118,9 @@ def _redacted_prior_card(severity: str, path: str, line: int | None, labels: dic
     return [f"#### [{severity}] {labels['prior_issue']}", f"`previous` · `{loc}`", ""]
 
 
-def _redacted_finding_card(severity: str, path: str, line: int | None, labels: dict[str, str]) -> list[str]:
+def _redacted_security_card(severity: str, path: str, line: int | None, labels: dict[str, str]) -> list[str]:
     loc = f"{path}:{line}" if line else path
-    return [f"#### [{severity}] {labels['public_issue']}", f"`finding` · `{loc}`", ""]
+    return [f"#### [{severity}] {labels['security_issue']}", f"`security` · `{loc}`", ""]
 
 
 def _finding_card(
@@ -167,7 +171,7 @@ def render_sticky_comment(data: RenderInput) -> str:
     verified = data.verified
     public = data.visibility != "private"
     policy = data.public_repos or PublicReposYaml()
-    redact_findings = public and policy.security_findings == "redact"
+    redact_security = public and policy.security_findings == "redact"
     prior_ids = data.redacted_prior_ids if public else set()
     p0 = _count(verified.findings, "P0")
     p1 = _count(verified.findings, "P1")
@@ -204,8 +208,10 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append(f"**Jira:** `{data.jira_warning}`")
     if data.error_code:
         lines.append(f"**{labels['error']}:** `{data.error_code}`")
-    has_findings = bool(verified.findings or data.transitions)
-    safe_summary = labels["public_summary"] if redact_findings and has_findings else verified.summary.strip()
+    has_security = any(_security(item.category) for item in verified.findings) or any(
+        _security(item.category) for item in data.transitions
+    )
+    safe_summary = labels["public_summary"] if redact_security and has_security else verified.summary.strip()
     lines.extend(["", safe_summary, "", "---", "", f"### {labels['findings']}", ""])
 
     if not verified.findings and not data.error_code:
@@ -214,8 +220,8 @@ def render_sticky_comment(data: RenderInput) -> str:
         if item.stable_id in prior_ids:
             lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
             continue
-        if redact_findings:
-            lines.extend(_redacted_finding_card(item.severity, item.path, item.line, labels))
+        if redact_security and _security(item.category):
+            lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
             continue
         lines.extend(
             _finding_card(
@@ -243,8 +249,8 @@ def render_sticky_comment(data: RenderInput) -> str:
                 title=(
                     labels["prior_issue"]
                     if item.stable_id in prior_ids
-                    else labels["public_issue"]
-                    if redact_findings
+                    else labels["security_issue"]
+                    if redact_security and _security(item.category)
                     else item.title
                 ),
             )
@@ -265,8 +271,8 @@ def render_sticky_comment(data: RenderInput) -> str:
             if item.stable_id in prior_ids:
                 lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
                 continue
-            if redact_findings:
-                lines.extend(_redacted_finding_card(item.severity, item.path, item.line, labels))
+            if redact_security and _security(item.category):
+                lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
                 continue
             lines.extend(
                 _finding_card(
@@ -298,7 +304,11 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append("")
         lines.append("</details>")
 
-    if redact_findings and not data.private_channels_configured and verified.findings:
+    if (
+        redact_security
+        and not data.private_channels_configured
+        and any(_security(item.category) for item in verified.findings)
+    ):
         lines.extend(["", labels["details_hidden"]])
 
     result = "\n".join(lines).strip() + "\n"
@@ -323,14 +333,15 @@ def render_jira_comment(data: RenderInput) -> str:
     ]
     if data.visibility != "private" and (data.public_repos or PublicReposYaml()).security_findings == "redact":
         for item in verified.findings:
-            lines.extend(
-                [
-                    f"[{item.severity}] {item.title} ({item.path}:{item.line or '?'})",
-                    f"Scenario: {item.scenario}",
-                    f"Evidence: {item.evidence}",
-                    f"Recommendation: {item.recommendation}",
-                ]
-            )
+            if _security(item.category):
+                lines.extend(
+                    [
+                        f"[{item.severity}] {item.title} ({item.path}:{item.line or '?'})",
+                        f"Scenario: {item.scenario}",
+                        f"Evidence: {item.evidence}",
+                        f"Recommendation: {item.recommendation}",
+                    ]
+                )
     return "\n".join(lines)
 
 

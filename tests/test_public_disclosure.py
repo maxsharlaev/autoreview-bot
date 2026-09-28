@@ -258,7 +258,7 @@ def test_public_previous_finding_hides_old_private_text() -> None:
 
 
 @pytest.mark.parametrize("disclosure", ["key_only", "none"])
-def test_public_review_never_publishes_jira_or_security_details(disclosure: str) -> None:
+def test_public_review_redacts_security_findings(disclosure: str) -> None:
     render = _render(PublicReposYaml(jira_disclosure=disclosure))
     text = render_sticky_comment(render)
     assert SECRET not in text
@@ -267,6 +267,7 @@ def test_public_review_never_publishes_jira_or_security_details(disclosure: str)
     assert "src/auth.py:42" in text
     assert "[P3]" in text
     assert "`partial`" in text
+    assert "Potential security issue." in text
     assert "Details are hidden because the repository is public." in text
     if disclosure == "key_only":
         assert "ABC-1" in text
@@ -298,7 +299,7 @@ def test_public_transition_hides_old_security_title() -> None:
     ]
     text = render_sticky_comment(render)
     assert SECRET not in text
-    assert "Potential issue." in text
+    assert "Potential security issue." in text
 
 
 def test_explicit_full_security_policy_keeps_finding() -> None:
@@ -618,7 +619,6 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     monkeypatch.setattr("app.services.orchestrator.build_context", build)
     monkeypatch.setattr("app.services.orchestrator._previous_head", AsyncMock(return_value=None))
     monkeypatch.setattr("app.services.orchestrator._persist_snapshot", AsyncMock())
-    monkeypatch.setattr("app.services.orchestrator._save_review_result", AsyncMock())
     publish = AsyncMock()
     monkeypatch.setattr("app.services.orchestrator._publish", publish)
     monkeypatch.setattr("app.services.orchestrator._complete", AsyncMock(return_value=run))
