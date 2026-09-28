@@ -2,7 +2,7 @@
 
 Полный деплой хоста (Compose, сеть, Prometheus): [DEPLOY.md](DEPLOY.md).
 
-Сервис принимает события Pull Request на `POST /api/v1/pull-request`. Эндпойнт требует **ключ доступа** (`REVIEW_API_KEY`) **и** валидную подпись `X-Hub-Signature-256` (HMAC-SHA256 с `GITHUB_WEBHOOK_SECRET`). Без обоих — ответ `401`. Если `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или короче 16 символов), webhook-эндпойнт отключён (`503`), но сервис запускается и `/api/v1/reviews` остаётся доступным для деплоя через Actions.
+Сервис принимает события Pull Request на `POST /api/v1/pull-request`. Эндпойнт требует только валидную подпись `X-Hub-Signature-256` (HMAC-SHA256 с `GITHUB_WEBHOOK_SECRET`); API-ключ не требуется (GitHub webhook не может отправлять произвольные заголовки). Если `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или короче 16 символов), webhook-эндпойнт отключён (`503`), но сервис запускается. Для `/api/v1/reviews` по-прежнему требуется `REVIEW_API_KEY`.
 
 `GET /health`, `GET /is-ready` и `GET /metrics` остаются открытыми для пробы живости и Prometheus. Worker отдельно отдаёт `GET http://worker:9100/metrics`. Снимок очереди: `GET /api/v1/ops/status` (с API key).
 
@@ -20,7 +20,7 @@
 
 - `REVIEW_API_KEY` на сервере
 - GitHub secret `AI_REVIEW_API_KEY`
-Прямой webhook требует API-ключ **и** валидную подпись `X-Hub-Signature-256`. GitHub рекомендует не помещать ключи в URL доставки. Если `GITHUB_WEBHOOK_SECRET` не задан, webhook-эндпойнт отключён, но `/api/v1/reviews` работает.
+Прямой webhook требует только валидную подпись `X-Hub-Signature-256` (API-ключ не нужен). GitHub рекомендует не помещать ключи в URL доставки. Если `GITHUB_WEBHOOK_SECRET` не задан, webhook-эндпойнт отключён, но `/api/v1/reviews` работает (с `REVIEW_API_KEY`).
 
 ## Вариант: fine-grained PAT
 
@@ -55,7 +55,7 @@ GITHUB_WEBHOOK_SECRET=<secret webhook репозитория, если наст�
 9. **Generate a private key** → скачайте `.pem`. Содержимое (или путь к файлу) → `GITHUB_APP_PRIVATE_KEY`.
 10. **Install App** на репозитории из `github.allowed_repos` в `config.yaml`. После установки можно взять **Installation ID** → `GITHUB_INSTALLATION_ID` (если `0`, сервис резолвит сам).
 
-Для прямого webhook требуется как API-ключ, так и `GITHUB_WEBHOOK_SECRET`. Secret `AI_REVIEW_API_KEY` нужен для GitHub Actions и ручных вызовов.
+Для прямого webhook требуется только `GITHUB_WEBHOOK_SECRET` (API-ключ не нужен). `AI_REVIEW_API_KEY` нужен для GitHub Actions (`/api/v1/reviews`) и ручных вызовов.
 
 ## 2. Organization / repository secret
 
@@ -117,7 +117,7 @@ curl -H "Authorization: Bearer $AI_REVIEW_API_KEY" \
 | Симптом | Что проверить |
 | --- | --- |
 | `503` на webhook | `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или слишком короткий) |
-| `401 invalid access key` на webhook | API-ключ **и** `GITHUB_WEBHOOK_SECRET` на App и на сервере; GitHub шлёт `X-Hub-Signature-256`. |
-| `401` при валидном ключе, событие от App | `GITHUB_WEBHOOK_SECRET` на App и на сервере одинаковый; GitHub шлёт `X-Hub-Signature-256`. |
+| `401` на webhook | `X-Hub-Signature-256` отсутствует или неверный (проверьте `GITHUB_WEBHOOK_SECRET` на App и на сервере) |
+| `401` на `/api/v1/reviews` | `REVIEW_API_KEY` отсутствует или неверный |
 | Вебхук 202, комментария нет | Worker запущен; репозиторий в `allowed_repos`; PR не draft/fork; автор с write access. |
 | Clone/comment 403 | Git clone и REST — разные протоколы. Для clone у fine-grained PAT GitHub часто требует Contents **Read and write**, даже если мы только читаем SHA. Комментарий — отдельно: Pull requests **write**. |

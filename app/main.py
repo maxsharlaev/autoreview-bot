@@ -14,7 +14,7 @@ from app.queue import create_redis_pool
 from app.security.webhook_config import (
     WEBHOOK_SECRET_MIN_LENGTH,
     is_webhook_secret_valid,
-    set_webhook_enabled,
+    set_webhook_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def _validate_startup_config() -> None:
 
     valid, reason = is_webhook_secret_valid(settings.github_webhook_secret)
     if not valid:
-        set_webhook_enabled(False)
+        set_webhook_config(enabled=False, secret="")
         logger.warning(
             "%s. Webhook endpoint (POST /api/v1/pull-request) is disabled. "
             "To enable, set GITHUB_WEBHOOK_SECRET to a random value of at least %d characters "
@@ -35,7 +35,7 @@ def _validate_startup_config() -> None:
             WEBHOOK_SECRET_MIN_LENGTH,
         )
     else:
-        set_webhook_enabled(True)
+        set_webhook_config(enabled=True, secret=settings.github_webhook_secret)
 
     app_config = get_app_config()
     if valid and not app_config.github.allowed_repos:

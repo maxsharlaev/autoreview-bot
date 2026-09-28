@@ -4,11 +4,11 @@ import base64
 import hashlib
 import hmac
 import logging
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from app.security.access import extract_presented_key, verify_api_key
-from app.security.webhook import authorize_webhook, verify_github_signature
+from app.security.webhook import verify_github_signature
 
 
 def _basic(user: str, password: str) -> str:
@@ -53,7 +53,7 @@ def test_malformed_header_wrong_algorithm() -> None:
     assert not verify_github_signature(secret="a", body=b"{}", header="sha1=deadbeef")
 
 
-# --- API key extraction tests ---
+# --- API key extraction tests (for /api/v1/reviews endpoint) ---
 
 
 def test_bearer_key() -> None:
@@ -71,82 +71,100 @@ def test_basic_auth_password() -> None:
     assert extract_presented_key(_basic("api", "secret-key"), None) == "secret-key"
 
 
-# --- authorize_webhook tests ---
+# --- Webhook endpoint tests (signature only, no API key required) ---
 
 
-def test_webhook_requires_api_key() -> None:
-    body = b'{"zen":"ok"}'
-    sig = _make_signature("webhook-secret-16ch", body)
-    assert not authorize_webhook(
-        api_key="api-key-value",
-        webhook_secret="webhook-secret-16ch",
-        authorization=None,
-        x_api_key=None,
-        body=body,
-        signature_header=sig,
-    )
+def _create_test_app():
+    """Create a test FastAPI app with the webhook router."""
+    from app.api.v1.pull_request import router
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.session_factory = MagicMock()
+    app.state.redis = MagicMock()
+    return app, TestClient(app)
 
 
-def test_webhook_requires_signature_header() -> None:
-    """Requests without X-Hub-Signature-256 are rejected even with valid API key."""
-    assert not authorize_webhook(
-        api_key="api-key-value",
-        webhook_secret="webhook-secret-16ch",
-        authorization="Bearer api-key-value",
-        x_api_key=None,
-        body=b"{}",
-        signature_header=None,
-    )
+def test_webhook_accepts_valid_signature_without_api_key() -> None:
+    """Webhook endpoint accepts requests with valid HMAC signature, no API key needed."""
+    app, client = _create_test_app()
+    secret = "webhook-secret-16ch"
+    body = b'{"action":"opened","repository":{"full_name":"org/repo"}}'
+    sig = _make_signature(secret, body)
+
+    with (
+        patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
+        patch("app.api.v1.pull_request.get_normalized_secret", return_value=secret),
+        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
+    ):
+        response = client.post(
+            "/pull-request",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "ping",
+            },
+        )
+        assert response.status_code in (200, 202), f"Expected 2xx, got {response.status_code}"
+        assert response.json()["status"] == "ok"
+
+
+def test_webhook_rejects_missing_signature() -> None:
+    """Webhook endpoint rejects requests without X-Hub-Signature-256 header."""
+    app, client = _create_test_app()
+
+    with (
+        patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
+        patch("app.api.v1.pull_request.get_normalized_secret", return_value="webhook-secret-16ch"),
+    ):
+        response = client.post(
+            "/pull-request",
+            json={},
+            headers={"X-GitHub-Event": "ping"},
+        )
+        assert response.status_code == 401
+        assert "signature" in response.json()["detail"].lower()
 
 
 def test_webhook_rejects_wrong_signature() -> None:
-    body = b'{"ok":true}'
-    assert not authorize_webhook(
-        api_key="api-key-value",
-        webhook_secret="webhook-secret-16ch",
-        authorization="Bearer api-key-value",
-        x_api_key=None,
-        body=body,
-        signature_header="sha256=deadbeef",
-    )
+    """Webhook endpoint rejects requests with invalid HMAC signature."""
+    app, client = _create_test_app()
+
+    with (
+        patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
+        patch("app.api.v1.pull_request.get_normalized_secret", return_value="webhook-secret-16ch"),
+    ):
+        response = client.post(
+            "/pull-request",
+            json={},
+            headers={
+                "X-Hub-Signature-256": "sha256=deadbeef",
+                "X-GitHub-Event": "ping",
+            },
+        )
+        assert response.status_code == 401
+        assert "signature" in response.json()["detail"].lower()
 
 
 def test_webhook_rejects_malformed_signature() -> None:
-    body = b'{"ok":true}'
-    assert not authorize_webhook(
-        api_key="api-key-value",
-        webhook_secret="webhook-secret-16ch",
-        authorization="Bearer api-key-value",
-        x_api_key=None,
-        body=body,
-        signature_header="sha256deadbeef",
-    )
+    """Webhook endpoint rejects requests with malformed signature header."""
+    app, client = _create_test_app()
 
-
-def test_webhook_accepts_valid_signature() -> None:
-    body = b'{"ok":true}'
-    sig = _make_signature("webhook-secret-16ch", body)
-    assert authorize_webhook(
-        api_key="api-key-value",
-        webhook_secret="webhook-secret-16ch",
-        authorization="Bearer api-key-value",
-        x_api_key=None,
-        body=body,
-        signature_header=sig,
-    )
-
-
-def test_github_app_basic_plus_hmac() -> None:
-    body = b'{"zen":"ok"}'
-    sig = _make_signature("hook-secret-16chars", body)
-    assert authorize_webhook(
-        api_key="review-key-value",
-        webhook_secret="hook-secret-16chars",
-        authorization=_basic("api", "review-key-value"),
-        x_api_key=None,
-        body=body,
-        signature_header=sig,
-    )
+    with (
+        patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
+        patch("app.api.v1.pull_request.get_normalized_secret", return_value="webhook-secret-16ch"),
+    ):
+        response = client.post(
+            "/pull-request",
+            json={},
+            headers={
+                "X-Hub-Signature-256": "sha256deadbeef",
+                "X-GitHub-Event": "ping",
+            },
+        )
+        assert response.status_code == 401
 
 
 # --- Webhook secret validation tests ---
@@ -204,6 +222,15 @@ def test_is_webhook_secret_valid_accepts_long_secret() -> None:
     assert reason == ""
 
 
+def test_normalize_webhook_secret_strips_whitespace() -> None:
+    """Normalized secret should strip leading/trailing whitespace."""
+    from app.security.webhook_config import normalize_webhook_secret
+
+    assert normalize_webhook_secret("  secret  ") == "secret"
+    assert normalize_webhook_secret("\tsecret\n") == "secret"
+    assert normalize_webhook_secret("secret") == "secret"
+
+
 # --- Startup validation tests ---
 
 
@@ -215,6 +242,7 @@ def test_empty_secret_disables_webhook_and_logs_warning(caplog: pytest.LogCaptur
 
     with (
         patch.object(webhook_config, "_webhook_enabled", False),
+        patch.object(webhook_config, "_normalized_secret", ""),
         patch("app.main.get_settings") as mock_settings,
         patch("app.main.get_app_config") as mock_app_config,
         caplog.at_level(logging.WARNING),
@@ -235,6 +263,7 @@ def test_placeholder_secret_disables_webhook_and_logs_warning(caplog: pytest.Log
 
     with (
         patch.object(webhook_config, "_webhook_enabled", False),
+        patch.object(webhook_config, "_normalized_secret", ""),
         patch("app.main.get_settings") as mock_settings,
         patch("app.main.get_app_config") as mock_app_config,
         caplog.at_level(logging.WARNING),
@@ -255,6 +284,7 @@ def test_short_secret_disables_webhook_and_logs_warning(caplog: pytest.LogCaptur
 
     with (
         patch.object(webhook_config, "_webhook_enabled", False),
+        patch.object(webhook_config, "_normalized_secret", ""),
         patch("app.main.get_settings") as mock_settings,
         patch("app.main.get_app_config") as mock_app_config,
         caplog.at_level(logging.WARNING),
@@ -267,22 +297,24 @@ def test_short_secret_disables_webhook_and_logs_warning(caplog: pytest.LogCaptur
         assert "disabled" in caplog.text.lower()
 
 
-def test_valid_secret_enables_webhook(caplog: pytest.LogCaptureFixture) -> None:
-    """Valid secret should enable webhook endpoint without warnings."""
+def test_valid_secret_enables_webhook_and_stores_normalized(caplog: pytest.LogCaptureFixture) -> None:
+    """Valid secret should enable webhook endpoint and store normalized secret."""
     import app.security.webhook_config as webhook_config
     from app.config import AppConfig, GitHubYaml
     from app.main import _validate_startup_config
 
     with (
         patch.object(webhook_config, "_webhook_enabled", False),
+        patch.object(webhook_config, "_normalized_secret", ""),
         patch("app.main.get_settings") as mock_settings,
         patch("app.main.get_app_config") as mock_app_config,
         caplog.at_level(logging.WARNING),
     ):
-        mock_settings.return_value.github_webhook_secret = "a-valid-secret-with-16-chars"
+        mock_settings.return_value.github_webhook_secret = "  a-valid-secret-with-16-chars  "
         mock_app_config.return_value = AppConfig(github=GitHubYaml(allowed_repos=["org/repo"]))
         _validate_startup_config()
         assert webhook_config._webhook_enabled
+        assert webhook_config._normalized_secret == "a-valid-secret-with-16-chars"
         assert "disabled" not in caplog.text.lower()
 
 
@@ -294,6 +326,7 @@ def test_empty_allowed_repos_logs_warning_when_webhook_enabled(caplog: pytest.Lo
 
     with (
         patch.object(webhook_config, "_webhook_enabled", False),
+        patch.object(webhook_config, "_normalized_secret", ""),
         patch("app.main.get_settings") as mock_settings,
         patch("app.main.get_app_config") as mock_app_config,
         caplog.at_level(logging.WARNING),
@@ -313,6 +346,7 @@ def test_empty_allowed_repos_no_warning_when_webhook_disabled(caplog: pytest.Log
 
     with (
         patch.object(webhook_config, "_webhook_enabled", False),
+        patch.object(webhook_config, "_normalized_secret", ""),
         patch("app.main.get_settings") as mock_settings,
         patch("app.main.get_app_config") as mock_app_config,
         caplog.at_level(logging.WARNING),
@@ -325,25 +359,34 @@ def test_empty_allowed_repos_no_warning_when_webhook_disabled(caplog: pytest.Log
 
 def test_webhook_endpoint_returns_503_when_disabled() -> None:
     """Webhook endpoint should return 503 when secret is not configured."""
-    from unittest.mock import MagicMock
+    app, client = _create_test_app()
 
-    from app.api.v1.pull_request import router
+    with patch("app.api.v1.pull_request.is_webhook_enabled", return_value=False):
+        response = client.post(
+            "/pull-request",
+            json={},
+        )
+        assert response.status_code == 503
+        assert "not configured" in response.json()["detail"]
+
+
+# --- /api/v1/reviews endpoint requires API key ---
+
+
+def test_reviews_endpoint_requires_api_key() -> None:
+    """The /api/v1/reviews endpoint requires REVIEW_API_KEY, unlike the webhook."""
+    from app.api.v1.reviews import router
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     app = FastAPI()
     app.include_router(router)
-
-    mock_session_factory = MagicMock()
-    app.state.session_factory = mock_session_factory
+    app.state.session_factory = MagicMock()
     app.state.redis = MagicMock()
 
-    with patch("app.api.v1.pull_request.is_webhook_enabled", return_value=False):
-        client = TestClient(app)
-        response = client.post(
-            "/pull-request",
-            headers={"Authorization": "Bearer test-key"},
-            json={},
-        )
-        assert response.status_code == 503
-        assert "not configured" in response.json()["detail"]
+    client = TestClient(app)
+    response = client.post(
+        "/reviews",
+        json={"pull_url": "https://github.com/org/repo/pull/1"},
+    )
+    assert response.status_code == 401
