@@ -6,7 +6,7 @@ See [deployment](DEPLOY.md), [observability](OBSERVABILITY.md) and the [Russian 
 
 The service does not poll GitHub for review triggers. GitHub Actions in each reviewed repository can start reviews: copy [the example](../examples/github/ai-review-trigger.yml), set `AI_REVIEW_API_KEY` and `AI_REVIEW_URL`, and add the repository to `github.allowed_repos`. The manual `POST /api/v1/reviews` endpoint is useful for debugging. Signed direct webhooks can also start reviews. The `ci.yml` in this service repository only runs lint, tests and a Docker build.
 
-Configure `pull_request` event types and branch/path filters in the reviewed repository's workflow. Branch filters apply to the PR base. Draft and fork PRs are skipped by the example. If using direct webhooks, subscribe to both `pull_request` and `public` events with a valid webhook secret. Use one automatic review trigger per repository until concurrent deduplication is implemented.
+Configure `pull_request` event types and branch/path filters in the reviewed repository's workflow. Branch filters apply to the PR base. Draft and fork PRs are skipped by the example. If using direct webhooks, subscribe to the `pull_request` event with a valid webhook secret. Use one automatic review trigger per repository until concurrent deduplication is implemented.
 
 ## First checks
 
