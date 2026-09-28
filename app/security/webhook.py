@@ -9,6 +9,13 @@ from app.security.access import extract_presented_key, verify_api_key
 
 
 def verify_github_signature(*, secret: str, body: bytes, header: str | None) -> bool:
+    """Verify X-Hub-Signature-256 HMAC signature.
+
+    Returns True only when:
+    - secret is non-empty
+    - header is present and has the form 'sha256=<hex>'
+    - the computed HMAC matches the provided digest (constant-time comparison)
+    """
     if not secret or not header:
         return False
     try:
@@ -30,9 +37,12 @@ def authorize_webhook(
     body: bytes,
     signature_header: str | None,
 ) -> bool:
+    """Authorize a webhook request.
+
+    Both a valid API key AND a valid HMAC signature are required.
+    Missing or invalid signature always results in rejection.
+    """
     presented = extract_presented_key(authorization, x_api_key)
     if not verify_api_key(api_key, presented):
         return False
-    if signature_header:
-        return verify_github_signature(secret=webhook_secret, body=body, header=signature_header)
-    return True
+    return verify_github_signature(secret=webhook_secret, body=body, header=signature_header)
