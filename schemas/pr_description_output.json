@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "changes", "linked_task", "testing", "notes_risks", "suggested_title", "title_relevance", "title_reason", "output_language"],
+  "properties": {
+    "summary": { "type": "string", "pattern": "\\S", "maxLength": 2000 },
+    "changes": { "type": "string", "pattern": "\\S", "maxLength": 4000 },
+    "linked_task": { "type": "string", "maxLength": 2000 },
+    "testing": { "type": "string", "maxLength": 2000 },
+    "notes_risks": { "type": "string", "maxLength": 2000 },
+    "suggested_title": { "type": "string", "maxLength": 120 },
+    "title_relevance": { "type": "string", "enum": ["relevant", "irrelevant", "uncertain"] },
+    "title_reason": { "type": "string", "maxLength": 500 },
+    "output_language": { "type": "string", "minLength": 2, "maxLength": 20 }
+  }
+}

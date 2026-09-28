@@ -30,6 +30,25 @@ language:
   summary: en
   details: en
 
+pr_description:
+  enabled: false
+  mode: comment # comment | fill_empty | append
+  title_mode: "off" # off | until_human_edit | when_invalid_or_inconsistent (quotes recommended)
+  check_title_relevance: true # compare PR title with commit messages
+  timeout_seconds: 180 # total budget after review publication
+  max_commit_chars: 12000 # character budget for grouped commit subjects
+  language: auto # auto or any BCP 47 language code; overrides legacy pr_text.language
+  prompt_file: "" # optional: prompts/local/pr_description.md
+
+size_guard:
+  soft:
+    commits: 50
+    changed_lines: 5000
+  hard:
+    commits: 150
+    changed_lines: 20000
+  override_label: autoreview:force
+
 codex:
   model: gpt-5.6-sol
   prompt_file: "" # optional: prompts/local/review.md (relative to the service working directory)

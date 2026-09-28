@@ -82,7 +82,12 @@ async def _run(args: list[str], *, cwd: Path, env: dict[str, str], token: str) -
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _stdout, stderr = await process.communicate()
+    try:
+        _stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
     if process.returncode != 0:
         raw = stderr.decode("utf-8", errors="replace")[:500]
         message = _redact(raw, token)
@@ -140,7 +145,7 @@ async def clone_head(
         except GitCloneError:
             await _run([*git, "checkout", "-q", "FETCH_HEAD"], cwd=dest, env=env, token=token)
         await _run([*git, "remote", "set-url", "origin", origin], cwd=dest, env=env, token=token)
-    except Exception:
+    except BaseException:
         shutil.rmtree(dest, ignore_errors=True)
         raise
     finally:

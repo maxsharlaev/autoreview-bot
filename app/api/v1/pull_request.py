@@ -6,7 +6,7 @@ from arq.connections import ArqRedis
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.api.deps import SessionDep, get_redis
-from app.config import get_settings, repo_allowed
+from app.config import get_app_config, get_settings, repo_allowed
 from app.security.webhook import authorize_webhook
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
 from app.services.review_enqueue import queue_review
@@ -35,6 +35,10 @@ def classify_pull_request_event(event: str | None, payload: dict[str, Any]) -> d
     action = payload.get("action")
     if action not in HANDLED_ACTIONS:
         return {"status": "skipped", "reason": "ignored_action"}
+    if action == "labeled":
+        label = (payload.get("label") or {}).get("name") or ""
+        if label.casefold() != get_app_config().size_guard.override_label.casefold():
+            return {"status": "skipped", "reason": "ignored_label"}
     full_name = _full_name(payload)
     if not full_name or not repo_allowed(full_name):
         return {"status": "skipped", "reason": SKIP_REPO}
@@ -94,6 +98,7 @@ async def pull_request_webhook(
         base_sha=base_sha,
         is_fork=False,
         trigger="webhook",
+        force=payload.get("action") == "labeled",
     )
     return {
         "status": run.status,
