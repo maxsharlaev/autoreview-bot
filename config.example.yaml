@@ -1,6 +1,8 @@
 github:
   app_id: 0
   installation_id: 0
+  # Required for production: configure an explicit allowlist. An empty list accepts
+  # any repository (a startup warning is logged).
   allowed_repos:
     - example-org/example-repo
     # - example-org/another-repo

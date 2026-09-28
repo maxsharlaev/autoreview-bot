@@ -2,7 +2,7 @@
 
 Полный деплой хоста (Compose, сеть, Prometheus): [DEPLOY.md](DEPLOY.md).
 
-Сервис принимает события Pull Request на `POST /api/v1/pull-request`. Эндпойнт **закрыт ключом доступа**. Без ключа ответ `401`.
+Сервис принимает события Pull Request на `POST /api/v1/pull-request`. Эндпойнт требует только валидную подпись `X-Hub-Signature-256` (HMAC-SHA256 с `GITHUB_WEBHOOK_SECRET`); API-ключ не требуется (GitHub webhook не может отправлять произвольные заголовки). Если `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или короче 16 символов), webhook-эндпойнт отключён (`503`), но сервис запускается. Для `/api/v1/reviews` по-прежнему требуется `REVIEW_API_KEY`.
 
 `GET /health`, `GET /is-ready` и `GET /metrics` остаются открытыми для пробы живости и Prometheus. Worker отдельно отдаёт `GET http://worker:9100/metrics`. Снимок очереди: `GET /api/v1/ops/status` (с API key).
 
@@ -20,7 +20,7 @@
 
 - `REVIEW_API_KEY` на сервере
 - GitHub secret `AI_REVIEW_API_KEY`
-Прямой webhook пока не готов для рекомендуемого публичного деплоя: обработчик требует API-ключ и принимает его без обязательной подписи. GitHub рекомендует не помещать ключи в URL доставки. До реализации обязательной проверки подписи используйте GitHub Actions или ручной API. См. [roadmap](ROADMAP.md).
+Прямой webhook требует только валидную подпись `X-Hub-Signature-256` (API-ключ не нужен). GitHub рекомендует не помещать ключи в URL доставки. Если `GITHUB_WEBHOOK_SECRET` не задан, webhook-эндпойнт отключён, но `/api/v1/reviews` работает (с `REVIEW_API_KEY`).
 
 ## Вариант: fine-grained PAT
 
@@ -44,7 +44,7 @@ GITHUB_WEBHOOK_SECRET=<secret webhook репозитория, если наст�
 3. **Homepage URL** — URL сервиса или внутренний docs.
 4. **Webhook**
    - Для текущего MVP можно отключить webhook и запускать ревью через GitHub Actions. App при этом даёт токен для чтения PR и публикации комментария.
-   - Когда обязательная проверка подписи будет реализована, включить webhook с URL `https://review.example.com/api/v1/pull-request` без ключа в URL и задать отдельный `GITHUB_WEBHOOK_SECRET`.
+   - Включить webhook с URL `https://review.example.com/api/v1/pull-request` без ключа в URL и задать `GITHUB_WEBHOOK_SECRET` на App и на сервере (подпись обязательна).
 5. **Permissions** (Repository):
    - **Contents**: Read-only
    - **Pull requests**: Read and write
@@ -55,7 +55,7 @@ GITHUB_WEBHOOK_SECRET=<secret webhook репозитория, если наст�
 9. **Generate a private key** → скачайте `.pem`. Содержимое (или путь к файлу) → `GITHUB_APP_PRIVATE_KEY`.
 10. **Install App** на репозитории из `github.allowed_repos` в `config.yaml`. После установки можно взять **Installation ID** → `GITHUB_INSTALLATION_ID` (если `0`, сервис резолвит сам).
 
-Пока прямой webhook не переведён на обязательную подпись, используйте workflow-триггер или ручной API. Secret `AI_REVIEW_API_KEY` нужен для GitHub Actions и ручных вызовов.
+Для прямого webhook требуется только `GITHUB_WEBHOOK_SECRET` (API-ключ не нужен). `AI_REVIEW_API_KEY` нужен для GitHub Actions (`/api/v1/reviews`) и ручных вызовов.
 
 ## 2. Organization / repository secret
 
@@ -116,7 +116,8 @@ curl -H "Authorization: Bearer $AI_REVIEW_API_KEY" \
 
 | Симптом | Что проверить |
 | --- | --- |
-| `401 invalid access key` на webhook | Текущий обработчик требует API-ключ; до реализации подписанного webhook используйте Action или ручной API. |
-| `401` при валидном ключе, событие от App | `GITHUB_WEBHOOK_SECRET` на App и на сервере одинаковый; GitHub шлёт `X-Hub-Signature-256`. |
+| `503` на webhook | `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или слишком короткий) |
+| `401` на webhook | `X-Hub-Signature-256` отсутствует или неверный (проверьте `GITHUB_WEBHOOK_SECRET` на App и на сервере) |
+| `401` на `/api/v1/reviews` | `REVIEW_API_KEY` отсутствует или неверный |
 | Вебхук 202, комментария нет | Worker запущен; репозиторий в `allowed_repos`; PR не draft/fork; автор с write access. |
 | Clone/comment 403 | Git clone и REST — разные протоколы. Для clone у fine-grained PAT GitHub часто требует Contents **Read and write**, даже если мы только читаем SHA. Комментарий — отдельно: Pull requests **write**. |

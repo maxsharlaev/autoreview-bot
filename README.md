@@ -15,8 +15,8 @@ Self-hosted FastAPI service for advisory pull request reviews. The current imple
 ## What it does
 
 1. GitHub App webhook `POST /api/v1/pull-request` on `opened`, `synchronize`, `reopened`, `ready_for_review`.
-2. Requires access key `REVIEW_API_KEY` (GitHub secret `AI_REVIEW_API_KEY`). If a request includes `X-Hub-Signature-256`, the service also verifies it against `GITHUB_WEBHOOK_SECRET`.
-3. Checks the configured repository list and skips forks and draft PRs. An empty `github.allowed_repos` currently permits all repositories; configure a non-empty list for use outside local testing.
+2. **Webhook endpoint** (`POST /api/v1/pull-request`) requires only a valid `X-Hub-Signature-256` HMAC-SHA256 signature computed with `GITHUB_WEBHOOK_SECRET`; no API key is needed. If `GITHUB_WEBHOOK_SECRET` is not configured (empty, a placeholder like `change-me`, or shorter than 16 characters), the webhook endpoint is disabled (returns 503) and a startup warning is logged. **Manual/Actions endpoint** (`POST /api/v1/reviews`) requires `REVIEW_API_KEY` and remains available even when the webhook is disabled.
+3. Checks the configured repository list and skips forks and draft PRs. An empty `github.allowed_repos` permits all repositories (a startup warning is logged); configure an explicit allowlist for production use.
 4. Reuses a pending, running, or completed review for the same `{repo}:{pr}:{head_sha}` under normal sequential delivery. A new SHA requests cancellation of the previous job. Manual `POST /api/v1/reviews` defaults to `force: true`. Different PRs can run in parallel (`WORKER_MAX_JOBS`, default 4). Atomic deduplication and a final SHA check are planned.
 5. Worker loads PR diff, extracts a Jira key, builds untrusted-marked context, clones the head SHA, runs `codex exec` in a read-only sandbox.
 6. Validates the JSON schema, stores findings, and updates one sticky PR comment (`<!-- open-pr-review -->`). Stricter SHA and location checks are planned.
@@ -49,13 +49,13 @@ arq app.workers.settings.WorkerSettings
 
 ## Access key
 
-`POST /api/v1/pull-request`, `POST /api/v1/reviews`, and `GET /api/v1/reviews/{id}` return `401` without a matching key. Send it as:
+`POST /api/v1/reviews` and `GET /api/v1/reviews/{id}` return `401` without a matching `REVIEW_API_KEY`. Send it as:
 
 - `Authorization: Bearer <REVIEW_API_KEY>`
 - `X-Api-Key: <REVIEW_API_KEY>`
 - HTTP Basic for direct API calls (the password is `REVIEW_API_KEY`)
 
-Store the same value in GitHub as Actions secret `AI_REVIEW_API_KEY` if using the reusable workflow. The webhook currently accepts a valid API key without an HMAC header. Requiring a signature for webhook delivery is part of the public release roadmap. Do not place credentials in a webhook URL.
+Store the same value in GitHub as Actions secret `AI_REVIEW_API_KEY` if using the reusable workflow. The webhook endpoint (`POST /api/v1/pull-request`) uses only `X-Hub-Signature-256` for authentication (GitHub webhooks cannot send custom API key headers). If `GITHUB_WEBHOOK_SECRET` is not configured, the webhook endpoint is disabled (503) but the service starts and `/api/v1/reviews` remains available. Do not place credentials in a webhook URL.
 
 ## Configuration
 
@@ -180,7 +180,7 @@ Service account needs browse + comment + transition on the listed projects. The 
 - `POST /api/v1/reviews` — manual trigger (access key, no HMAC). Body: `pull_url` or `repository` + `number`
 - `GET /api/v1/reviews/{review_run_id}` — run status (access key required)
 - `GET /api/v1/ops/status` — worker/queue snapshot (access key). Use this when reviews “do nothing”
-- `POST /api/v1/pull-request` — GitHub webhook (access key required; HMAC if `X-Hub-Signature-256` is present)
+- `POST /api/v1/pull-request` — GitHub webhook (`X-Hub-Signature-256` required, no API key)
 - `GET /health` — liveness
 - `GET /is-ready` — Postgres + Redis
 - `GET /metrics` — Prometheus (API). Worker: `http://localhost:9100/metrics`

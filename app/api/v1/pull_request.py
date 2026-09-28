@@ -6,8 +6,9 @@ from arq.connections import ArqRedis
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.api.deps import SessionDep, get_redis
-from app.config import get_app_config, get_settings, repo_allowed
-from app.security.webhook import authorize_webhook
+from app.config import get_app_config, repo_allowed
+from app.security.webhook import verify_github_signature
+from app.security.webhook_config import get_normalized_secret, is_webhook_enabled
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
 from app.services.review_enqueue import queue_review
 
@@ -61,20 +62,20 @@ async def pull_request_webhook(
     session: SessionDep,
     x_hub_signature_256: str | None = Header(default=None),
     x_github_event: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
-    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ) -> dict[str, Any]:
+    if not is_webhook_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="webhook endpoint disabled: GITHUB_WEBHOOK_SECRET not configured",
+        )
+
     body = await request.body()
-    settings = get_settings()
-    if not authorize_webhook(
-        api_key=settings.review_api_key,
-        webhook_secret=settings.github_webhook_secret,
-        authorization=authorization,
-        x_api_key=x_api_key,
+    if not verify_github_signature(
+        secret=get_normalized_secret(),
         body=body,
-        signature_header=x_hub_signature_256,
+        header=x_hub_signature_256,
     ):
-        raise HTTPException(status_code=401, detail="invalid access key")
+        raise HTTPException(status_code=401, detail="invalid signature")
 
     payload = await request.json() if body else {}
     skipped = classify_pull_request_event(x_github_event, payload)
