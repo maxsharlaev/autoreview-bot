@@ -134,7 +134,8 @@ async def test_webhook_passes_repository_visibility_to_queue(monkeypatch) -> Non
     }
     request = SimpleNamespace(body=AsyncMock(return_value=b"payload"), json=AsyncMock(return_value=payload))
     queue = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4(), status="pending"))
-    monkeypatch.setattr("app.api.v1.pull_request.authorize_webhook", lambda **_kwargs: True)
+    monkeypatch.setattr("app.api.v1.pull_request.is_webhook_enabled", lambda: True)
+    monkeypatch.setattr("app.api.v1.pull_request.verify_github_signature", lambda **_kwargs: True)
     monkeypatch.setattr("app.api.v1.pull_request.classify_pull_request_event", lambda *_args: None)
     monkeypatch.setattr("app.api.v1.pull_request.get_redis", lambda _request: None)
     monkeypatch.setattr("app.api.v1.pull_request.queue_review", queue)
