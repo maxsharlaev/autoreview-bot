@@ -213,6 +213,7 @@ def plan_pr_title_update(
     relevance: Literal["relevant", "irrelevant", "uncertain"],
     bot_title: str | None = None,
     source_unchanged: bool = False,
+    retain_issue_key: bool = True,
 ) -> str | None:
     if mode == "off":
         return None
@@ -222,7 +223,7 @@ def plan_pr_title_update(
     if not editable or (source_unchanged and bot_title == title):
         return None
     candidate = strip_format_controls(suggested).strip()
-    key = ISSUE_KEY_RE.search(title)
+    key = ISSUE_KEY_RE.search(title) if retain_issue_key else None
     if key:
         candidate_keys = ISSUE_KEY_RE.findall(candidate)
         if any(candidate_key != key.group(1) for candidate_key in candidate_keys):

@@ -14,6 +14,7 @@ from app.queue import abort_job, enqueue_review, job_is_active
 from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR
 from app.services.issue_key import extract_issue_key
 from app.services.pr_description import without_managed_block
+from app.services.visibility import Visibility
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ async def queue_review(
     is_fork: bool,
     trigger: str = "webhook",
     force: bool = False,
+    repository_visibility: Visibility | None = None,
 ) -> ReviewRun:
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
@@ -119,9 +121,11 @@ async def queue_review(
         old.status = "cancelled"
 
     metric_keys = ("commits", "additions", "deletions", "changed_files")
-    webhook_size = None
+    webhook_size: dict[str, Any] = {}
     if trigger == "webhook" and all(pr_payload.get(key) is not None for key in metric_keys):
-        webhook_size = {"size_metrics": {key: int(pr_payload[key]) for key in metric_keys}}
+        webhook_size["size_metrics"] = {key: int(pr_payload[key]) for key in metric_keys}
+    if repository_visibility is not None:
+        webhook_size["repository_visibility"] = repository_visibility
 
     run = ReviewRun(
         id=uuid.uuid4(),
@@ -130,7 +134,7 @@ async def queue_review(
         base_sha=base_sha,
         head_sha=head_sha,
         status="pending",
-        summary=webhook_size,
+        summary=webhook_size or None,
     )
     session.add(run)
     await session.flush()

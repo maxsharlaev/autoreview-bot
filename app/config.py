@@ -116,6 +116,11 @@ class SizeGuardYaml(BaseModel):
         return self
 
 
+class PublicReposYaml(BaseModel):
+    jira_disclosure: Literal["none", "key_only", "full"] = "key_only"
+    security_findings: Literal["redact", "full"] = "redact"
+
+
 class CodexYaml(BaseModel):
     model: str = "gpt-5.6-sol"
     prompt_file: str = ""
@@ -139,6 +144,7 @@ class AppConfig(BaseModel):
     pr_description: PrDescriptionYaml = Field(default_factory=PrDescriptionYaml)
     pr_text: PrTextYaml = Field(default_factory=PrTextYaml)
     size_guard: SizeGuardYaml = Field(default_factory=SizeGuardYaml)
+    public_repos: PublicReposYaml = Field(default_factory=PublicReposYaml)
     codex: CodexYaml = Field(default_factory=CodexYaml)
 
 

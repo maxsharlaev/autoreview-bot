@@ -14,6 +14,7 @@ import httpx
 import jwt
 
 from app.config import Settings, get_settings
+from app.services.visibility import Visibility, repository_visibility
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class PullRequestInfo:
     deletions: int = 0
     changed_files: int = 0
     labels: tuple[str, ...] = ()
+    visibility: Visibility | None = None
 
 
 @dataclass
@@ -170,6 +172,7 @@ class GitHubAppClient:
             deletions=int(data.get("deletions") or 0),
             changed_files=int(data.get("changed_files") or 0),
             labels=tuple(str(item.get("name") or "") for item in data.get("labels") or []),
+            visibility=repository_visibility(base_repo),
         )
 
     async def list_files(self, owner: str, repo: str, number: int) -> list[ChangedFile]:

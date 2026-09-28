@@ -36,12 +36,20 @@ class Publisher:
         issue_key: str | None,
         current_jira_status: str | None,
     ) -> dict[str, bool]:
+        jira_comment_enabled = bool(
+            issue_key
+            and self.jira.project_allowed(issue_key)
+            and self.jira.enabled()
+            and self.config.features.jira_comment
+        )
+        slack_enabled = self.slack.enabled()
+        render.private_channels_configured = jira_comment_enabled or slack_enabled
         body = render_sticky_comment(render)
         await self.github.upsert_sticky_comment(owner, repo, pr_number, body)
 
         result = {"github_comment": True, "jira_comment": False, "jira_transition": False, "slack": False}
         if issue_key and self.jira.project_allowed(issue_key) and self.jira.enabled():
-            if self.config.features.jira_comment:
+            if jira_comment_enabled:
                 try:
                     await self.jira.add_comment(issue_key, render_jira_comment(render))
                     result["jira_comment"] = True
@@ -60,7 +68,7 @@ class Publisher:
                 except JiraError:
                     logger.exception("Jira transition failed for %s", issue_key)
 
-        if self.slack.enabled():
+        if slack_enabled:
             try:
                 result["slack"] = await self.slack.post_message(render_slack_review(render))
             except SlackError:

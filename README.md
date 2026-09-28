@@ -74,6 +74,18 @@ Set `pr_description.enabled: true` in `config.yaml` to draft a description from 
 
 Optional `pr_description.title_mode` supports `off` (default), `until_human_edit`, and `when_invalid_or_inconsistent`. The bot changes only a blank title, a branch-name title, or its own previously recorded title; it preserves any other human title. `always` remains a deprecated alias for `until_human_edit`. With `check_title_relevance: true`, unresolved mismatches appear in the draft. `pr_description.language` accepts `auto` or a language code; if omitted it follows the legacy `pr_text.language` key, then `language.details`. `size_guard` limits model use for large PRs, with `autoreview:force` as an override label.
 
+## Public repository disclosure
+
+The worker confirms repository visibility from GitHub on every run. Missing or conflicting visibility is treated as public. Webhook visibility is retained as a conservative hint. Existing configuration uses the public defaults below; private repositories keep the full review output.
+
+```yaml
+public_repos:
+  jira_disclosure: key_only # none | key_only | full
+  security_findings: redact # redact | full
+```
+
+For public repositories, `key_only` shows the Jira key as plain text; `none` removes it from bot output. `full` explicitly allows the linked task's Jira content in the generated description. The review and PR text models do not receive issue text fetched from Jira; a separate read-only alignment check receives it and publishes only `matches`, `partial`, `mismatch`, or `unknown`. Security findings of every severity are reduced to severity, path/line, and a generic description. Full finding details go to configured Jira comments or Slack; if neither is configured, the PR comment says details are hidden. `security_findings: full` explicitly restores detailed GitHub findings. This policy applies to new publications, not previously posted comments.
+
 ## Manual local review (no GitHub webhook)
 
 The GitHub webhook is optional for a first test. Call the local API yourself. The worker still uses `GITHUB_TOKEN` (or GitHub App) to **read the PR, clone the SHA, and post the sticky comment** — you only skip GitHub delivering the event.

@@ -49,6 +49,10 @@ size_guard:
     changed_lines: 20000
   override_label: autoreview:force
 
+public_repos:
+  jira_disclosure: key_only # none | key_only | full
+  security_findings: redact # redact | full
+
 codex:
   model: gpt-5.6-sol
   prompt_file: "" # optional: prompts/local/review.md (relative to the service working directory)
