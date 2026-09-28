@@ -167,6 +167,52 @@ def test_webhook_rejects_malformed_signature() -> None:
         assert response.status_code == 401
 
 
+def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
+    """Labeled event with autoreview:force label queues review with force=True."""
+    import json
+
+    app, client = _create_test_app()
+    secret = "webhook-secret-16ch"
+    payload = {
+        "action": "labeled",
+        "label": {"name": "autoreview:force"},
+        "repository": {"full_name": "org/repo"},
+        "pull_request": {
+            "number": 42,
+            "draft": False,
+            "head": {"sha": "abc123", "repo": {"full_name": "org/repo", "fork": False}},
+            "base": {"sha": "def456", "repo": {"full_name": "org/repo"}},
+        },
+    }
+    body = json.dumps(payload).encode()
+    sig = _make_signature(secret, body)
+
+    mock_run = MagicMock()
+    mock_run.status = "queued"
+    mock_run.id = "run-123"
+
+    with (
+        patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
+        patch("app.api.v1.pull_request.get_normalized_secret", return_value=secret),
+        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
+        patch("app.api.v1.pull_request.get_app_config") as mock_config,
+        patch("app.api.v1.pull_request.queue_review", return_value=mock_run) as mock_queue,
+    ):
+        mock_config.return_value.size_guard.override_label = "autoreview:force"
+        response = client.post(
+            "/pull-request",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "pull_request",
+            },
+        )
+        assert response.status_code in (200, 202), f"Expected 2xx, got {response.status_code}"
+        mock_queue.assert_called_once()
+        call_kwargs = mock_queue.call_args.kwargs
+        assert call_kwargs["force"] is True, "queue_review should be called with force=True"
+
+
 # --- Webhook secret validation tests ---
 
 
