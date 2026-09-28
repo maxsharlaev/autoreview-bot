@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from typing import Literal
 
 import jsonschema
 from sqlalchemy import select
@@ -36,7 +37,7 @@ from app.services.constants import (
 )
 from app.services.context_builder import PreviousFinding, build_context
 from app.services.git_clone import GitCloneError, cleanup_checkout, clone_head
-from app.services.issue_key import ISSUE_KEY_RE, extract_issue_key
+from app.services.issue_key import extract_issue_key, remove_issue_key
 from app.services.pr_description import (
     COMMENT_MARKER,
     build_pr_description_context,
@@ -229,15 +230,15 @@ async def run_review(
         PreviousFinding(
             stable_id=item.stable_id,
             severity=item.severity,
-            title=item.title,
+            title=item.title if visibility == "private" else "",
             path=item.path,
             line=item.line,
             status=item.current_status,
-            evidence=item.evidence,
-            scenario=item.scenario,
-            recommendation=item.recommendation,
+            evidence=item.evidence if visibility == "private" else "",
+            scenario=item.scenario if visibility == "private" else "",
+            recommendation=item.recommendation if visibility == "private" else "",
         )
-        for item in (pr.findings if visibility == "private" else [])
+        for item in pr.findings
     ]
     previous_head = await _previous_head(session, pr.id, run.id)
 
@@ -271,8 +272,13 @@ async def run_review(
             truncated=True,
         )
         verified.summary = "PR exceeds AI review size limits and needs expanded human review."
-        if visibility == "private" and not await _private_still_private(github, info):
-            return await _fail(session, run, started, "VISIBILITY_CHANGED")
+        publication = "private"
+        if visibility == "private":
+            publication = await _private_publication_status(github, info)
+            if publication == "head_changed":
+                return await _fail(session, run, started, "HEAD_CHANGED")
+            if publication == "public_fallback":
+                visibility = "public"
         await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
         await _publish(
             publisher,
@@ -280,7 +286,7 @@ async def run_review(
             repo,
             pr,
             run,
-            verified,
+            _safe_public_fallback(verified) if publication == "public_fallback" else verified,
             [],
             issue_key,
             jira_status,
@@ -290,6 +296,7 @@ async def run_review(
             session=session,
             error_code=SKIP_TOO_LARGE,
             visibility=visibility,
+            force_public_redaction=publication == "public_fallback",
         )
         progress.event(f"completed with skip {SKIP_TOO_LARGE}")
         return await _complete(session, run, started, SKIP_TOO_LARGE, verified, config, context.prompt_version)
@@ -365,8 +372,13 @@ async def run_review(
             verified.summary = last_detail or "Codex did not return a valid review payload."
             error_code = last_error or AI_OUTPUT_INVALID
             progress.event(f"failed: {error_code}")
-            if visibility == "private" and not await _private_still_private(github, info):
-                return await _fail(session, run, started, "VISIBILITY_CHANGED")
+            publication = "private"
+            if visibility == "private":
+                publication = await _private_publication_status(github, info)
+                if publication == "head_changed":
+                    return await _fail(session, run, started, "HEAD_CHANGED")
+                if publication == "public_fallback":
+                    visibility = "public"
             await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
             await _publish(
                 publisher,
@@ -374,7 +386,7 @@ async def run_review(
                 repo,
                 pr,
                 run,
-                verified,
+                _safe_public_fallback(verified) if publication == "public_fallback" else verified,
                 [],
                 issue_key,
                 jira_status,
@@ -384,6 +396,7 @@ async def run_review(
                 session=session,
                 error_code=error_code,
                 visibility=visibility,
+                force_public_redaction=publication == "public_fallback",
             )
             return await _fail(session, run, started, error_code)
         public_alignment = "unknown" if visibility == "public" else None
@@ -404,14 +417,16 @@ async def run_review(
     verified.coverage["files_total"] = context.files_total
     verified.coverage["files_reviewed"] = context.files_reviewed
     verified.coverage["skipped_paths"] = context.skipped_paths
+    _carry_open_previous(verified, pr.findings, config.language.details)
+    publication = "private"
     if visibility == "private":
-        _carry_open_previous(verified, pr.findings, config.language.details)
-    else:
-        verified.previous_findings = []
+        publication = await _private_publication_status(github, info)
+        if publication == "head_changed":
+            return await _fail(session, run, started, "HEAD_CHANGED")
+        if publication == "public_fallback":
+            visibility = "public"
     transitions = await _store_findings(session, pr, run, verified)
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
-    if visibility == "private" and not await _private_still_private(github, info):
-        return await _fail(session, run, started, "VISIBILITY_CHANGED")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
     progress.event("publish sticky comment")
     await _publish(
@@ -420,8 +435,8 @@ async def run_review(
         repo,
         pr,
         run,
-        verified,
-        transitions,
+        _safe_public_fallback(verified) if publication == "public_fallback" else verified,
+        _safe_public_transitions(transitions) if publication == "public_fallback" else transitions,
         issue_key,
         jira_status,
         jira_warning,
@@ -430,6 +445,7 @@ async def run_review(
         session=session,
         visibility=visibility,
         public_alignment=public_alignment,
+        force_public_redaction=publication == "public_fallback",
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
@@ -485,13 +501,41 @@ async def _complete_then_describe(
     return completed
 
 
-async def _private_still_private(github: GitHubAppClient, info: PullRequestInfo) -> bool:
+async def _private_publication_status(
+    github: GitHubAppClient, info: PullRequestInfo
+) -> Literal["private", "public_fallback", "head_changed"]:
     try:
         current = await github.get_pull_request(info.owner, info.repo, info.number)
     except Exception:
         logger.exception("Could not reconfirm private repository visibility for %s#%s", info.full_name, info.number)
-        return False
-    return current.visibility == "private" and current.head_sha == info.head_sha
+        return "public_fallback"
+    if current.head_sha != info.head_sha:
+        return "head_changed"
+    return "private" if current.visibility == "private" else "public_fallback"
+
+
+def _safe_public_fallback(verified: VerifiedReview) -> VerifiedReview:
+    """Keep severities and locations without publishing text generated from private Jira context."""
+    return replace(
+        verified,
+        summary="Review completed. Finding details were withheld while repository visibility could not be confirmed.",
+        task_alignment_status="unclear",
+        issue_key=None,
+        unmet_acceptance_criteria=[],
+        findings=[
+            replace(item, category="security", title="Potential issue", scenario="", evidence="", recommendation="")
+            for item in verified.findings
+        ],
+        previous_findings=[],
+        coverage={**verified.coverage, "skipped_paths": []},
+    )
+
+
+def _safe_public_transitions(transitions: list[FindingTransitionView]) -> list[FindingTransitionView]:
+    return [
+        replace(item, category="security", title="Potential issue", scenario="", evidence="", recommendation="")
+        for item in transitions
+    ]
 
 
 async def _check_public_alignment(
@@ -686,7 +730,8 @@ async def _publish_pr_description(
         return
     suggested_title = payload["suggested_title"]
     if visibility == "public" and config.public_repos.jira_disclosure == "none":
-        suggested_title = ISSUE_KEY_RE.sub("", suggested_title).strip()
+        linked_key = jira_issue.key if jira_issue else extract_issue_key(info.head_ref, info.title)
+        suggested_title = remove_issue_key(suggested_title, linked_key).strip()
     proposed_title = plan_pr_title_update(
         latest.title,
         suggested_title,
@@ -761,7 +806,8 @@ async def _publish_pr_description(
         )
     mode = config.pr_description.mode
     if visibility == "public" and config.public_repos.jira_disclosure == "none":
-        draft = ISSUE_KEY_RE.sub("", draft)
+        linked_key = jira_issue.key if jira_issue else extract_issue_key(info.head_ref, info.title)
+        draft = remove_issue_key(draft, linked_key)
     if mode == "comment":
         await github.upsert_sticky_comment(
             info.owner,
@@ -1060,6 +1106,7 @@ async def _publish(
     error_code: str | None = None,
     visibility: Visibility = "public",
     public_alignment: str | None = None,
+    force_public_redaction: bool = False,
 ) -> None:
     render = RenderInput(
         repository=pr.repository.full_name,
@@ -1076,7 +1123,11 @@ async def _publish(
         language=config.language,
         error_code=error_code,
         visibility=visibility,
-        public_repos=config.public_repos,
+        public_repos=(
+            config.public_repos.model_copy(update={"security_findings": "redact"})
+            if force_public_redaction
+            else config.public_repos
+        ),
         public_alignment=public_alignment,
     )
     has_blockers = any(item.severity in {"P0", "P1"} for item in verified.findings)

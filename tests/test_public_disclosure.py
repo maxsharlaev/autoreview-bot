@@ -14,13 +14,15 @@ from app.services.comment_render import FindingTransitionView, RenderInput, rend
 from app.services.constants import SKIP_TOO_LARGE
 from app.services.orchestrator import (
     _check_public_alignment,
-    _private_still_private,
+    _private_publication_status,
+    _publish,
     _publish_pr_description,
+    _safe_public_fallback,
     run_review,
 )
 from app.services.pr_description import plan_pr_body_update
 from app.services.publisher import Publisher, empty_verified
-from app.services.verifier import FindingView
+from app.services.verifier import FindingView, PreviousFindingView
 from app.services.visibility import confirmed_visibility, repository_visibility
 
 SECRET = "internal acceptance criteria: transfer funds without approval"
@@ -159,9 +161,98 @@ async def test_github_pull_response_confirms_visibility() -> None:
 async def test_private_visibility_is_rechecked_before_publication() -> None:
     info = _info("private")
     github = SimpleNamespace(get_pull_request=AsyncMock(return_value=_info("public")))
-    assert await _private_still_private(github, info) is False
+    assert await _private_publication_status(github, info) == "public_fallback"
     github.get_pull_request.return_value = _info("private")
-    assert await _private_still_private(github, info) is True
+    assert await _private_publication_status(github, info) == "private"
+    changed = _info("private")
+    changed.head_sha = "c" * 40
+    github.get_pull_request.return_value = changed
+    assert await _private_publication_status(github, info) == "head_changed"
+    github.get_pull_request.side_effect = RuntimeError("GitHub unavailable")
+    assert await _private_publication_status(github, info) == "public_fallback"
+
+
+def test_public_fallback_keeps_private_result_in_memory() -> None:
+    original = _render(visibility="private").verified
+    safe = _safe_public_fallback(original)
+    assert original.summary == SECRET
+    assert original.findings[0].scenario == SECRET
+    assert SECRET not in safe.summary
+    assert safe.findings[0].scenario == ""
+    assert safe.findings[0].severity == original.findings[0].severity
+
+
+@pytest.mark.asyncio
+async def test_public_fallback_forces_redaction_even_with_full_policy() -> None:
+    original = _render(visibility="private").verified
+    publisher = SimpleNamespace(publish=AsyncMock(return_value={}))
+    pr = SimpleNamespace(repository=SimpleNamespace(full_name="org/repo"), number=7, head_sha="a" * 40)
+    run = SimpleNamespace(id=uuid.uuid4())
+    await _publish(
+        publisher,
+        "org",
+        "repo",
+        pr,
+        run,
+        _safe_public_fallback(original),
+        [],
+        "ABC-1",
+        None,
+        None,
+        0.0,
+        AppConfig(public_repos=PublicReposYaml(security_findings="full")),
+        visibility="public",
+        force_public_redaction=True,
+    )
+    render = publisher.publish.await_args.kwargs["render"]
+    assert render.public_repos.security_findings == "redact"
+    assert SECRET not in render_sticky_comment(render)
+
+
+def test_public_nonsecurity_review_keeps_model_summary() -> None:
+    render = _render()
+    render.verified.summary = "Useful summary of the changes"
+    render.verified.findings[0].category = "correctness"
+    text = render_sticky_comment(render)
+    assert "Useful summary of the changes" in text
+    assert "Review completed. See the findings below." not in text
+
+
+def test_none_removes_only_linked_jira_key() -> None:
+    render = _render(PublicReposYaml(jira_disclosure="none"))
+    render.verified.summary = "Use SHA-256 and UTF-8 for CVE-2024, not ABC-1"
+    render.verified.findings[0].category = "correctness"
+    text = render_sticky_comment(render)
+    assert "ABC-1" not in text
+    assert "SHA-256" in text
+    assert "UTF-8" in text
+    assert "CVE-2024" in text
+
+
+def test_public_previous_finding_hides_old_private_text() -> None:
+    render = _render()
+    render.verified.summary = "Review of current changes"
+    render.verified.findings[0].category = "correctness"
+    render.verified.previous_findings = [
+        PreviousFindingView(
+            stable_id="secret-finding", status="still_open", evidence=SECRET, path="src/auth.py", line=42
+        )
+    ]
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="secret-finding",
+            status="still_open",
+            path="src/auth.py",
+            line=42,
+            severity="P3",
+            title=SECRET,
+            category="correctness",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert SECRET not in text
+    assert "Previously reported issue." in text
+    assert "src/auth.py:42" in text
 
 
 @pytest.mark.parametrize("disclosure", ["key_only", "none"])
@@ -397,12 +488,12 @@ async def test_public_none_removes_issue_key_from_generated_title_and_suggestion
     info = _info()
     info.title = info.head_ref
     payload = {
-        "summary": "Change validation",
-        "changes": "Update validation logic",
+        "summary": "Change SHA-256 validation",
+        "changes": "Keep UTF-8 for CVE-2024 handling",
         "linked_task": "ABC-1",
         "testing": "Not verified",
         "notes_risks": "None",
-        "suggested_title": "feat: validate inputs ABC-1",
+        "suggested_title": "feat: validate SHA-256 inputs ABC-1",
         "title_relevance": "irrelevant",
         "title_reason": "ABC-1 is not descriptive",
         "output_language": "en",
@@ -427,8 +518,12 @@ async def test_public_none_removes_issue_key_from_generated_title_and_suggestion
         settings=Settings.model_construct(openai_api_key="test"),
         visibility="public",
     )
-    assert github.update_pull_request_title.await_args.args[-1] == "feat: validate inputs"
-    assert "ABC-1" not in github.upsert_sticky_comment.await_args.args[-1]
+    assert github.update_pull_request_title.await_args.args[-1] == "feat: validate SHA-256 inputs"
+    comment = github.upsert_sticky_comment.await_args.args[-1]
+    assert "ABC-1" not in comment
+    assert "SHA-256" in comment
+    assert "UTF-8" in comment
+    assert "CVE-2024" in comment
 
 
 @pytest.mark.asyncio
@@ -476,7 +571,18 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     info.title = SECRET
     info.body = plan_pr_body_update("Human notes", SECRET, mode="append") or ""
     repository = SimpleNamespace(full_name="org/repo")
-    pr = SimpleNamespace(id=uuid.uuid4(), repository=repository, number=7, findings=[], bot_title=SECRET)
+    stored = SimpleNamespace(
+        stable_id="prior-1",
+        severity="P2",
+        title="Existing issue",
+        path="src/app.py",
+        line=12,
+        current_status="open",
+        evidence="previous evidence",
+        scenario="previous scenario",
+        recommendation="previous recommendation",
+    )
+    pr = SimpleNamespace(id=uuid.uuid4(), repository=repository, number=7, findings=[stored], bot_title=SECRET)
     run = SimpleNamespace(
         id=uuid.uuid4(),
         pull_request=pr,
@@ -527,5 +633,9 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     assert build.call_args.kwargs["jira_text"] is None
     assert build.call_args.kwargs["title"] == ""
     assert SECRET not in build.call_args.kwargs["body"]
-    assert build.call_args.kwargs["previous_findings"] == []
+    previous = build.call_args.kwargs["previous_findings"]
+    assert len(previous) == 1
+    assert previous[0].stable_id == "prior-1"
+    assert previous[0].title == ""
+    assert previous[0].evidence == ""
     assert publish.await_args.kwargs["visibility"] == "public"

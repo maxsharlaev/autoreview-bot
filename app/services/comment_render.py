@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from app.config import LanguageYaml, PublicReposYaml
 from app.services.constants import REVIEW_MARKER
-from app.services.issue_key import ISSUE_KEY_RE
+from app.services.issue_key import remove_issue_key
 from app.services.verifier import FindingView, VerifiedReview
 from app.services.visibility import Visibility
 
@@ -68,6 +68,7 @@ _LABELS = {
         "model": "model",
         "public_summary": "Review completed. See the findings below.",
         "security_issue": "Potential security issue.",
+        "prior_issue": "Previously reported issue.",
         "details_hidden": "Details are hidden because the repository is public.",
     },
     "ru": {
@@ -93,6 +94,7 @@ _LABELS = {
         "model": "модель",
         "public_summary": "Ревью завершено. Замечания приведены ниже.",
         "security_issue": "Возможная проблема безопасности.",
+        "prior_issue": "Ранее найденная проблема.",
         "details_hidden": "Подробности скрыты, поскольку репозиторий публичный.",
     },
 }
@@ -113,6 +115,11 @@ def _public_alignment(status: str) -> str:
 def _redacted_security_card(severity: str, path: str, line: int | None, labels: dict[str, str]) -> list[str]:
     loc = f"{path}:{line}" if line else path
     return [f"#### [{severity}] {labels['security_issue']}", f"`security` · `{loc}`", ""]
+
+
+def _redacted_prior_card(severity: str, path: str, line: int | None, labels: dict[str, str]) -> list[str]:
+    loc = f"{path}:{line}" if line else path
+    return [f"#### [{severity}] {labels['prior_issue']}", f"`previous` · `{loc}`", ""]
 
 
 def _finding_card(
@@ -164,6 +171,7 @@ def render_sticky_comment(data: RenderInput) -> str:
     public = data.visibility != "private"
     policy = data.public_repos or PublicReposYaml()
     redact_security = public and policy.security_findings == "redact"
+    prior_ids = {item.stable_id for item in verified.previous_findings} if public else set()
     p0 = _count(verified.findings, "P0")
     p1 = _count(verified.findings, "P1")
     p2 = _count(verified.findings, "P2")
@@ -199,12 +207,18 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append(f"**Jira:** `{data.jira_warning}`")
     if data.error_code:
         lines.append(f"**{labels['error']}:** `{data.error_code}`")
-    safe_summary = labels["public_summary"] if redact_security else verified.summary.strip()
+    has_security = any(_security(item.category) for item in verified.findings) or any(
+        _security(item.category) for item in data.transitions
+    )
+    safe_summary = labels["public_summary"] if redact_security and has_security else verified.summary.strip()
     lines.extend(["", safe_summary, "", "---", "", f"### {labels['findings']}", ""])
 
     if not verified.findings and not data.error_code:
         lines.append(labels["clean"])
     for item in verified.findings:
+        if item.stable_id in prior_ids:
+            lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
+            continue
         if redact_security and _security(item.category):
             lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
             continue
@@ -224,14 +238,20 @@ def render_sticky_comment(data: RenderInput) -> str:
         )
 
     transitions = data.transitions
-    if redact_security:
+    if public:
         transitions = [
             FindingTransitionView(
                 stable_id=item.stable_id,
                 status=item.status,
                 path=item.path,
                 line=item.line,
-                title=labels["security_issue"] if _security(item.category) else item.title,
+                title=(
+                    labels["prior_issue"]
+                    if item.stable_id in prior_ids
+                    else labels["security_issue"]
+                    if redact_security and _security(item.category)
+                    else item.title
+                ),
             )
             for item in transitions
         ]
@@ -247,6 +267,9 @@ def render_sticky_comment(data: RenderInput) -> str:
     if leftover_open:
         lines.extend([f"### {labels['previous_open']}", ""])
         for item in leftover_open:
+            if item.stable_id in prior_ids:
+                lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
+                continue
             if redact_security and _security(item.category):
                 lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
                 continue
@@ -289,7 +312,7 @@ def render_sticky_comment(data: RenderInput) -> str:
 
     result = "\n".join(lines).strip() + "\n"
     if public and policy.jira_disclosure == "none":
-        result = ISSUE_KEY_RE.sub("", result)
+        result = remove_issue_key(result, data.issue_key)
     return result
 
 
