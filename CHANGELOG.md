@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Webhook signature (`X-Hub-Signature-256`) is now required on every request to
-  `POST /api/v1/pull-request`. The `GITHUB_WEBHOOK_SECRET` environment variable
-  must be configured; the service will not start without it.
+  `POST /api/v1/pull-request`. If `GITHUB_WEBHOOK_SECRET` is not configured
+  (empty, a placeholder like `change-me`, or shorter than 16 characters), the
+  webhook endpoint is disabled and returns 503; the `/api/v1/reviews` endpoint
+  remains available for Actions-only deployments.
 - A startup warning is now logged when `github.allowed_repos` is empty, as this
   configuration accepts webhook requests from any repository.

@@ -2,7 +2,7 @@
 
 Полный деплой хоста (Compose, сеть, Prometheus): [DEPLOY.md](DEPLOY.md).
 
-Сервис принимает события Pull Request на `POST /api/v1/pull-request`. Эндпойнт требует **ключ доступа** (`REVIEW_API_KEY`) **и** валидную подпись `X-Hub-Signature-256` (HMAC-SHA256 с `GITHUB_WEBHOOK_SECRET`). Без обоих — ответ `401`. Сервис не запустится без `GITHUB_WEBHOOK_SECRET`.
+Сервис принимает события Pull Request на `POST /api/v1/pull-request`. Эндпойнт требует **ключ доступа** (`REVIEW_API_KEY`) **и** валидную подпись `X-Hub-Signature-256` (HMAC-SHA256 с `GITHUB_WEBHOOK_SECRET`). Без обоих — ответ `401`. Если `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или короче 16 символов), webhook-эндпойнт отключён (`503`), но сервис запускается и `/api/v1/reviews` остаётся доступным для деплоя через Actions.
 
 `GET /health`, `GET /is-ready` и `GET /metrics` остаются открытыми для пробы живости и Prometheus. Worker отдельно отдаёт `GET http://worker:9100/metrics`. Снимок очереди: `GET /api/v1/ops/status` (с API key).
 
@@ -20,7 +20,7 @@
 
 - `REVIEW_API_KEY` на сервере
 - GitHub secret `AI_REVIEW_API_KEY`
-Прямой webhook требует API-ключ **и** валидную подпись `X-Hub-Signature-256`. GitHub рекомендует не помещать ключи в URL доставки. Webhook secret (`GITHUB_WEBHOOK_SECRET`) обязателен — сервис не запустится без него.
+Прямой webhook требует API-ключ **и** валидную подпись `X-Hub-Signature-256`. GitHub рекомендует не помещать ключи в URL доставки. Если `GITHUB_WEBHOOK_SECRET` не задан, webhook-эндпойнт отключён, но `/api/v1/reviews` работает.
 
 ## Вариант: fine-grained PAT
 
@@ -116,6 +116,7 @@ curl -H "Authorization: Bearer $AI_REVIEW_API_KEY" \
 
 | Симптом | Что проверить |
 | --- | --- |
+| `503` на webhook | `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или слишком короткий) |
 | `401 invalid access key` на webhook | API-ключ **и** `GITHUB_WEBHOOK_SECRET` на App и на сервере; GitHub шлёт `X-Hub-Signature-256`. |
 | `401` при валидном ключе, событие от App | `GITHUB_WEBHOOK_SECRET` на App и на сервере одинаковый; GitHub шлёт `X-Hub-Signature-256`. |
 | Вебхук 202, комментария нет | Worker запущен; репозиторий в `allowed_repos`; PR не draft/fork; автор с write access. |

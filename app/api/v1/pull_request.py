@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from app.api.deps import SessionDep, get_redis
 from app.config import get_settings, repo_allowed
 from app.security.webhook import authorize_webhook
+from app.security.webhook_config import is_webhook_enabled
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
 from app.services.review_enqueue import queue_review
 
@@ -60,6 +61,12 @@ async def pull_request_webhook(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
 ) -> dict[str, Any]:
+    if not is_webhook_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="webhook endpoint disabled: GITHUB_WEBHOOK_SECRET not configured",
+        )
+
     body = await request.body()
     settings = get_settings()
     if not authorize_webhook(

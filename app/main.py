@@ -11,25 +11,34 @@ from app.config import get_app_config, get_settings
 from app.db import create_engine, create_session_factory
 from app.logging_setup import configure_logging
 from app.queue import create_redis_pool
+from app.security.webhook_config import (
+    WEBHOOK_SECRET_MIN_LENGTH,
+    is_webhook_secret_valid,
+    set_webhook_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class ConfigurationError(Exception):
-    """Raised when required configuration is missing or invalid."""
-
-
 def _validate_startup_config() -> None:
-    """Validate required configuration at startup. Fails fast on misconfiguration."""
+    """Validate configuration at startup. Logs warnings for missing optional config."""
     settings = get_settings()
 
-    if not settings.github_webhook_secret:
-        raise ConfigurationError(
-            "GITHUB_WEBHOOK_SECRET must be set. Webhook signature verification is required for all requests."
+    valid, reason = is_webhook_secret_valid(settings.github_webhook_secret)
+    if not valid:
+        set_webhook_enabled(False)
+        logger.warning(
+            "%s. Webhook endpoint (POST /api/v1/pull-request) is disabled. "
+            "To enable, set GITHUB_WEBHOOK_SECRET to a random value of at least %d characters "
+            "(e.g. openssl rand -hex 32). The /api/v1/reviews endpoint remains available.",
+            reason,
+            WEBHOOK_SECRET_MIN_LENGTH,
         )
+    else:
+        set_webhook_enabled(True)
 
     app_config = get_app_config()
-    if not app_config.github.allowed_repos:
+    if valid and not app_config.github.allowed_repos:
         logger.warning(
             "github.allowed_repos is empty: webhook accepts requests from any repository. "
             "Configure an explicit allowlist for production use."

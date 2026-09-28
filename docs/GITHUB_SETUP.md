@@ -2,7 +2,7 @@
 
 See [deployment](DEPLOY.md), [operations](OPERATIONS.md) and the [Russian translation](ru/GITHUB_SETUP.md).
 
-`POST /api/v1/pull-request` requires both `REVIEW_API_KEY` **and** a valid `X-Hub-Signature-256` HMAC-SHA256 signature computed with `GITHUB_WEBHOOK_SECRET`. Both are mandatory; requests without a valid signature are rejected. The service will not start if `GITHUB_WEBHOOK_SECRET` is not configured. Do not place credentials in a webhook URL.
+`POST /api/v1/pull-request` requires both `REVIEW_API_KEY` **and** a valid `X-Hub-Signature-256` HMAC-SHA256 signature computed with `GITHUB_WEBHOOK_SECRET`. Both are mandatory; requests without a valid signature are rejected. If `GITHUB_WEBHOOK_SECRET` is not configured (empty, a placeholder, or shorter than 16 characters), the webhook endpoint is disabled (returns 503) but the service starts and `/api/v1/reviews` remains available for Actions-only deployments. Do not place credentials in a webhook URL.
 
 ## Secrets
 
@@ -41,6 +41,7 @@ Start the service, open a non-draft test PR, and check worker logs for a `review
 
 | Symptom | Check |
 | --- | --- |
+| `503` on webhook | `GITHUB_WEBHOOK_SECRET` not configured (empty, placeholder, or too short) |
 | `401` | API key **and** matching `X-Hub-Signature-256` (both required) |
 | `repo_not_allowed` | Non-empty `github.allowed_repos` contains exact `owner/repo` |
 | API `202`, no comment | Worker, queue, draft/fork status, author access and logs |

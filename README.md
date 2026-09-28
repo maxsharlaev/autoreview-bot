@@ -15,7 +15,7 @@ Self-hosted FastAPI service for advisory pull request reviews. The current imple
 ## What it does
 
 1. GitHub App webhook `POST /api/v1/pull-request` on `opened`, `synchronize`, `reopened`, `ready_for_review`.
-2. Requires access key `REVIEW_API_KEY` (GitHub secret `AI_REVIEW_API_KEY`) **and** a valid `X-Hub-Signature-256` HMAC-SHA256 signature computed with `GITHUB_WEBHOOK_SECRET`. Both are mandatory.
+2. Requires access key `REVIEW_API_KEY` (GitHub secret `AI_REVIEW_API_KEY`) **and** a valid `X-Hub-Signature-256` HMAC-SHA256 signature computed with `GITHUB_WEBHOOK_SECRET`. Both are mandatory for the webhook endpoint. If `GITHUB_WEBHOOK_SECRET` is not configured (empty, a placeholder like `change-me`, or shorter than 16 characters), the webhook endpoint is disabled (returns 503) and a startup warning is logged; the `/api/v1/reviews` endpoint remains available for Actions-only deployments.
 3. Checks the configured repository list and skips forks and draft PRs. An empty `github.allowed_repos` permits all repositories (a startup warning is logged); configure an explicit allowlist for production use.
 4. Reuses a pending, running, or completed review for the same `{repo}:{pr}:{head_sha}` under normal sequential delivery. A new SHA requests cancellation of the previous job. Manual `POST /api/v1/reviews` defaults to `force: true`. Different PRs can run in parallel (`WORKER_MAX_JOBS`, default 4). Atomic deduplication and a final SHA check are planned.
 5. Worker loads PR diff, extracts a Jira key, builds untrusted-marked context, clones the head SHA, runs `codex exec` in a read-only sandbox.
@@ -55,7 +55,7 @@ arq app.workers.settings.WorkerSettings
 - `X-Api-Key: <REVIEW_API_KEY>`
 - HTTP Basic for direct API calls (the password is `REVIEW_API_KEY`)
 
-Store the same value in GitHub as Actions secret `AI_REVIEW_API_KEY` if using the reusable workflow. The webhook endpoint (`POST /api/v1/pull-request`) additionally requires a valid `X-Hub-Signature-256` header; requests without a valid HMAC signature are rejected. `GITHUB_WEBHOOK_SECRET` must be configured—the service will not start without it. Do not place credentials in a webhook URL.
+Store the same value in GitHub as Actions secret `AI_REVIEW_API_KEY` if using the reusable workflow. The webhook endpoint (`POST /api/v1/pull-request`) additionally requires a valid `X-Hub-Signature-256` header; requests without a valid HMAC signature are rejected. If `GITHUB_WEBHOOK_SECRET` is not configured, the webhook endpoint is disabled (503) but the service starts and `/api/v1/reviews` remains available. Do not place credentials in a webhook URL.
 
 ## Configuration
 
