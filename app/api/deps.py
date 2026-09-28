@@ -33,3 +33,18 @@ async def require_api_key(
 
 
 ApiKeyDep = Annotated[None, Depends(require_api_key)]
+
+
+async def require_result_api_key(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-Api-Key"),
+) -> None:
+    settings = get_settings()
+    if not settings.result_api_key or settings.result_api_key == settings.review_api_key:
+        raise HTTPException(status_code=503, detail="private result access is disabled")
+    presented = extract_presented_key(authorization, x_api_key)
+    if not verify_api_key(settings.result_api_key, presented):
+        raise HTTPException(status_code=401, detail="invalid result access key")
+
+
+ResultKeyDep = Annotated[None, Depends(require_result_api_key)]

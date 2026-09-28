@@ -2,19 +2,31 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.adapters.github import GitHubAppClient, GitHubError
-from app.api.deps import ApiKeyDep, SessionDep, get_redis
+from app.api.deps import ApiKeyDep, ResultKeyDep, SessionDep, get_redis
 from app.config import repo_allowed
-from app.models import PullRequest, ReviewRun
+from app.models import PullRequest, ReviewResultSnapshot, ReviewRun
 from app.services.constants import SKIP_REPO
 from app.services.manual_review import ManualReviewRequest, pr_payload_from_request
 from app.services.review_enqueue import queue_review
 
 router = APIRouter()
+
+
+@router.get("/reviews/{review_run_id}/result")
+async def get_private_review_result(
+    review_run_id: uuid.UUID, response: Response, session: SessionDep, _: ResultKeyDep
+) -> dict:
+    """Operator-only access to the immutable full result of one review run."""
+    snapshot = await session.get(ReviewResultSnapshot, review_run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="review result not found")
+    response.headers["Cache-Control"] = "no-store"
+    return snapshot.payload
 
 
 @router.post("/reviews", status_code=202)

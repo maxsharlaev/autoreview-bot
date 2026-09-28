@@ -5,6 +5,7 @@ import uuid
 
 from arq.cron import cron
 
+from app.adapters.github import GitHubAppClient
 from app.config import get_app_config, get_settings
 from app.db import create_engine, create_session_factory
 from app.logging_setup import configure_logging
@@ -14,6 +15,7 @@ from app.queue import redis_settings
 from app.services.constants import INTERNAL_ERROR
 from app.services.digest import run_digest
 from app.services.orchestrator import run_review
+from app.services.public_cleanup import reconcile_repository_visibility, redact_public_repository
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,18 @@ async def review_pull_request(ctx: dict, review_run_id: str) -> str:
         WORKER_JOBS_IN_PROGRESS.dec()
 
 
+async def publicize_repository(ctx: dict, full_name: str) -> str:
+    async with ctx["session_factory"]() as session:
+        count = await redact_public_repository(session, GitHubAppClient(), full_name)
+    return f"redacted:{count}"
+
+
+async def reconcile_public_repositories(ctx: dict) -> str:
+    async with ctx["session_factory"]() as session:
+        count = await reconcile_repository_visibility(session, GitHubAppClient())
+    return f"redacted:{count}"
+
+
 async def digest_open_prs(ctx: dict) -> str:
     config = get_app_config()
     if not config.features.digest_enabled or not config.schedule.review_digest.enabled:
@@ -99,13 +113,14 @@ async def digest_open_prs(ctx: dict) -> str:
 
 def _cron_jobs() -> list:
     config = get_app_config()
-    if not (config.features.digest_enabled and config.schedule.review_digest.enabled):
-        return []
-    return [cron(digest_open_prs, **parse_cron(config.schedule.review_digest.cron))]
+    jobs = [cron(reconcile_public_repositories, minute={0, 15, 30, 45})]
+    if config.features.digest_enabled and config.schedule.review_digest.enabled:
+        jobs.append(cron(digest_open_prs, **parse_cron(config.schedule.review_digest.cron)))
+    return jobs
 
 
 class WorkerSettings:
-    functions = [review_pull_request, digest_open_prs]
+    functions = [review_pull_request, digest_open_prs, publicize_repository, reconcile_public_repositories]
     cron_jobs = _cron_jobs()
     on_startup = startup
     on_shutdown = shutdown

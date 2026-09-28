@@ -7,7 +7,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Literal
 
 import jsonschema
@@ -19,7 +19,15 @@ from app.adapters.github import ChangedFile, GitHubAppClient, GitHubError, PullR
 from app.adapters.jira import JiraClient, JiraError, JiraIssue
 from app.config import AppConfig, Settings, get_app_config, get_settings
 from app.metrics import record_review_finished
-from app.models import Finding, FindingTransition, PullRequest, Repository, ReviewRun, TaskSnapshot
+from app.models import (
+    Finding,
+    FindingTransition,
+    PullRequest,
+    Repository,
+    ReviewResultSnapshot,
+    ReviewRun,
+    TaskSnapshot,
+)
 from app.paths import data_file
 from app.progress import ReviewProgress
 from app.services.codex_runner import CodexRunnerError, run_codex
@@ -53,6 +61,7 @@ from app.services.pr_description import (
     without_managed_block,
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
+from app.services.public_cleanup import redact_public_repository
 from app.services.publisher import Publisher, empty_verified
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
@@ -140,6 +149,18 @@ async def run_review(
 
     _sync_pr(pr, info)
     visibility = confirmed_visibility((run.summary or {}).get("repository_visibility"), info.visibility)
+    context_visibility = visibility
+    if visibility == "private":
+        pr.repository.last_visibility = "private"
+    elif (
+        info.visibility == "public"
+        and getattr(pr.repository, "last_visibility", None) != "public"
+        and isinstance(github, GitHubAppClient)
+    ):
+        try:
+            await redact_public_repository(session, github, pr.repository.full_name)
+        except GitHubError:
+            logger.exception("Could not redact previous publications for %s", pr.repository.full_name)
     progress.event(f"repository visibility={visibility}")
     progress.event(f"PR loaded title={info.title!r} sha={info.head_sha[:12]} author={info.author}")
     if info.is_fork:
@@ -226,20 +247,22 @@ async def run_review(
         jira_warning = "ISSUE_KEY_MISSING"
         progress.event("no Jira key in branch/title/body")
 
-    previous = [
-        PreviousFinding(
-            stable_id=item.stable_id,
-            severity=item.severity,
-            title=item.title if visibility == "private" else "",
-            path=item.path,
-            line=item.line,
-            status=item.current_status,
-            evidence=item.evidence if visibility == "private" else "",
-            scenario=item.scenario if visibility == "private" else "",
-            recommendation=item.recommendation if visibility == "private" else "",
+    previous = []
+    for item in pr.findings:
+        expose_details = visibility == "private" or getattr(item, "details_visibility", None) == "public"
+        previous.append(
+            PreviousFinding(
+                stable_id=item.stable_id,
+                severity=item.severity,
+                title=item.title if expose_details else "",
+                path=item.path,
+                line=item.line,
+                status=item.current_status,
+                evidence=item.evidence if expose_details else "",
+                scenario=item.scenario if expose_details else "",
+                recommendation=item.recommendation if expose_details else "",
+            )
         )
-        for item in pr.findings
-    ]
     previous_head = await _previous_head(session, pr.id, run.id)
 
     context = build_context(
@@ -280,6 +303,7 @@ async def run_review(
             if publication == "public_fallback":
                 visibility = "public"
         await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
+        await _save_review_result(session, run, verified, [], context_visibility, visibility)
         await _publish(
             publisher,
             owner,
@@ -380,6 +404,7 @@ async def run_review(
                 if publication == "public_fallback":
                     visibility = "public"
             await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
+            await _save_review_result(session, run, verified, [], context_visibility, visibility)
             await _publish(
                 publisher,
                 owner,
@@ -417,7 +442,25 @@ async def run_review(
     verified.coverage["files_total"] = context.files_total
     verified.coverage["files_reviewed"] = context.files_reviewed
     verified.coverage["skipped_paths"] = context.skipped_paths
-    _carry_open_previous(verified, pr.findings, config.language.details)
+    fresh_ids = {item.stable_id for item in verified.findings}
+    _carry_open_previous(verified, pr.findings, config.language.details, visibility=visibility)
+    redacted_prior_ids = {
+        item.stable_id
+        for item in pr.findings
+        if getattr(item, "details_visibility", None) != "public"
+        and (
+            item.stable_id not in fresh_ids
+            or (
+                visibility == "public"
+                and any(
+                    not getattr(view, field).strip()
+                    for view in verified.findings
+                    if view.stable_id == item.stable_id
+                    for field in ("title", "scenario", "evidence", "recommendation")
+                )
+            )
+        )
+    }
     publication = "private"
     if visibility == "private":
         publication = await _private_publication_status(github, info)
@@ -425,9 +468,12 @@ async def run_review(
             return await _fail(session, run, started, "HEAD_CHANGED")
         if publication == "public_fallback":
             visibility = "public"
-    transitions = await _store_findings(session, pr, run, verified)
+    transitions = await _store_findings(
+        session, pr, run, verified, fresh_ids=fresh_ids, details_visibility=context_visibility
+    )
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
+    await _save_review_result(session, run, verified, transitions, context_visibility, visibility)
     progress.event("publish sticky comment")
     await _publish(
         publisher,
@@ -446,6 +492,7 @@ async def run_review(
         visibility=visibility,
         public_alignment=public_alignment,
         force_public_redaction=publication == "public_fallback",
+        redacted_prior_ids=redacted_prior_ids,
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
@@ -914,19 +961,26 @@ _OPEN_PREVIOUS = {"still_open", "regressed", "needs_human"}
 _STORED_OPEN = {"open", "needs_human", "still_open"}
 
 
-def _carry_open_previous(verified: VerifiedReview, stored: list[Finding], details_language: str = "en") -> None:
+def _carry_open_previous(
+    verified: VerifiedReview,
+    stored: list[Finding],
+    details_language: str = "en",
+    *,
+    visibility: Visibility = "private",
+) -> None:
     stored_by_id = {item.stable_id: item for item in stored}
     for view in verified.findings:
         prior = stored_by_id.get(view.stable_id)
         if prior is None:
             continue
-        if not view.scenario.strip():
+        may_reuse_details = visibility == "private" or getattr(prior, "details_visibility", None) == "public"
+        if may_reuse_details and not view.scenario.strip():
             view.scenario = prior.scenario
-        if not view.evidence.strip():
+        if may_reuse_details and not view.evidence.strip():
             view.evidence = prior.evidence
-        if not view.recommendation.strip():
+        if may_reuse_details and not view.recommendation.strip():
             view.recommendation = prior.recommendation
-        if not view.title.strip():
+        if may_reuse_details and not view.title.strip():
             view.title = prior.title
     present = {item.stable_id for item in verified.findings}
     decided = {item.stable_id: item.status for item in verified.previous_findings}
@@ -991,6 +1045,9 @@ async def _store_findings(
     pr: PullRequest,
     run: ReviewRun,
     verified: VerifiedReview,
+    *,
+    fresh_ids: set[str],
+    details_visibility: Visibility,
 ) -> list[FindingTransitionView]:
     existing = {item.stable_id: item for item in pr.findings}
     previous_map = {item.stable_id: item for item in verified.previous_findings}
@@ -1012,6 +1069,7 @@ async def _store_findings(
                 scenario=view.scenario,
                 evidence=view.evidence,
                 recommendation=view.recommendation,
+                details_visibility=details_visibility,
                 confidence=view.confidence,
                 current_status="open",
             )
@@ -1027,10 +1085,21 @@ async def _store_findings(
             prior.category = view.category
             prior.path = view.path
             prior.line = view.line
-            prior.title = view.title
-            prior.scenario = view.scenario
-            prior.evidence = view.evidence
-            prior.recommendation = view.recommendation
+            complete_fresh = view.stable_id in fresh_ids and all(
+                getattr(view, field).strip() for field in ("title", "scenario", "evidence", "recommendation")
+            )
+            preserve_private = (
+                details_visibility == "public"
+                and getattr(prior, "details_visibility", None) != "public"
+                and not complete_fresh
+            )
+            if not preserve_private:
+                prior.title = view.title
+                prior.scenario = view.scenario
+                prior.evidence = view.evidence
+                prior.recommendation = view.recommendation
+                if view.stable_id in fresh_ids:
+                    prior.details_visibility = details_visibility
             prior.confidence = view.confidence
             prior.current_status = "open"
         if view.stable_id in previous_map:
@@ -1089,6 +1158,30 @@ async def _persist_snapshot(
     await session.flush()
 
 
+async def _save_review_result(
+    session: AsyncSession,
+    run: ReviewRun,
+    verified: VerifiedReview,
+    transitions: list[FindingTransitionView],
+    review_visibility: Visibility,
+    publication_visibility: Visibility,
+) -> None:
+    """Commit the full private result before any external publication attempt."""
+    session.add(
+        ReviewResultSnapshot(
+            review_run_id=run.id,
+            payload={
+                "review_visibility": review_visibility,
+                "publication_visibility": publication_visibility,
+                "head_sha": run.head_sha,
+                "verified": asdict(verified),
+                "transitions": [asdict(item) for item in transitions],
+            },
+        )
+    )
+    await session.commit()
+
+
 async def _publish(
     publisher: Publisher,
     owner: str,
@@ -1107,6 +1200,7 @@ async def _publish(
     visibility: Visibility = "public",
     public_alignment: str | None = None,
     force_public_redaction: bool = False,
+    redacted_prior_ids: set[str] | None = None,
 ) -> None:
     render = RenderInput(
         repository=pr.repository.full_name,
@@ -1129,6 +1223,7 @@ async def _publish(
             else config.public_repos
         ),
         public_alignment=public_alignment,
+        redacted_prior_ids=redacted_prior_ids or set(),
     )
     has_blockers = any(item.severity in {"P0", "P1"} for item in verified.findings)
     result = await publisher.publish(
@@ -1140,6 +1235,15 @@ async def _publish(
         issue_key=issue_key,
         current_jira_status=jira_status,
     )
+    if visibility == "private" and session is not None and isinstance(publisher.github, GitHubAppClient):
+        try:
+            current = await publisher.github.get_pull_request(owner, repo, pr.number)
+            if current.visibility != "private":
+                await redact_public_repository(session, publisher.github, pr.repository.full_name)
+        except GitHubError:
+            logger.exception(
+                "Could not reconfirm visibility after publishing %s#%s", pr.repository.full_name, pr.number
+            )
     if session is None:
         return
     snapshot = (

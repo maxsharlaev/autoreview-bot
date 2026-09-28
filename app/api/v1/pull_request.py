@@ -79,6 +79,12 @@ async def pull_request_webhook(
         raise HTTPException(status_code=401, detail="invalid signature")
 
     payload = await request.json() if body else {}
+    if x_github_event == "public":
+        full_name = _full_name(payload)
+        if not full_name:
+            raise HTTPException(status_code=400, detail="repository missing from public event")
+        await get_redis(request).enqueue_job("publicize_repository", full_name)
+        return {"status": "queued", "event": "public"}
     skipped = classify_pull_request_event(x_github_event, payload)
     if skipped is not None:
         return skipped

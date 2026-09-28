@@ -4,9 +4,9 @@ See [deployment](DEPLOY.md), [observability](OBSERVABILITY.md) and the [Russian 
 
 ## How reviews start
 
-The service does not poll GitHub. The current recommended trigger is GitHub Actions in each reviewed repository: copy [the example](../examples/github/ai-review-trigger.yml), set `AI_REVIEW_API_KEY` and `AI_REVIEW_URL`, and add the repository to `github.allowed_repos`. The manual `POST /api/v1/reviews` endpoint is useful for debugging. Direct webhooks await mandatory signature validation. The `ci.yml` in this service repository only runs lint, tests and a Docker build.
+The service does not poll GitHub for review triggers. GitHub Actions in each reviewed repository can start reviews: copy [the example](../examples/github/ai-review-trigger.yml), set `AI_REVIEW_API_KEY` and `AI_REVIEW_URL`, and add the repository to `github.allowed_repos`. The manual `POST /api/v1/reviews` endpoint is useful for debugging. Signed direct webhooks can also start reviews. The `ci.yml` in this service repository only runs lint, tests and a Docker build. Separately, the worker checks tracked repository visibility every 15 minutes so missed `public` events still trigger cleanup of bot-authored GitHub text.
 
-Configure `pull_request` event types and branch/path filters in the reviewed repository's workflow. Branch filters apply to the PR base. Draft and fork PRs are skipped by the example. After enabling direct webhooks in the future, use one automatic trigger per repository until concurrent deduplication is implemented.
+Configure `pull_request` event types and branch/path filters in the reviewed repository's workflow. Branch filters apply to the PR base. Draft and fork PRs are skipped by the example. If using direct webhooks, subscribe to both `pull_request` and `public` events with a valid webhook secret. Use one automatic review trigger per repository until concurrent deduplication is implemented.
 
 ## First checks
 

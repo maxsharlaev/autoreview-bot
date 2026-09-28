@@ -210,10 +210,10 @@ async def test_public_fallback_forces_redaction_even_with_full_policy() -> None:
     assert SECRET not in render_sticky_comment(render)
 
 
-def test_public_nonsecurity_review_keeps_model_summary() -> None:
+def test_public_clean_review_keeps_model_summary() -> None:
     render = _render()
     render.verified.summary = "Useful summary of the changes"
-    render.verified.findings[0].category = "correctness"
+    render.verified.findings = []
     text = render_sticky_comment(render)
     assert "Useful summary of the changes" in text
     assert "Review completed. See the findings below." not in text
@@ -222,7 +222,7 @@ def test_public_nonsecurity_review_keeps_model_summary() -> None:
 def test_none_removes_only_linked_jira_key() -> None:
     render = _render(PublicReposYaml(jira_disclosure="none"))
     render.verified.summary = "Use SHA-256 and UTF-8 for CVE-2024, not ABC-1"
-    render.verified.findings[0].category = "correctness"
+    render.verified.findings = []
     text = render_sticky_comment(render)
     assert "ABC-1" not in text
     assert "SHA-256" in text
@@ -233,6 +233,7 @@ def test_none_removes_only_linked_jira_key() -> None:
 def test_public_previous_finding_hides_old_private_text() -> None:
     render = _render()
     render.verified.summary = "Review of current changes"
+    render.redacted_prior_ids = {"secret-finding"}
     render.verified.findings[0].category = "correctness"
     render.verified.previous_findings = [
         PreviousFindingView(
@@ -297,7 +298,7 @@ def test_public_transition_hides_old_security_title() -> None:
     ]
     text = render_sticky_comment(render)
     assert SECRET not in text
-    assert "Potential security issue." in text
+    assert "Potential issue." in text
 
 
 def test_explicit_full_security_policy_keeps_finding() -> None:
@@ -617,6 +618,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     monkeypatch.setattr("app.services.orchestrator.build_context", build)
     monkeypatch.setattr("app.services.orchestrator._previous_head", AsyncMock(return_value=None))
     monkeypatch.setattr("app.services.orchestrator._persist_snapshot", AsyncMock())
+    monkeypatch.setattr("app.services.orchestrator._save_review_result", AsyncMock())
     publish = AsyncMock()
     monkeypatch.setattr("app.services.orchestrator._publish", publish)
     monkeypatch.setattr("app.services.orchestrator._complete", AsyncMock(return_value=run))

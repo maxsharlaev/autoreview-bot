@@ -291,6 +291,11 @@ class GitHubAppClient:
         token = await self.installation_token(owner, repo)
         await self._request("PATCH", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, json={"title": title})
 
+    async def get_repository_visibility(self, owner: str, repo: str) -> Visibility | None:
+        token = await self.installation_token(owner, repo)
+        response = await self._request("GET", f"{API}/repos/{owner}/{repo}", token=token)
+        return repository_visibility(response.json())
+
     async def collaborator_permission(self, owner: str, repo: str, username: str) -> str:
         token = await self.installation_token(owner, repo)
         try:
@@ -381,6 +386,45 @@ class GitHubAppClient:
             token=token,
             json=payload,
         )
+
+    async def redact_managed_comments(self, owner: str, repo: str, number: int, replacements: dict[str, str]) -> int:
+        """Replace every bot-authored managed comment after a repository becomes public."""
+        token = await self.installation_token(owner, repo)
+        trusted = {login.casefold() for login in self.previous_comment_authors if login.strip()}
+        try:
+            trusted.add((await self.comment_author_login(token)).casefold())
+        except Exception as exc:
+            if not trusted:
+                raise GitHubError("Could not identify managed comment authors") from exc
+        page = 1
+        updated = 0
+        while True:
+            response = await self._request(
+                "GET",
+                f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
+                token=token,
+                params={"per_page": 100, "page": page},
+            )
+            batch = response.json()
+            for comment in batch:
+                login = str((comment.get("user") or {}).get("login") or "").casefold()
+                if login not in trusted:
+                    continue
+                body = comment.get("body") or ""
+                replacement = next((text for marker, text in replacements.items() if marker in body), None)
+                if replacement is None or replacement == body:
+                    continue
+                await self._request(
+                    "PATCH",
+                    f"{API}/repos/{owner}/{repo}/issues/comments/{int(comment['id'])}",
+                    token=token,
+                    json={"body": replacement},
+                )
+                updated += 1
+            if len(batch) < 100:
+                break
+            page += 1
+        return updated
 
     async def list_open_pulls(self, owner: str, repo: str) -> list[dict[str, Any]]:
         token = await self.installation_token(owner, repo)

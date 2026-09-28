@@ -4,6 +4,8 @@ See [deployment](DEPLOY.md), [operations](OPERATIONS.md) and the [Russian transl
 
 `POST /api/v1/pull-request` requires only a valid `X-Hub-Signature-256` HMAC-SHA256 signature computed with `GITHUB_WEBHOOK_SECRET`; no API key is needed (GitHub webhooks cannot send custom headers). If `GITHUB_WEBHOOK_SECRET` is not configured (empty, a placeholder, or shorter than 16 characters), the webhook endpoint is disabled (returns 503) but the service starts and `/api/v1/reviews` remains available for Actions-only deployments. `POST /api/v1/reviews` requires `REVIEW_API_KEY`. Do not place credentials in a webhook URL.
 
+Subscribe the signed webhook to the repository `public` event as well as `pull_request` if using direct webhooks. The `public` event queues cleanup of bot-authored managed GitHub text when a tracked repository changes visibility; the worker also reconciles tracked repository visibility every 15 minutes.
+
 ## Secrets
 
 | Value | Location | Purpose |
