@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from app.config import LanguageYaml, PublicReposYaml
@@ -101,12 +102,88 @@ _LABELS = {
 }
 
 
+SECURITY_KEYWORDS = (
+    "injection",
+    "xss",
+    "ssrf",
+    "csrf",
+    "rce",
+    "path traversal",
+    "deserialization",
+    "auth bypass",
+    "authorization bypass",
+    "authentication bypass",
+    "privilege escalation",
+    "secret",
+    "token leak",
+    "credential",
+    "sql injection",
+    "command injection",
+    "code injection",
+    "ldap injection",
+    "xml injection",
+    "xpath injection",
+    "remote code execution",
+    "arbitrary code",
+    "buffer overflow",
+    "heap overflow",
+    "stack overflow",
+    "format string",
+    "directory traversal",
+    "file inclusion",
+    "open redirect",
+    "insecure direct object",
+    "idor",
+    "broken access control",
+    "sensitive data exposure",
+    "hardcoded password",
+    "hardcoded secret",
+    "hardcoded key",
+    "api key exposed",
+    "private key",
+)
+
+_CWE_PATTERN = re.compile(r"\bCWE-\d+\b", re.IGNORECASE)
+_KEYWORD_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(kw) for kw in SECURITY_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
 def _count(findings: list[FindingView], severity: str) -> int:
     return sum(1 for item in findings if item.severity == severity)
 
 
-def _security(category: str) -> bool:
+def _security_category(category: str) -> bool:
     return category.casefold() == "security" or category.casefold().startswith("security/")
+
+
+def _security_text(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_CWE_PATTERN.search(text) or _KEYWORD_PATTERN.search(text))
+
+
+def _finding_is_security(item: FindingView) -> bool:
+    if _security_category(item.category):
+        return True
+    return (
+        _security_text(item.title)
+        or _security_text(item.scenario)
+        or _security_text(item.evidence)
+        or _security_text(item.recommendation)
+    )
+
+
+def _transition_is_security(item: FindingTransitionView) -> bool:
+    if _security_category(item.category):
+        return True
+    return (
+        _security_text(item.title)
+        or _security_text(item.scenario)
+        or _security_text(item.evidence)
+        or _security_text(item.recommendation)
+    )
 
 
 def _public_alignment(status: str) -> str:
@@ -171,6 +248,7 @@ def render_sticky_comment(data: RenderInput) -> str:
     verified = data.verified
     public = data.visibility != "private"
     policy = data.public_repos or PublicReposYaml()
+    redact_all = public and policy.security_findings == "redact_all"
     redact_security = public and policy.security_findings == "redact"
     prior_ids = data.redacted_prior_ids if public else set()
     p0 = _count(verified.findings, "P0")
@@ -208,10 +286,15 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append(f"**Jira:** `{data.jira_warning}`")
     if data.error_code:
         lines.append(f"**{labels['error']}:** `{data.error_code}`")
-    has_security = any(_security(item.category) for item in verified.findings) or any(
-        _security(item.category) for item in data.transitions
+    has_redactable = any(_finding_is_security(item) for item in verified.findings) or any(
+        _transition_is_security(item) for item in data.transitions
     )
-    safe_summary = labels["public_summary"] if redact_security and has_security else verified.summary.strip()
+    if redact_all:
+        safe_summary = labels["public_summary"] if verified.findings or data.transitions else verified.summary.strip()
+    elif redact_security:
+        safe_summary = labels["public_summary"] if has_redactable else verified.summary.strip()
+    else:
+        safe_summary = verified.summary.strip()
     lines.extend(["", safe_summary, "", "---", "", f"### {labels['findings']}", ""])
 
     if not verified.findings and not data.error_code:
@@ -220,7 +303,7 @@ def render_sticky_comment(data: RenderInput) -> str:
         if item.stable_id in prior_ids:
             lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
             continue
-        if redact_security and _security(item.category):
+        if redact_all or (redact_security and _finding_is_security(item)):
             lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
             continue
         lines.extend(
@@ -250,7 +333,7 @@ def render_sticky_comment(data: RenderInput) -> str:
                     labels["prior_issue"]
                     if item.stable_id in prior_ids
                     else labels["security_issue"]
-                    if redact_security and _security(item.category)
+                    if redact_all or (redact_security and _transition_is_security(item))
                     else item.title
                 ),
             )
@@ -271,7 +354,7 @@ def render_sticky_comment(data: RenderInput) -> str:
             if item.stable_id in prior_ids:
                 lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
                 continue
-            if redact_security and _security(item.category):
+            if redact_all or (redact_security and _transition_is_security(item)):
                 lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
                 continue
             lines.extend(
@@ -305,9 +388,9 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append("</details>")
 
     if (
-        redact_security
+        (redact_all or redact_security)
         and not data.private_channels_configured
-        and any(_security(item.category) for item in verified.findings)
+        and (redact_all and verified.findings or any(_finding_is_security(item) for item in verified.findings))
     ):
         lines.extend(["", labels["details_hidden"]])
 
@@ -331,9 +414,10 @@ def render_jira_comment(data: RenderInput) -> str:
         f"Result: P0={p0} P1={p1} P2={p2} P3={p3} mode={data.mode}",
         f"Run: {data.run_id}",
     ]
-    if data.visibility != "private" and (data.public_repos or PublicReposYaml()).security_findings == "redact":
+    policy = data.public_repos or PublicReposYaml()
+    if data.visibility != "private" and policy.security_findings in ("redact", "redact_all"):
         for item in verified.findings:
-            if _security(item.category):
+            if policy.security_findings == "redact_all" or _finding_is_security(item):
                 lines.extend(
                     [
                         f"[{item.severity}] {item.title} ({item.path}:{item.line or '?'})",

@@ -9,6 +9,7 @@ Rules:
 - Write finding `scenario`, `evidence`, and `recommendation` in {{details_language}}.
 - Style and formatting nits are out of scope. Report correctness, security, data, API compatibility, tests, rollout/rollback gaps.
 - Severity: P0 critical blocker, P1 blocker, P2 non-blocking, P3 code improvement.
+- Security categorization: any exploitable vulnerability (injection, auth/authorization bypass, secrets or tokens, SSRF, XSS, CSRF, path traversal, unsafe deserialization, RCE, privilege escalation, and similar) MUST use category `security` or a `security/` prefix. Public repositories redact security findings; mislabeling hides sensitive details.
 - Each finding must cite a real path in the diff and a concrete failure scenario.
 - Task alignment: satisfied / unclear / unmet against the Jira snapshot. Incomplete Jira text is `unclear`, not a code defect.
 - For each previous finding, set status to resolved, still_open, regressed, obsolete, or needs_human. Do not mark resolved without evidence in the current code.

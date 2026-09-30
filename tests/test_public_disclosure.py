@@ -568,6 +568,397 @@ def test_private_jira_comment_is_unmodified() -> None:
     assert "Scenario:" not in render_jira_comment(_render(visibility="private"))
 
 
+def _correctness_with_keyword(keyword: str) -> FindingView:
+    return FindingView(
+        stable_id="keyword-finding",
+        severity="P2",
+        confidence=0.85,
+        category="correctness",
+        path="src/handler.py",
+        line=55,
+        title=f"Unvalidated input could allow {keyword}",
+        scenario=f"Attacker exploits {keyword} via query param.",
+        evidence="No sanitization before database call.",
+        recommendation="Validate and escape the input.",
+        blocking_candidate=True,
+    )
+
+
+def _correctness_clean() -> FindingView:
+    return FindingView(
+        stable_id="clean-finding",
+        severity="P2",
+        confidence=0.9,
+        category="correctness",
+        path="src/logic.py",
+        line=30,
+        title="Null check missing",
+        scenario="When user is None, method throws.",
+        evidence="get_user() can return None.",
+        recommendation="Add an explicit None check.",
+        blocking_candidate=True,
+    )
+
+
+def test_keyword_escalation_redacts_correctness_with_injection() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_with_keyword("SQL injection")]
+    render.verified.summary = "Possible SQL injection vulnerability."
+    text = render_sticky_comment(render)
+    assert "SQL injection" not in text
+    assert "Unvalidated input" not in text
+    assert "Attacker exploits" not in text
+    assert "Potential security issue." in text
+    assert "src/handler.py:55" in text
+    assert "[P2]" in text
+    assert "Review completed. See the findings below." in text
+
+
+def test_keyword_escalation_redacts_correctness_with_xss() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_with_keyword("XSS")]
+    text = render_sticky_comment(render)
+    assert "XSS" not in text
+    assert "Potential security issue." in text
+
+
+def test_keyword_escalation_redacts_correctness_with_path_traversal() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_with_keyword("path traversal")]
+    text = render_sticky_comment(render)
+    assert "path traversal" not in text
+    assert "Potential security issue." in text
+
+
+def test_keyword_escalation_redacts_correctness_with_deserialization() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_with_keyword("deserialization")]
+    text = render_sticky_comment(render)
+    assert "deserialization" not in text
+    assert "Potential security issue." in text
+
+
+def test_keyword_escalation_case_insensitive() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_with_keyword("SSRF")]
+    text = render_sticky_comment(render)
+    assert "SSRF" not in text
+    assert "Potential security issue." in text
+
+
+def test_cwe_escalation_redacts_correctness_with_cwe_reference() -> None:
+    finding = FindingView(
+        stable_id="cwe-finding",
+        severity="P1",
+        confidence=0.95,
+        category="correctness",
+        path="src/api.py",
+        line=100,
+        title="Buffer size not validated",
+        scenario="Heap overflow when input > 4096 bytes (CWE-122).",
+        evidence="memcpy uses user-supplied length.",
+        recommendation="Validate buffer size before copy.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "CWE-122" not in text
+    assert "Buffer size" not in text
+    assert "Heap overflow" not in text
+    assert "Potential security issue." in text
+    assert "src/api.py:100" in text
+
+
+def test_cwe_escalation_case_insensitive() -> None:
+    finding = FindingView(
+        stable_id="cwe-lower",
+        severity="P2",
+        confidence=0.8,
+        category="correctness",
+        path="src/parse.py",
+        line=22,
+        title="Format string bug (cwe-134)",
+        scenario="User input in printf format.",
+        evidence="printf(user_data).",
+        recommendation='Use printf("%s", user_data).',
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "cwe-134" not in text
+    assert "Potential security issue." in text
+
+
+def test_non_matching_correctness_finding_visible() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_clean()]
+    render.verified.summary = "Minor correctness issue found."
+    text = render_sticky_comment(render)
+    assert "Null check missing" in text
+    assert "When user is None" in text
+    assert "get_user() can return None." in text
+    assert "Add an explicit None check." in text
+    assert "correctness" in text
+    assert "src/logic.py:30" in text
+    assert "Minor correctness issue found." in text
+    assert "Potential security issue." not in text
+
+
+def test_redact_all_hides_all_findings() -> None:
+    render = _render(PublicReposYaml(security_findings="redact_all"))
+    render.verified.findings = [_correctness_clean()]
+    render.verified.summary = "Minor correctness issue found."
+    text = render_sticky_comment(render)
+    assert "Null check missing" not in text
+    assert "When user is None" not in text
+    assert "Potential security issue." in text
+    assert "src/logic.py:30" in text
+    assert "Review completed. See the findings below." in text
+    assert "Details are hidden because the repository is public." in text
+
+
+def test_redact_all_summary_hidden_when_findings_present() -> None:
+    render = _render(PublicReposYaml(security_findings="redact_all"))
+    render.verified.findings = [_correctness_clean()]
+    render.verified.summary = "Contains internal discussion about the code."
+    text = render_sticky_comment(render)
+    assert "internal discussion" not in text
+    assert "Review completed. See the findings below." in text
+
+
+def test_redact_summary_hidden_when_keyword_match() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_with_keyword("credential")]
+    render.verified.summary = "Credential handling needs improvement."
+    text = render_sticky_comment(render)
+    assert "Credential handling" not in text
+    assert "Review completed. See the findings below." in text
+
+
+def test_redact_summary_visible_when_no_security_content() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_clean()]
+    render.verified.summary = "Minor issues found in error handling."
+    text = render_sticky_comment(render)
+    assert "Minor issues found in error handling." in text
+    assert "Review completed. See the findings below." not in text
+
+
+def test_keyword_escalation_transition_redacted() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="old-injection",
+            status="resolved",
+            path="src/db.py",
+            line=88,
+            severity="P1",
+            title="SQL injection in search query",
+            category="correctness",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert "SQL injection" not in text
+    assert "Potential security issue." in text
+    assert "src/db.py:88" in text
+
+
+def test_cwe_escalation_transition_redacted() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="old-cwe",
+            status="still_open",
+            path="src/mem.py",
+            line=12,
+            severity="P0",
+            title="Memory corruption (CWE-787)",
+            category="correctness",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert "CWE-787" not in text
+    assert "Memory corruption" not in text
+    assert "Potential security issue." in text
+
+
+def test_redact_all_transition_redacted() -> None:
+    render = _render(PublicReposYaml(security_findings="redact_all"))
+    render.verified.findings = []
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="any-transition",
+            status="resolved",
+            path="src/utils.py",
+            line=5,
+            severity="P3",
+            title="Style improvement",
+            category="style",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert "Style improvement" not in text
+    assert "Potential security issue." in text
+
+
+def test_config_accepts_redact_all() -> None:
+    config = PublicReposYaml(security_findings="redact_all")
+    assert config.security_findings == "redact_all"
+
+
+def test_config_accepts_all_security_findings_values() -> None:
+    for value in ("redact", "redact_all", "full"):
+        config = PublicReposYaml(security_findings=value)
+        assert config.security_findings == value
+
+
+def test_config_rejects_invalid_security_findings() -> None:
+    with pytest.raises(ValueError):
+        PublicReposYaml(security_findings="invalid")
+
+
+def test_jira_comment_includes_keyword_escalated_findings() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_with_keyword("RCE")]
+    text = render_jira_comment(render)
+    assert "RCE" in text
+    assert "Unvalidated input" in text
+    assert "src/handler.py:55" in text
+
+
+def test_jira_comment_includes_cwe_escalated_findings() -> None:
+    finding = FindingView(
+        stable_id="jira-cwe",
+        severity="P1",
+        confidence=0.9,
+        category="correctness",
+        path="src/auth.py",
+        line=77,
+        title="Auth bypass (CWE-287)",
+        scenario="Token validation skipped.",
+        evidence="if (bypass) return true.",
+        recommendation="Remove bypass flag.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_jira_comment(render)
+    assert "CWE-287" in text
+    assert "Auth bypass" in text
+
+
+def test_jira_comment_omits_clean_correctness_in_redact_mode() -> None:
+    render = _render()
+    render.verified.findings = [_correctness_clean()]
+    text = render_jira_comment(render)
+    assert "Null check missing" not in text
+
+
+def test_jira_comment_includes_all_in_redact_all_mode() -> None:
+    render = _render(PublicReposYaml(security_findings="redact_all"))
+    render.verified.findings = [_correctness_clean()]
+    text = render_jira_comment(render)
+    assert "Null check missing" in text
+    assert "When user is None" in text
+
+
+def test_leftover_open_keyword_escalated_finding_redacted() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="leftover-injection",
+            status="still_open",
+            path="src/query.py",
+            line=33,
+            severity="P1",
+            title="Command injection in shell call",
+            scenario="User input passed to subprocess.",
+            evidence="subprocess.run(user_cmd)",
+            recommendation="Use subprocess with shell=False.",
+            category="correctness",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert "### Still open from previous review" in text
+    assert "Command injection" not in text
+    assert "User input passed" not in text
+    assert "Potential security issue." in text
+    assert "src/query.py:33" in text
+
+
+def test_leftover_open_clean_correctness_visible() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="leftover-clean",
+            status="still_open",
+            path="src/validator.py",
+            line=10,
+            severity="P2",
+            title="Missing range check",
+            scenario="Value can exceed max.",
+            evidence="No upper bound validation.",
+            recommendation="Add max value check.",
+            category="correctness",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert "### Still open from previous review" in text
+    assert "Missing range check" in text
+    assert "Value can exceed max." in text
+    assert "No upper bound validation." in text
+
+
+def test_multiple_keywords_detected() -> None:
+    finding = FindingView(
+        stable_id="multi-keyword",
+        severity="P0",
+        confidence=0.99,
+        category="data",
+        path="src/export.py",
+        line=200,
+        title="Credential and token exposure",
+        scenario="API credentials logged with token leak.",
+        evidence="logger.info(f'creds={creds}, token={token}')",
+        recommendation="Remove sensitive data from logs.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Credential" not in text
+    assert "token leak" not in text
+    assert "Potential security issue." in text
+
+
+def test_word_boundary_prevents_partial_matches() -> None:
+    finding = FindingView(
+        stable_id="partial-match",
+        severity="P2",
+        confidence=0.8,
+        category="correctness",
+        path="src/session.py",
+        line=15,
+        title="Session state corruption",
+        scenario="The sessionid is lost during redirect.",
+        evidence="sessionid cleared before redirect.",
+        recommendation="Preserve sessionid across redirects.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Session state corruption" in text
+    assert "sessionid" in text
+    assert "Potential security issue." not in text
+
+
 @pytest.mark.asyncio
 async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> None:
     info = _info("public")

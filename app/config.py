@@ -118,7 +118,7 @@ class SizeGuardYaml(BaseModel):
 
 class PublicReposYaml(BaseModel):
     jira_disclosure: Literal["none", "key_only", "full"] = "key_only"
-    security_findings: Literal["redact", "full"] = "redact"
+    security_findings: Literal["redact", "redact_all", "full"] = "redact"
 
 
 class CodexYaml(BaseModel):
