@@ -108,15 +108,22 @@ SECURITY_KEYWORDS = (
     "ssrf",
     "csrf",
     "rce",
+    "sqli",
     "path traversal",
     "deserialization",
     "auth bypass",
     "authorization bypass",
     "authentication bypass",
     "privilege escalation",
+    "session hijack",
+    "session hijacking",
     "secret",
     "token leak",
+    "token",
     "credential",
+    "password",
+    "api key",
+    "access key",
     "sql injection",
     "command injection",
     "code injection",
@@ -145,7 +152,7 @@ SECURITY_KEYWORDS = (
 
 _CWE_PATTERN = re.compile(r"\bCWE-\d+\b", re.IGNORECASE)
 _KEYWORD_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(kw) for kw in SECURITY_KEYWORDS) + r")\b",
+    r"\b(" + "|".join(re.escape(kw) + r"(?:e?s)?" for kw in SECURITY_KEYWORDS) + r")\b",
     re.IGNORECASE,
 )
 

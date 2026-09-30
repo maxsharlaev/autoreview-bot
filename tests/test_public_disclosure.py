@@ -10,7 +10,13 @@ from app.adapters.github import GitHubAppClient, PullRequestInfo
 from app.adapters.jira import JiraIssue
 from app.api.v1.pull_request import pull_request_webhook
 from app.config import AppConfig, PrDescriptionYaml, PublicReposYaml, Settings
-from app.services.comment_render import FindingTransitionView, RenderInput, render_jira_comment, render_sticky_comment
+from app.services.comment_render import (
+    FindingTransitionView,
+    RenderInput,
+    _security_text,
+    render_jira_comment,
+    render_sticky_comment,
+)
 from app.services.constants import SKIP_TOO_LARGE
 from app.services.orchestrator import (
     _check_public_alignment,
@@ -1033,3 +1039,111 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     assert previous[0].title == ""
     assert previous[0].evidence == ""
     assert publish.await_args.kwargs["visibility"] == "public"
+
+
+@pytest.mark.parametrize(
+    "phrase,expected",
+    [
+        ("Leaks secrets to logs", True),
+        ("Stores credentials in plain text", True),
+        ("Auth token logged", True),
+        ("Hardcoded passwords in config", True),
+        ("API keys exposed in environment", True),
+        ("Access keys stored unencrypted", True),
+        ("Session hijacking possible", True),
+        ("Vulnerable to SQLi attack", True),
+        ("SQL built from user input", False),
+        ("Missing null check in handler", False),
+        ("Date parsing fails on leap year", False),
+    ],
+)
+def test_security_text_plural_keywords(phrase: str, expected: bool) -> None:
+    assert _security_text(phrase) is expected
+
+
+def test_plural_keyword_finding_redacted() -> None:
+    finding = FindingView(
+        stable_id="plural-secrets",
+        severity="P1",
+        confidence=0.95,
+        category="correctness",
+        path="src/logger.py",
+        line=42,
+        title="Leaks secrets to logs",
+        scenario="Sensitive secrets logged in production.",
+        evidence="logger.info(secrets)",
+        recommendation="Remove secrets from log output.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Leaks secrets" not in text
+    assert "Sensitive secrets" not in text
+    assert "Potential security issue." in text
+
+
+def test_plural_keyword_credentials_redacted() -> None:
+    finding = FindingView(
+        stable_id="plural-creds",
+        severity="P1",
+        confidence=0.9,
+        category="correctness",
+        path="src/storage.py",
+        line=88,
+        title="Stores credentials in plain text",
+        scenario="User credentials saved without encryption.",
+        evidence="db.save(creds)",
+        recommendation="Encrypt credentials at rest.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "credentials" not in text
+    assert "Stores credentials" not in text
+    assert "Potential security issue." in text
+
+
+def test_token_keyword_finding_redacted() -> None:
+    finding = FindingView(
+        stable_id="token-logged",
+        severity="P2",
+        confidence=0.85,
+        category="correctness",
+        path="src/middleware.py",
+        line=23,
+        title="Auth token logged",
+        scenario="Bearer token appears in debug logs.",
+        evidence="print(f'token={auth_token}')",
+        recommendation="Mask token in logs.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "token" not in text.lower() or "Potential security issue" in text
+    assert "Bearer token" not in text
+    assert "Potential security issue." in text
+
+
+def test_non_security_sql_finding_visible() -> None:
+    finding = FindingView(
+        stable_id="sql-style",
+        severity="P2",
+        confidence=0.8,
+        category="correctness",
+        path="src/query_builder.py",
+        line=55,
+        title="SQL built from user input without parameterization",
+        scenario="Query concatenates user input directly.",
+        evidence="query = f'SELECT * FROM users WHERE id={user_id}'",
+        recommendation="Use parameterized queries.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "SQL built from user input" in text
+    assert "Query concatenates" in text
+    assert "Potential security issue." not in text
