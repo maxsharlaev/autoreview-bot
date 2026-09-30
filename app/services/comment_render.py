@@ -198,9 +198,6 @@ STANDALONE_RISK_PHRASES = (
     "without parameterization",
     "not parameterized",
     "unparameterized",
-    "string concatenation",
-    "f-string",
-    "format string",
     "unsanitized",
     "unescaped",
     "unvalidated",
@@ -222,6 +219,14 @@ STANDALONE_RISK_PHRASES = (
     "logged secret",
 )
 
+SINK_DEPENDENT_PHRASES = (
+    "string concatenation",
+    "f-string",
+    "format string",
+)
+
+SINK_DEPENDENT_SINKS = ("sql", "query", "command", "shell")
+
 _CWE_PATTERN = re.compile(r"\bCWE-\d+\b", re.IGNORECASE)
 _KEYWORD_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(kw) + r"(?:e?s)?" for kw in SECURITY_KEYWORDS) + r")\b",
@@ -237,6 +242,14 @@ _SINK_PATTERN = re.compile(
 )
 _RISK_PHRASE_PATTERN = re.compile(
     r"(" + "|".join(re.escape(p) + r"(?:e?s)?" for p in STANDALONE_RISK_PHRASES) + r")",
+    re.IGNORECASE,
+)
+_SINK_DEPENDENT_PHRASE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(p) + r"(?:e?s)?" for p in SINK_DEPENDENT_PHRASES) + r")\b",
+    re.IGNORECASE,
+)
+_SINK_DEPENDENT_SINK_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(s) + r"(?:e?s)?" for s in SINK_DEPENDENT_SINKS) + r")\b",
     re.IGNORECASE,
 )
 
@@ -260,29 +273,27 @@ def _security_text(text: str) -> bool:
         return True
     if _RISK_PHRASE_PATTERN.search(text):
         return True
+    if _SINK_DEPENDENT_PHRASE_PATTERN.search(text) and _SINK_DEPENDENT_SINK_PATTERN.search(text):
+        return True
     return False
+
+
+def _joined_fields(title: str, scenario: str, evidence: str, recommendation: str) -> str:
+    return "\n".join(filter(None, [title, scenario, evidence, recommendation]))
 
 
 def _finding_is_security(item: FindingView) -> bool:
     if _security_category(item.category):
         return True
-    return (
-        _security_text(item.title)
-        or _security_text(item.scenario)
-        or _security_text(item.evidence)
-        or _security_text(item.recommendation)
-    )
+    combined = _joined_fields(item.title, item.scenario, item.evidence, item.recommendation)
+    return _security_text(combined)
 
 
 def _transition_is_security(item: FindingTransitionView) -> bool:
     if _security_category(item.category):
         return True
-    return (
-        _security_text(item.title)
-        or _security_text(item.scenario)
-        or _security_text(item.evidence)
-        or _security_text(item.recommendation)
-    )
+    combined = _joined_fields(item.title, item.scenario, item.evidence, item.recommendation)
+    return _security_text(combined)
 
 
 def _public_alignment(status: str) -> str:

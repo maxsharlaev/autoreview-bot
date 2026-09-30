@@ -1475,3 +1475,138 @@ def test_jira_routes_standalone_risk_finding() -> None:
     text = render_jira_comment(render)
     assert "verify=False" in text
     assert "TLS verification disabled" in text
+
+
+def test_cross_field_source_title_sink_scenario_redacted() -> None:
+    finding = FindingView(
+        stable_id="cross-field",
+        severity="P1",
+        confidence=0.9,
+        category="correctness",
+        path="src/db.py",
+        line=77,
+        title="User-controlled value in database call",
+        scenario="SQL query uses it directly.",
+        evidence="execute(f'SELECT * FROM t WHERE id={val}')",
+        recommendation="Use parameterized queries.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "User-controlled value" not in text
+    assert "SQL query uses it" not in text
+    assert "Potential security issue." in text
+
+
+def test_cross_field_transition_source_title_sink_scenario_redacted() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="cross-trans",
+            status="still_open",
+            path="src/handler.py",
+            line=55,
+            severity="P1",
+            title="Untrusted input processed",
+            scenario="Shell command built from it.",
+            evidence="subprocess.call(cmd)",
+            recommendation="Use list args.",
+            category="correctness",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert "Untrusted input" not in text
+    assert "Shell command" not in text
+    assert "Potential security issue." in text
+
+
+def test_fstring_without_sink_visible() -> None:
+    finding = FindingView(
+        stable_id="fstring-ok",
+        severity="P3",
+        confidence=0.7,
+        category="correctness",
+        path="src/logger.py",
+        line=12,
+        title="Use an f-string for readability",
+        scenario="Log line concatenates strings.",
+        evidence="log('User: ' + name)",
+        recommendation="Use f'User: {name}' instead.",
+        blocking_candidate=False,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Use an f-string for readability" in text
+    assert "Log line concatenates" in text
+    assert "Potential security issue." not in text
+
+
+def test_string_concatenation_without_sink_visible() -> None:
+    finding = FindingView(
+        stable_id="concat-ok",
+        severity="P3",
+        confidence=0.6,
+        category="correctness",
+        path="src/formatter.py",
+        line=44,
+        title="Log message uses string concatenation instead of f-string",
+        scenario="Performance could be slightly improved.",
+        evidence="msg = 'Hello ' + name",
+        recommendation="Use f-string.",
+        blocking_candidate=False,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "string concatenation" in text
+    assert "Performance could be" in text
+    assert "Potential security issue." not in text
+
+
+def test_fstring_with_query_sink_redacted() -> None:
+    finding = FindingView(
+        stable_id="fstring-sql",
+        severity="P1",
+        confidence=0.95,
+        category="correctness",
+        path="src/repo.py",
+        line=88,
+        title="Query built with an f-string from request parameter",
+        scenario="SQL injection possible.",
+        evidence="db.execute(f'SELECT * FROM t WHERE x={param}')",
+        recommendation="Use parameterized query.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "f-string" not in text
+    assert "Query built" not in text
+    assert "Potential security issue." in text
+
+
+def test_leftover_open_cross_field_redacted() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = [
+        FindingTransitionView(
+            stable_id="leftover-cross",
+            status="still_open",
+            path="src/api.py",
+            line=33,
+            severity="P1",
+            title="Request body used unsafely",
+            scenario="Passed to exec() for evaluation.",
+            evidence="exec(request.body)",
+            recommendation="Never exec untrusted data.",
+            category="correctness",
+        )
+    ]
+    text = render_sticky_comment(render)
+    assert "### Still open from previous review" in text
+    assert "Request body" not in text
+    assert "exec()" not in text
+    assert "Potential security issue." in text
