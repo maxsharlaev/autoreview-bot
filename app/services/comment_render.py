@@ -150,9 +150,93 @@ SECURITY_KEYWORDS = (
     "private key",
 )
 
+UNTRUSTED_SOURCE_TERMS = (
+    "user input",
+    "user-supplied",
+    "user supplied",
+    "user-controlled",
+    "user controlled",
+    "untrusted",
+    "request param",
+    "request parameter",
+    "request body",
+    "request header",
+    "request query",
+    "form data",
+    "external input",
+    "attacker",
+)
+
+DANGEROUS_SINK_TERMS = (
+    "sql",
+    "query",
+    "shell",
+    "command",
+    "exec",
+    "eval",
+    "subprocess",
+    "os.system",
+    "template",
+    "path",
+    "file path",
+    "filepath",
+    "filename",
+    "file name",
+    "url",
+    "redirect",
+    "html",
+    "innerhtml",
+    "deserialize",
+    "pickle",
+    "yaml.load",
+    "ldap",
+    "xpath",
+    "regex",
+)
+
+STANDALONE_RISK_PHRASES = (
+    "without parameterization",
+    "not parameterized",
+    "unparameterized",
+    "string concatenation",
+    "f-string",
+    "format string",
+    "unsanitized",
+    "unescaped",
+    "unvalidated",
+    "without escaping",
+    "without validation",
+    "shell=true",
+    "eval(",
+    "exec(",
+    "pickle.loads",
+    "yaml.load(",
+    "innerhtml",
+    "dangerouslysetinnerhtml",
+    "verify=false",
+    "disable tls",
+    "disable ssl",
+    "hardcoded credential",
+    "logged token",
+    "logged password",
+    "logged secret",
+)
+
 _CWE_PATTERN = re.compile(r"\bCWE-\d+\b", re.IGNORECASE)
 _KEYWORD_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(kw) + r"(?:e?s)?" for kw in SECURITY_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+_SOURCE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(t) + r"(?:e?s)?" for t in UNTRUSTED_SOURCE_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+_SINK_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(t) + r"(?:e?s)?" for t in DANGEROUS_SINK_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+_RISK_PHRASE_PATTERN = re.compile(
+    r"(" + "|".join(re.escape(p) + r"(?:e?s)?" for p in STANDALONE_RISK_PHRASES) + r")",
     re.IGNORECASE,
 )
 
@@ -168,7 +252,15 @@ def _security_category(category: str) -> bool:
 def _security_text(text: str) -> bool:
     if not text:
         return False
-    return bool(_CWE_PATTERN.search(text) or _KEYWORD_PATTERN.search(text))
+    if _CWE_PATTERN.search(text):
+        return True
+    if _KEYWORD_PATTERN.search(text):
+        return True
+    if _SOURCE_PATTERN.search(text) and _SINK_PATTERN.search(text):
+        return True
+    if _RISK_PHRASE_PATTERN.search(text):
+        return True
+    return False
 
 
 def _finding_is_security(item: FindingView) -> bool:
@@ -297,9 +389,10 @@ def render_sticky_comment(data: RenderInput) -> str:
         _transition_is_security(item) for item in data.transitions
     )
     if redact_all:
-        safe_summary = labels["public_summary"] if verified.findings or data.transitions else verified.summary.strip()
+        safe_summary = labels["public_summary"]
     elif redact_security:
-        safe_summary = labels["public_summary"] if has_redactable else verified.summary.strip()
+        summary_leaks = _security_text(verified.summary)
+        safe_summary = labels["public_summary"] if has_redactable or summary_leaks else verified.summary.strip()
     else:
         safe_summary = verified.summary.strip()
     lines.extend(["", safe_summary, "", "---", "", f"### {labels['findings']}", ""])

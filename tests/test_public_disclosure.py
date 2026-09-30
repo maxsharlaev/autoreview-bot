@@ -1052,7 +1052,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         ("Access keys stored unencrypted", True),
         ("Session hijacking possible", True),
         ("Vulnerable to SQLi attack", True),
-        ("SQL built from user input", False),
+        ("SQL built from user input", True),
         ("Missing null check in handler", False),
         ("Date parsing fails on leap year", False),
     ],
@@ -1127,7 +1127,7 @@ def test_token_keyword_finding_redacted() -> None:
     assert "Potential security issue." in text
 
 
-def test_non_security_sql_finding_visible() -> None:
+def test_sql_from_user_input_finding_redacted() -> None:
     finding = FindingView(
         stable_id="sql-style",
         severity="P2",
@@ -1144,6 +1144,334 @@ def test_non_security_sql_finding_visible() -> None:
     render = _render()
     render.verified.findings = [finding]
     text = render_sticky_comment(render)
-    assert "SQL built from user input" in text
-    assert "Query concatenates" in text
+    assert "SQL built from user input" not in text
+    assert "Query concatenates" not in text
+    assert "Potential security issue." in text
+
+
+@pytest.mark.parametrize(
+    "title,scenario,expected",
+    [
+        (
+            "SQL query built from user input",
+            "Query concatenates user-supplied data without parameterization.",
+            True,
+        ),
+        (
+            "Shell command from request params",
+            "Command built from request parameter value.",
+            True,
+        ),
+        (
+            "File path from user-supplied filename",
+            "Path constructed from untrusted filename input.",
+            True,
+        ),
+        (
+            "Eval of user input",
+            "User-controlled string passed to eval().",
+            True,
+        ),
+        (
+            "Pickle loads on request body",
+            "Request body deserialized via pickle.loads without validation.",
+            True,
+        ),
+        (
+            "InnerHTML with user input",
+            "User input assigned to innerHTML property.",
+            True,
+        ),
+        (
+            "Disabled certificate verification",
+            "HTTP client uses verify=False.",
+            True,
+        ),
+        (
+            "Off-by-one in pagination",
+            "Page index starts at 1 but code uses 0.",
+            False,
+        ),
+        (
+            "Null check missing on empty list",
+            "Method throws when list is empty.",
+            False,
+        ),
+        (
+            "Wrong default timeout",
+            "Timeout is 30s but should be 60s per spec.",
+            False,
+        ),
+        (
+            "N+1 query in loop",
+            "Query executed per item instead of batching.",
+            False,
+        ),
+        (
+            "User input form layout",
+            "Form fields are misaligned on mobile.",
+            False,
+        ),
+    ],
+)
+def test_source_sink_pattern_detection(title: str, scenario: str, expected: bool) -> None:
+    combined = f"{title} {scenario}"
+    assert _security_text(combined) is expected
+
+
+def test_source_sink_shell_command_redacted() -> None:
+    finding = FindingView(
+        stable_id="shell-request",
+        severity="P1",
+        confidence=0.9,
+        category="correctness",
+        path="src/runner.py",
+        line=88,
+        title="Shell command from request params",
+        scenario="Command built from request parameter value.",
+        evidence="subprocess.run(cmd, shell=True)",
+        recommendation="Use subprocess with list args, not shell=True.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Shell command" not in text
+    assert "request param" not in text
+    assert "Potential security issue." in text
+
+
+def test_source_sink_eval_user_input_redacted() -> None:
+    finding = FindingView(
+        stable_id="eval-user",
+        severity="P0",
+        confidence=0.95,
+        category="correctness",
+        path="src/calc.py",
+        line=12,
+        title="Eval of user input",
+        scenario="User-controlled string passed to eval().",
+        evidence="result = eval(user_expr)",
+        recommendation="Use a safe expression parser.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Eval of user input" not in text
+    assert "eval()" not in text
+    assert "Potential security issue." in text
+
+
+def test_source_sink_pickle_request_redacted() -> None:
+    finding = FindingView(
+        stable_id="pickle-request",
+        severity="P0",
+        confidence=0.99,
+        category="correctness",
+        path="src/api.py",
+        line=45,
+        title="Pickle loads on request body",
+        scenario="Request body deserialized via pickle.loads without validation.",
+        evidence="data = pickle.loads(request.body)",
+        recommendation="Use JSON or a safe deserializer.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Pickle loads" not in text
+    assert "pickle.loads" not in text
+    assert "Potential security issue." in text
+
+
+def test_source_sink_innerhtml_user_redacted() -> None:
+    finding = FindingView(
+        stable_id="innerhtml-user",
+        severity="P1",
+        confidence=0.9,
+        category="correctness",
+        path="src/components/Widget.jsx",
+        line=33,
+        title="InnerHTML with user input",
+        scenario="User input assigned to innerHTML property.",
+        evidence="el.innerHTML = userContent",
+        recommendation="Use textContent or sanitize HTML.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "InnerHTML" not in text
+    assert "user input" not in text
+    assert "Potential security issue." in text
+
+
+def test_standalone_verify_false_redacted() -> None:
+    finding = FindingView(
+        stable_id="verify-false",
+        severity="P2",
+        confidence=0.85,
+        category="correctness",
+        path="src/client.py",
+        line=22,
+        title="Disabled certificate verification",
+        scenario="HTTP client uses verify=False.",
+        evidence="requests.get(url, verify=False)",
+        recommendation="Enable TLS verification.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "verify=False" not in text
+    assert "Potential security issue." in text
+
+
+def test_non_security_nplus1_query_visible() -> None:
+    finding = FindingView(
+        stable_id="nplus1",
+        severity="P2",
+        confidence=0.8,
+        category="correctness",
+        path="src/repo.py",
+        line=100,
+        title="N+1 query in loop",
+        scenario="Query executed per item instead of batching.",
+        evidence="for item in items: db.query(item.id)",
+        recommendation="Batch the query outside the loop.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "N+1 query in loop" in text
+    assert "Query executed per item" in text
     assert "Potential security issue." not in text
+
+
+def test_non_security_off_by_one_visible() -> None:
+    finding = FindingView(
+        stable_id="off-by-one",
+        severity="P2",
+        confidence=0.9,
+        category="correctness",
+        path="src/pagination.py",
+        line=55,
+        title="Off-by-one in pagination",
+        scenario="Page index starts at 1 but code uses 0.",
+        evidence="page = params.get('page', 0)",
+        recommendation="Default to 1 for user-facing pages.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "Off-by-one in pagination" in text
+    assert "Page index starts at 1" in text
+    assert "Potential security issue." not in text
+
+
+def test_non_security_form_layout_visible() -> None:
+    finding = FindingView(
+        stable_id="form-layout",
+        severity="P3",
+        confidence=0.7,
+        category="correctness",
+        path="src/components/Form.jsx",
+        line=88,
+        title="User input form layout",
+        scenario="Form fields are misaligned on mobile.",
+        evidence="flexDirection: row does not wrap.",
+        recommendation="Use flex-wrap or stack on mobile.",
+        blocking_candidate=False,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_sticky_comment(render)
+    assert "User input form layout" in text
+    assert "Form fields are misaligned" in text
+    assert "Potential security issue." not in text
+
+
+def test_redact_all_always_replaces_summary() -> None:
+    render = _render(PublicReposYaml(security_findings="redact_all"))
+    render.verified.findings = []
+    render.transitions = []
+    render.verified.summary = "All clear, no issues found."
+    text = render_sticky_comment(render)
+    assert "All clear" not in text
+    assert "Review completed. See the findings below." in text
+
+
+def test_redact_all_empty_findings_uses_public_summary() -> None:
+    render = _render(PublicReposYaml(security_findings="redact_all"))
+    render.verified.findings = []
+    render.transitions = []
+    render.verified.summary = "Clean review with detailed internal notes."
+    text = render_sticky_comment(render)
+    assert "internal notes" not in text
+    assert "Review completed. See the findings below." in text
+
+
+def test_redact_mode_leaking_summary_replaced() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = []
+    render.verified.summary = "User input passed to SQL query without parameterization."
+    text = render_sticky_comment(render)
+    assert "SQL query" not in text
+    assert "user input" not in text.lower()
+    assert "Review completed. See the findings below." in text
+
+
+def test_redact_mode_clean_summary_visible() -> None:
+    render = _render()
+    render.verified.findings = []
+    render.transitions = []
+    render.verified.summary = "No issues found in the pagination logic."
+    text = render_sticky_comment(render)
+    assert "No issues found in the pagination logic." in text
+    assert "Review completed. See the findings below." not in text
+
+
+def test_jira_routes_source_sink_finding() -> None:
+    finding = FindingView(
+        stable_id="jira-source-sink",
+        severity="P1",
+        confidence=0.9,
+        category="correctness",
+        path="src/handler.py",
+        line=44,
+        title="Shell command from request params",
+        scenario="Command built from request parameter value.",
+        evidence="subprocess.run(cmd, shell=True)",
+        recommendation="Use list args.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_jira_comment(render)
+    assert "Shell command from request params" in text
+    assert "subprocess.run" in text
+
+
+def test_jira_routes_standalone_risk_finding() -> None:
+    finding = FindingView(
+        stable_id="jira-verify-false",
+        severity="P2",
+        confidence=0.85,
+        category="correctness",
+        path="src/client.py",
+        line=22,
+        title="TLS verification disabled",
+        scenario="Client uses verify=False for HTTPS.",
+        evidence="requests.get(url, verify=False)",
+        recommendation="Enable verification.",
+        blocking_candidate=True,
+    )
+    render = _render()
+    render.verified.findings = [finding]
+    text = render_jira_comment(render)
+    assert "verify=False" in text
+    assert "TLS verification disabled" in text
