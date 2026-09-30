@@ -74,6 +74,22 @@ Set `pr_description.enabled: true` in `config.yaml` to draft a description from 
 
 Optional `pr_description.title_mode` supports `off` (default), `until_human_edit`, and `when_invalid_or_inconsistent`. The bot changes only a blank title, a branch-name title, or its own previously recorded title; it preserves any other human title. `always` remains a deprecated alias for `until_human_edit`. With `check_title_relevance: true`, unresolved mismatches appear in the draft. `pr_description.language` accepts `auto` or a language code; if omitted it follows the legacy `pr_text.language` key, then `language.details`. `size_guard` limits model use for large PRs, with `autoreview:force` as an override label.
 
+## Public repository disclosure
+
+The worker confirms repository visibility from GitHub on every run. Missing or conflicting visibility is treated as public. Webhook visibility is retained as a conservative hint. Existing configuration uses the public defaults below; private repositories keep the full review output.
+
+```yaml
+public_repos:
+  jira_disclosure: key_only # none | key_only | full
+  security_findings: redact # redact | redact_all | full
+```
+
+For public repositories, `key_only` shows the Jira key as plain text; `none` removes the linked key from bot output. `full` explicitly allows the linked task's Jira content in the generated description. The review and PR text models do not receive issue text fetched from Jira; a separate read-only alignment check receives it and publishes only `matches`, `partial`, `mismatch`, or `unknown`. When Jira data is available, this adds a model call, latency, and model cost to each public PR review. Previous findings remain available for status tracking. Details from findings created while private (`details_visibility`) are withheld from the public model context; details created while public are reused.
+
+When `security_findings: redact` is set (the default), findings are redacted if they have a `security` category or if their title, scenario, evidence, or recommendation matches security-related keywords (injection, XSS, SSRF, CSRF, RCE, path traversal, deserialization, auth bypass, privilege escalation, secret, token leak, credential, and similar) or a CWE reference (`CWE-\d+`). This keyword heuristic does not guarantee detection of every mislabeled vulnerability; for strict setups, use `redact_all` to redact all finding categories unconditionally. Redacted findings show only severity, path/line, and a generic label. Full details remain in the database and go to configured Jira comments or Slack; configure Slack only with a private channel restricted to the intended reviewers. If neither destination is configured, the PR comment says details are hidden.
+
+When a private visibility recheck fails or reports a public repository, publication uses a generic public-safe version; the same reduced text is sent to Jira and Slack for that run. A changed PR head fails the run with `HEAD_CHANGED`. `security_findings: full` explicitly restores detailed GitHub findings, except older private details. Existing comments are not rewritten.
+
 ## Manual local review (no GitHub webhook)
 
 The GitHub webhook is optional for a first test. Call the local API yourself. The worker still uses `GITHUB_TOKEN` (or GitHub App) to **read the PR, clone the SHA, and post the sticky comment** — you only skip GitHub delivering the event.

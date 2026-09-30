@@ -2,6 +2,8 @@
 
 The feature is disabled by default. It runs **after the review is published and committed** and drafts a PR description from the current title, branch, PR commits, changed-file summary, existing body and an available Jira issue. A changed head SHA cancels publication of the draft. Timeout or failure here cannot erase or repeat the completed review. The generator uses Codex in a read-only sandbox without GitHub write credentials; only the orchestrator posts the result. Draft and fork PRs are skipped because the review flow excludes them.
 
+For public repositories, `public_repos.jira_disclosure` controls the Linked task section. The description and title generator does not receive issue text fetched from Jira. `key_only` renders the key as plain text, `none` omits it, and `full` explicitly renders the Jira summary and acceptance criteria. See [public repository disclosure](../README.md#public-repository-disclosure).
+
 ```yaml
 pr_description:
   enabled: true

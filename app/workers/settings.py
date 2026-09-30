@@ -99,9 +99,10 @@ async def digest_open_prs(ctx: dict) -> str:
 
 def _cron_jobs() -> list:
     config = get_app_config()
-    if not (config.features.digest_enabled and config.schedule.review_digest.enabled):
-        return []
-    return [cron(digest_open_prs, **parse_cron(config.schedule.review_digest.cron))]
+    jobs = []
+    if config.features.digest_enabled and config.schedule.review_digest.enabled:
+        jobs.append(cron(digest_open_prs, **parse_cron(config.schedule.review_digest.cron)))
+    return jobs
 
 
 class WorkerSettings:

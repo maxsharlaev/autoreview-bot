@@ -11,6 +11,7 @@ def _render(**kwargs) -> RenderInput:
         verified = empty_verified(files_total=2, files_reviewed=2, skipped=[], truncated=False)
         verified.summary = "Looks safe."
     kwargs.setdefault("transitions", [])
+    kwargs.setdefault("visibility", "private")
     return RenderInput(
         repository="org/repo",
         pr_number=7,

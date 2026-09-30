@@ -11,6 +11,7 @@ from app.security.webhook import verify_github_signature
 from app.security.webhook_config import get_normalized_secret, is_webhook_enabled
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
 from app.services.review_enqueue import queue_review
+from app.services.visibility import repository_visibility
 
 router = APIRouter()
 
@@ -100,6 +101,7 @@ async def pull_request_webhook(
         is_fork=False,
         trigger="webhook",
         force=payload.get("action") == "labeled",
+        repository_visibility=repository_visibility(payload.get("repository")),
     )
     return {
         "status": run.status,

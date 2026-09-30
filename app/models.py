@@ -106,6 +106,7 @@ class Finding(TimestampMixin, Base):
     scenario: Mapped[str] = mapped_column(Text, default="", nullable=False)
     evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
     recommendation: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    details_visibility: Mapped[str | None] = mapped_column(String(16), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     current_status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
 

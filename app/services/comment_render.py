@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
-from app.config import LanguageYaml
+from app.config import LanguageYaml, PublicReposYaml
 from app.services.constants import REVIEW_MARKER
+from app.services.issue_key import remove_issue_key
 from app.services.verifier import FindingView, VerifiedReview
+from app.services.visibility import Visibility
 
 
 @dataclass
@@ -18,6 +21,7 @@ class FindingTransitionView:
     scenario: str = ""
     evidence: str = ""
     recommendation: str = ""
+    category: str = ""
 
 
 @dataclass
@@ -35,6 +39,11 @@ class RenderInput:
     model: str
     error_code: str | None = None
     language: LanguageYaml | None = None
+    visibility: Visibility | None = None
+    public_repos: PublicReposYaml | None = None
+    private_channels_configured: bool = False
+    public_alignment: str | None = None
+    redacted_prior_ids: set[str] = field(default_factory=set)
 
 
 _LABELS = {
@@ -59,6 +68,10 @@ _LABELS = {
         "error": "Error",
         "files": "files",
         "model": "model",
+        "public_summary": "Review completed. See the findings below.",
+        "security_issue": "Potential security issue.",
+        "prior_issue": "Previously reported issue.",
+        "details_hidden": "Details are hidden because the repository is public.",
     },
     "ru": {
         "scenario": "Коротко",
@@ -81,12 +94,220 @@ _LABELS = {
         "error": "Ошибка",
         "files": "файлов",
         "model": "модель",
+        "public_summary": "Ревью завершено. Замечания приведены ниже.",
+        "security_issue": "Возможная проблема безопасности.",
+        "prior_issue": "Ранее найденная проблема.",
+        "details_hidden": "Подробности скрыты, поскольку репозиторий публичный.",
     },
 }
 
 
+SECURITY_KEYWORDS = (
+    "injection",
+    "xss",
+    "ssrf",
+    "csrf",
+    "rce",
+    "sqli",
+    "path traversal",
+    "deserialization",
+    "auth bypass",
+    "authorization bypass",
+    "authentication bypass",
+    "privilege escalation",
+    "session hijack",
+    "session hijacking",
+    "secret",
+    "token leak",
+    "token",
+    "credential",
+    "password",
+    "api key",
+    "access key",
+    "sql injection",
+    "command injection",
+    "code injection",
+    "ldap injection",
+    "xml injection",
+    "xpath injection",
+    "remote code execution",
+    "arbitrary code",
+    "buffer overflow",
+    "heap overflow",
+    "stack overflow",
+    "format string",
+    "directory traversal",
+    "file inclusion",
+    "open redirect",
+    "insecure direct object",
+    "idor",
+    "broken access control",
+    "sensitive data exposure",
+    "hardcoded password",
+    "hardcoded secret",
+    "hardcoded key",
+    "api key exposed",
+    "private key",
+)
+
+UNTRUSTED_SOURCE_TERMS = (
+    "user input",
+    "user-supplied",
+    "user supplied",
+    "user-controlled",
+    "user controlled",
+    "untrusted",
+    "request param",
+    "request parameter",
+    "request body",
+    "request header",
+    "request query",
+    "form data",
+    "external input",
+    "attacker",
+)
+
+DANGEROUS_SINK_TERMS = (
+    "sql",
+    "query",
+    "shell",
+    "command",
+    "exec",
+    "eval",
+    "subprocess",
+    "os.system",
+    "template",
+    "path",
+    "file path",
+    "filepath",
+    "filename",
+    "file name",
+    "url",
+    "redirect",
+    "html",
+    "innerhtml",
+    "deserialize",
+    "pickle",
+    "yaml.load",
+    "ldap",
+    "xpath",
+    "regex",
+)
+
+STANDALONE_RISK_PHRASES = (
+    "without parameterization",
+    "not parameterized",
+    "unparameterized",
+    "unsanitized",
+    "unescaped",
+    "unvalidated",
+    "without escaping",
+    "without validation",
+    "shell=true",
+    "eval(",
+    "exec(",
+    "pickle.loads",
+    "yaml.load(",
+    "innerhtml",
+    "dangerouslysetinnerhtml",
+    "verify=false",
+    "disable tls",
+    "disable ssl",
+    "hardcoded credential",
+    "logged token",
+    "logged password",
+    "logged secret",
+)
+
+SINK_DEPENDENT_PHRASES = (
+    "string concatenation",
+    "f-string",
+    "format string",
+)
+
+SINK_DEPENDENT_SINKS = ("sql", "query", "command", "shell")
+
+_CWE_PATTERN = re.compile(r"\bCWE-\d+\b", re.IGNORECASE)
+_KEYWORD_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(kw) + r"(?:e?s)?" for kw in SECURITY_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+_SOURCE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(t) + r"(?:e?s)?" for t in UNTRUSTED_SOURCE_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+_SINK_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(t) + r"(?:e?s)?" for t in DANGEROUS_SINK_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+_RISK_PHRASE_PATTERN = re.compile(
+    r"(" + "|".join(re.escape(p) + r"(?:e?s)?" for p in STANDALONE_RISK_PHRASES) + r")",
+    re.IGNORECASE,
+)
+_SINK_DEPENDENT_PHRASE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(p) + r"(?:e?s)?" for p in SINK_DEPENDENT_PHRASES) + r")\b",
+    re.IGNORECASE,
+)
+_SINK_DEPENDENT_SINK_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(s) + r"(?:e?s)?" for s in SINK_DEPENDENT_SINKS) + r")\b",
+    re.IGNORECASE,
+)
+
+
 def _count(findings: list[FindingView], severity: str) -> int:
     return sum(1 for item in findings if item.severity == severity)
+
+
+def _security_category(category: str) -> bool:
+    return category.casefold() == "security" or category.casefold().startswith("security/")
+
+
+def _security_text(text: str) -> bool:
+    if not text:
+        return False
+    if _CWE_PATTERN.search(text):
+        return True
+    if _KEYWORD_PATTERN.search(text):
+        return True
+    if _SOURCE_PATTERN.search(text) and _SINK_PATTERN.search(text):
+        return True
+    if _RISK_PHRASE_PATTERN.search(text):
+        return True
+    if _SINK_DEPENDENT_PHRASE_PATTERN.search(text) and _SINK_DEPENDENT_SINK_PATTERN.search(text):
+        return True
+    return False
+
+
+def _joined_fields(title: str, scenario: str, evidence: str, recommendation: str) -> str:
+    return "\n".join(filter(None, [title, scenario, evidence, recommendation]))
+
+
+def _finding_is_security(item: FindingView) -> bool:
+    if _security_category(item.category):
+        return True
+    combined = _joined_fields(item.title, item.scenario, item.evidence, item.recommendation)
+    return _security_text(combined)
+
+
+def _transition_is_security(item: FindingTransitionView) -> bool:
+    if _security_category(item.category):
+        return True
+    combined = _joined_fields(item.title, item.scenario, item.evidence, item.recommendation)
+    return _security_text(combined)
+
+
+def _public_alignment(status: str) -> str:
+    return {"satisfied": "matches", "unmet": "mismatch", "unclear": "unknown"}.get(status, "unknown")
+
+
+def _redacted_prior_card(severity: str, path: str, line: int | None, labels: dict[str, str]) -> list[str]:
+    loc = f"{path}:{line}" if line else path
+    return [f"#### [{severity}] {labels['prior_issue']}", f"`previous` · `{loc}`", ""]
+
+
+def _redacted_security_card(severity: str, path: str, line: int | None, labels: dict[str, str]) -> list[str]:
+    loc = f"{path}:{line}" if line else path
+    return [f"#### [{severity}] {labels['security_issue']}", f"`security` · `{loc}`", ""]
 
 
 def _finding_card(
@@ -135,6 +356,11 @@ def _transition_table(transitions: list[FindingTransitionView], labels: dict[str
 def render_sticky_comment(data: RenderInput) -> str:
     labels = _LABELS[(data.language or LanguageYaml()).details]
     verified = data.verified
+    public = data.visibility != "private"
+    policy = data.public_repos or PublicReposYaml()
+    redact_all = public and policy.security_findings == "redact_all"
+    redact_security = public and policy.security_findings == "redact"
+    prior_ids = data.redacted_prior_ids if public else set()
     p0 = _count(verified.findings, "P0")
     p1 = _count(verified.findings, "P1")
     p2 = _count(verified.findings, "P2")
@@ -143,8 +369,14 @@ def render_sticky_comment(data: RenderInput) -> str:
     if data.error_code:
         verdict = data.error_code
 
-    alignment = verified.task_alignment_status
-    issue = data.issue_key or verified.issue_key or "none"
+    alignment = (
+        (data.public_alignment or _public_alignment(verified.task_alignment_status))
+        if public
+        else verified.task_alignment_status
+    )
+    issue = (data.issue_key or "none") if public else (data.issue_key or verified.issue_key or "none")
+    if public and policy.jira_disclosure == "none":
+        issue = "none"
     lines = [
         REVIEW_MARKER,
         "## AI Review (advisory)",
@@ -164,11 +396,27 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append(f"**Jira:** `{data.jira_warning}`")
     if data.error_code:
         lines.append(f"**{labels['error']}:** `{data.error_code}`")
-    lines.extend(["", verified.summary.strip(), "", "---", "", f"### {labels['findings']}", ""])
+    has_redactable = any(_finding_is_security(item) for item in verified.findings) or any(
+        _transition_is_security(item) for item in data.transitions
+    )
+    if redact_all:
+        safe_summary = labels["public_summary"]
+    elif redact_security:
+        summary_leaks = _security_text(verified.summary)
+        safe_summary = labels["public_summary"] if has_redactable or summary_leaks else verified.summary.strip()
+    else:
+        safe_summary = verified.summary.strip()
+    lines.extend(["", safe_summary, "", "---", "", f"### {labels['findings']}", ""])
 
     if not verified.findings and not data.error_code:
         lines.append(labels["clean"])
     for item in verified.findings:
+        if item.stable_id in prior_ids:
+            lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
+            continue
+        if redact_all or (redact_security and _finding_is_security(item)):
+            lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
+            continue
         lines.extend(
             _finding_card(
                 severity=item.severity,
@@ -184,8 +432,26 @@ def render_sticky_comment(data: RenderInput) -> str:
             )
         )
 
-    if data.transitions:
-        lines.extend(_transition_table(data.transitions, labels))
+    transitions = data.transitions
+    if public:
+        transitions = [
+            FindingTransitionView(
+                stable_id=item.stable_id,
+                status=item.status,
+                path=item.path,
+                line=item.line,
+                title=(
+                    labels["prior_issue"]
+                    if item.stable_id in prior_ids
+                    else labels["security_issue"]
+                    if redact_all or (redact_security and _transition_is_security(item))
+                    else item.title
+                ),
+            )
+            for item in transitions
+        ]
+    if transitions:
+        lines.extend(_transition_table(transitions, labels))
 
     shown = {item.stable_id for item in verified.findings}
     leftover_open = [
@@ -196,6 +462,12 @@ def render_sticky_comment(data: RenderInput) -> str:
     if leftover_open:
         lines.extend([f"### {labels['previous_open']}", ""])
         for item in leftover_open:
+            if item.stable_id in prior_ids:
+                lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
+                continue
+            if redact_all or (redact_security and _transition_is_security(item)):
+                lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
+                continue
             lines.extend(
                 _finding_card(
                     severity=item.severity,
@@ -212,7 +484,7 @@ def render_sticky_comment(data: RenderInput) -> str:
                 )
             )
 
-    unmet = verified.unmet_acceptance_criteria
+    unmet = [] if public else verified.unmet_acceptance_criteria
     if unmet:
         lines.extend([f"### {labels['unmet']}", ""])
         lines.extend(f"- {item}" for item in unmet)
@@ -226,7 +498,17 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append("")
         lines.append("</details>")
 
-    return "\n".join(lines).strip() + "\n"
+    if (
+        (redact_all or redact_security)
+        and not data.private_channels_configured
+        and (redact_all and verified.findings or any(_finding_is_security(item) for item in verified.findings))
+    ):
+        lines.extend(["", labels["details_hidden"]])
+
+    result = "\n".join(lines).strip() + "\n"
+    if public and policy.jira_disclosure == "none":
+        result = remove_issue_key(result, data.issue_key)
+    return result
 
 
 def render_jira_comment(data: RenderInput) -> str:
@@ -235,15 +517,27 @@ def render_jira_comment(data: RenderInput) -> str:
     p1 = _count(verified.findings, "P1")
     p2 = _count(verified.findings, "P2")
     p3 = _count(verified.findings, "P3")
-    return "\n".join(
-        [
-            "AI Review",
-            f"Caught: PR #{data.pr_number} ({data.repository}) sha {data.head_sha[:12]}",
-            f"Checked: task {data.issue_key or 'none'}, alignment {verified.task_alignment_status}",
-            f"Result: P0={p0} P1={p1} P2={p2} P3={p3} mode={data.mode}",
-            f"Run: {data.run_id}",
-        ]
-    )
+    alignment = data.public_alignment or verified.task_alignment_status
+    lines = [
+        "AI Review",
+        f"Caught: PR #{data.pr_number} ({data.repository}) sha {data.head_sha[:12]}",
+        f"Checked: task {data.issue_key or 'none'}, alignment {alignment}",
+        f"Result: P0={p0} P1={p1} P2={p2} P3={p3} mode={data.mode}",
+        f"Run: {data.run_id}",
+    ]
+    policy = data.public_repos or PublicReposYaml()
+    if data.visibility != "private" and policy.security_findings in ("redact", "redact_all"):
+        for item in verified.findings:
+            if policy.security_findings == "redact_all" or _finding_is_security(item):
+                lines.extend(
+                    [
+                        f"[{item.severity}] {item.title} ({item.path}:{item.line or '?'})",
+                        f"Scenario: {item.scenario}",
+                        f"Evidence: {item.evidence}",
+                        f"Recommendation: {item.recommendation}",
+                    ]
+                )
+    return "\n".join(lines)
 
 
 def render_slack_review(data: RenderInput) -> str:
