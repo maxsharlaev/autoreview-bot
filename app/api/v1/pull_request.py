@@ -5,7 +5,6 @@ from typing import Any
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
 
 from app.api.deps import SessionDep, get_redis
 from app.config import get_app_config

@@ -107,7 +107,7 @@ def test_webhook_accepts_valid_signature_without_api_key() -> None:
                 "X-GitHub-Event": "ping",
             },
         )
-        assert response.status_code == 200
+        assert response.status_code == 202  # Mode A byte-for-byte compatibility
         assert response.json()["status"] == "ok"
 
 

@@ -243,8 +243,8 @@ class TestWebhookModeAResponses:
         app.state.redis = MagicMock()
         return app, TestClient(app)
 
-    def test_ping_event_returns_200(self):
-        """Ping events should return 200, not 202."""
+    def test_ping_event_returns_202(self):
+        """Ping events should return 202 (Mode A compatibility)."""
         app, client = self._create_test_app()
         secret = "webhook-secret-16ch"
         body = b'{"zen":"test"}'
@@ -263,30 +263,20 @@ class TestWebhookModeAResponses:
                     "X-GitHub-Event": "ping",
                 },
             )
-            assert response.status_code == 200
+            assert response.status_code == 202
             assert response.json()["status"] == "ok"
 
-    def test_ignored_event_returns_200(self):
-        """Ignored events (non-PR) should return 200."""
-        from app.owners.registry import RouteResult
-
+    def test_ignored_event_returns_202(self):
+        """Ignored events (non-PR) should return 202 (Mode A compatibility)."""
         app, client = self._create_test_app()
         secret = "webhook-secret-16ch"
         body = b'{"action":"created","repository":{"full_name":"org/repo"}}'
         sig = _make_signature(secret, body)
 
-        mock_ctx = MagicMock()
-        mock_ctx.config.size_guard.override_label = "autoreview:force"
-
-        mock_registry = MagicMock()
-        mock_registry.resolve.return_value = RouteResult("default", "exact")
-        mock_registry.get.return_value = mock_ctx
-
         with (
             patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
             patch("app.api.v1.pull_request.get_normalized_secret", return_value=secret),
             patch("app.api.v1.pull_request.get_owner_webhook_secrets", return_value={}),
-            patch("app.api.v1.pull_request.get_owner_registry", return_value=mock_registry),
         ):
             response = client.post(
                 "/pull-request",
@@ -296,11 +286,12 @@ class TestWebhookModeAResponses:
                     "X-GitHub-Event": "issues",
                 },
             )
-            assert response.status_code == 200
+            # Non-PR events are classified before routing (Mode A compatibility)
+            assert response.status_code == 202
             assert response.json()["reason"] == "ignored_event"
 
     def test_no_repository_returns_repo_not_allowed(self):
-        """Missing repository should return repo_not_allowed reason."""
+        """Missing repository should return repo_not_allowed reason with 202."""
         app, client = self._create_test_app()
         secret = "webhook-secret-16ch"
         body = b'{"action":"opened","pull_request":{}}'
@@ -319,20 +310,252 @@ class TestWebhookModeAResponses:
                     "X-GitHub-Event": "pull_request",
                 },
             )
-            assert response.status_code == 200
+            assert response.status_code == 202
             assert response.json()["reason"] == "repo_not_allowed"
 
 
-class TestRoutingPersistence:
-    """Tests for routing decision persistence at enqueue."""
+class TestOwnerDisabled:
+    """Tests for disabled owner handling."""
 
-    def test_route_reason_stored_in_summary(self):
-        """Route reason should be stored in run summary at enqueue."""
-        # This is verified by the integration with queue_review
-        # The actual storage is tested via the webhook endpoint
-        pass
+    def test_disabled_owner_in_registry(self):
+        """Disabled owner should be tracked in disabled_owners set."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "enabled-owner": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+                "disabled-owner": {
+                    "enabled": False,
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
 
-    def test_explicit_route_preserved_on_reresolve(self):
-        """Explicit owner should be used for re-resolve when route_reason is 'explicit'."""
-        # This is tested via run_review behavior
-        pass
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        assert "enabled-owner" in registry.owners
+        assert "disabled-owner" not in registry.owners
+        assert "disabled-owner" in registry.disabled_owners
+        assert registry.is_disabled("disabled-owner")
+        assert not registry.is_disabled("enabled-owner")
+
+    def test_resolve_disabled_owner_returns_owner_disabled(self):
+        """Resolving with a disabled owner should return REJECT_OWNER_DISABLED."""
+        from app.owners.registry import REJECT_OWNER_DISABLED
+
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "enabled-owner": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+                "disabled-owner": {
+                    "enabled": False,
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        result = registry.resolve("any/repo", explicit_owner="disabled-owner")
+        assert result.rejected()
+        assert result.reason == REJECT_OWNER_DISABLED
+
+    def test_canonicalize_disabled_owner_returns_none(self):
+        """Canonicalizing a disabled owner should return None."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "enabled-owner": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+                "disabled-owner": {
+                    "enabled": False,
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        assert registry.canonicalize("enabled-owner") == "enabled-owner"
+        assert registry.canonicalize("disabled-owner") is None
+
+
+class TestLegacy503Detail:
+    """Tests for legacy 503 detail message."""
+
+    def _create_test_app(self):
+        from app.api.v1.pull_request import router
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.session_factory = MagicMock()
+        app.state.redis = MagicMock()
+        return app, TestClient(app)
+
+    def test_legacy_503_detail_for_single_owner(self):
+        """503 should use legacy detail message for single legacy owner mode."""
+        app, client = self._create_test_app()
+
+        with (
+            patch("app.api.v1.pull_request.is_webhook_enabled", return_value=False),
+            patch("app.api.v1.pull_request.is_legacy_single_owner_mode", return_value=True),
+        ):
+            response = client.post(
+                "/pull-request",
+                content=b"{}",
+                headers={
+                    "X-Hub-Signature-256": "sha256=invalid",
+                    "X-GitHub-Event": "pull_request",
+                },
+            )
+            assert response.status_code == 503
+            assert response.json()["detail"] == "webhook endpoint disabled: GITHUB_WEBHOOK_SECRET not configured"
+
+    def test_multi_owner_503_detail(self):
+        """503 should use multi-owner detail message when not in legacy mode."""
+        app, client = self._create_test_app()
+
+        with (
+            patch("app.api.v1.pull_request.is_webhook_enabled", return_value=False),
+            patch("app.api.v1.pull_request.is_legacy_single_owner_mode", return_value=False),
+        ):
+            response = client.post(
+                "/pull-request",
+                content=b"{}",
+                headers={
+                    "X-Hub-Signature-256": "sha256=invalid",
+                    "X-GitHub-Event": "pull_request",
+                },
+            )
+            assert response.status_code == 503
+            assert response.json()["detail"] == "webhook endpoint disabled: no valid webhook secrets configured"
+
+
+class TestCanonicalOwnerEnqueue:
+    """Tests for canonical owner ID at enqueue."""
+
+    def test_canonicalize_resolves_alias(self):
+        """canonicalize() should resolve alias to canonical owner_id."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "org-a": {
+                    "default": True,
+                    "aliases": ["alias-a"],
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        assert registry.canonicalize("alias-a") == "org-a"
+        assert registry.canonicalize("ALIAS-A") == "org-a"  # Case insensitive
+        assert registry.canonicalize("org-a") == "org-a"
+        assert registry.canonicalize("ORG-A") == "org-a"  # Case insensitive
+
+    def test_canonicalize_returns_none_for_unknown(self):
+        """canonicalize() should return None for unknown owner."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "org-a": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        assert registry.canonicalize("unknown-owner") is None
+
+
+class TestGitEnvVariables:
+    """Tests for git subprocess environment variables."""
+
+    def test_git_env_includes_proxy_variables(self):
+        """Git env should include proxy variables."""
+        import os
+        from pathlib import Path
+
+        from app.services.git_clone import _git_env
+
+        original_env = os.environ.copy()
+        try:
+            os.environ["HTTP_PROXY"] = "http://proxy:8080"
+            os.environ["HTTPS_PROXY"] = "https://proxy:8443"
+            os.environ["NO_PROXY"] = "localhost"
+            os.environ["http_proxy"] = "http://proxy:8080"
+            os.environ["https_proxy"] = "https://proxy:8443"
+            os.environ["no_proxy"] = "localhost"
+
+            env = _git_env("token", Path("/tmp/askpass"))
+
+            assert env.get("HTTP_PROXY") == "http://proxy:8080"
+            assert env.get("HTTPS_PROXY") == "https://proxy:8443"
+            assert env.get("NO_PROXY") == "localhost"
+            assert env.get("http_proxy") == "http://proxy:8080"
+            assert env.get("https_proxy") == "https://proxy:8443"
+            assert env.get("no_proxy") == "localhost"
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
+
+    def test_git_env_includes_ssl_variables(self):
+        """Git env should include SSL/CA certificate variables."""
+        import os
+        from pathlib import Path
+
+        from app.services.git_clone import _git_env
+
+        original_env = os.environ.copy()
+        try:
+            os.environ["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-bundle.crt"
+            os.environ["SSL_CERT_DIR"] = "/etc/ssl/certs"
+            os.environ["GIT_SSL_CAINFO"] = "/etc/ssl/certs/ca-certificates.crt"
+
+            env = _git_env("token", Path("/tmp/askpass"))
+
+            assert env.get("SSL_CERT_FILE") == "/etc/ssl/certs/ca-bundle.crt"
+            assert env.get("SSL_CERT_DIR") == "/etc/ssl/certs"
+            assert env.get("GIT_SSL_CAINFO") == "/etc/ssl/certs/ca-certificates.crt"
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
+
+    def test_git_env_excludes_owner_secrets(self):
+        """Git env should not include owner secrets or sensitive variables."""
+        import os
+        from pathlib import Path
+
+        from app.services.git_clone import _git_env
+
+        original_env = os.environ.copy()
+        try:
+            os.environ["OWNER_ORG_A_GITHUB_TOKEN"] = "secret_token"
+            os.environ["GITHUB_TOKEN"] = "another_secret"
+            os.environ["OPENAI_API_KEY"] = "openai_secret"
+
+            env = _git_env("token", Path("/tmp/askpass"))
+
+            assert "OWNER_ORG_A_GITHUB_TOKEN" not in env
+            assert "GITHUB_TOKEN" not in env
+            assert "OPENAI_API_KEY" not in env
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
