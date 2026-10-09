@@ -136,7 +136,38 @@ def test_startup_warns_when_no_owner_bound_to_legacy_default(build, warned, capl
         mock_settings.return_value.github_webhook_secret = ""
         _validate_startup_config()
 
-    hits = [r for r in caplog.records if "aliases: [default]" in r.getMessage()]
+    from app.owners.registry import LEGACY_DEFAULT_UNBOUND_WARNING
+
+    hits = [r for r in caplog.records if r.getMessage() == LEGACY_DEFAULT_UNBOUND_WARNING]
+    assert len(hits) == (1 if warned else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("build", "warned"),
+    [
+        (_mode_a, False),
+        (_mode_b, False),
+        (_mode_c, True),
+        (_mode_c_alias_on_a_default_on_b, False),
+    ],
+)
+async def test_worker_startup_warns_when_no_owner_bound_to_legacy_default(build, warned, caplog) -> None:
+    from app.owners.registry import LEGACY_DEFAULT_UNBOUND_WARNING
+    from app.workers import settings as worker_settings
+
+    with (
+        patch.object(worker_settings, "get_settings"),
+        patch.object(worker_settings, "configure_logging"),
+        patch.object(worker_settings, "start_worker_metrics_server"),
+        patch.object(worker_settings, "create_engine"),
+        patch.object(worker_settings, "create_session_factory"),
+        patch("app.owners.registry.get_owner_registry", return_value=build()),
+        caplog.at_level(logging.WARNING),
+    ):
+        await worker_settings.startup({})
+
+    hits = [r for r in caplog.records if r.getMessage() == LEGACY_DEFAULT_UNBOUND_WARNING]
     assert len(hits) == (1 if warned else 0)
 
 

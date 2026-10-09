@@ -10,7 +10,7 @@ from app.api.v1 import api_router
 from app.config import get_app_config, get_settings
 from app.db import create_engine, create_session_factory
 from app.logging_setup import configure_logging
-from app.owners.registry import OwnerConfigError, OwnerRegistry
+from app.owners.registry import OwnerConfigError, OwnerRegistry, warn_if_legacy_default_unbound
 from app.queue import create_redis_pool
 from app.security.webhook_config import (
     WEBHOOK_SECRET_MIN_LENGTH,
@@ -32,12 +32,7 @@ def _validate_startup_config() -> None:
         registry = OwnerRegistry.build(settings, app_config)
         for warning in registry.warnings:
             logger.warning("Owner config: %s", warning)
-        if registry.owners and registry.legacy_default_alias() is None:
-            logger.warning(
-                "Owner config: no owner is bound to legacy owner_id 'default'. Findings, review history "
-                "and comment authors recorded before multi-owner support stay hidden from every owner. "
-                "Add `aliases: [default]` to the owner that should inherit them."
-            )
+        warn_if_legacy_default_unbound(registry, logger)
 
         owner_ids = list(registry.owners.keys())
         if not owner_ids:

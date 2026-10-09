@@ -40,7 +40,20 @@ async def startup(ctx: dict) -> None:
     engine = create_engine()
     ctx["engine"] = engine
     ctx["session_factory"] = create_session_factory(engine)
+    _warn_owner_config()
     logger.info("worker ready max_jobs=%s job_timeout=%ss", settings.worker_max_jobs, settings.worker_job_timeout)
+
+
+def _warn_owner_config() -> None:
+    """Emit the same legacy 'default' binding warning as API startup, once per worker start."""
+    from app.owners.registry import OwnerConfigError, get_owner_registry, warn_if_legacy_default_unbound
+
+    try:
+        registry = get_owner_registry()
+    except OwnerConfigError as exc:
+        logger.error("Owner configuration error: %s", exc)
+        return
+    warn_if_legacy_default_unbound(registry, logger)
 
 
 async def shutdown(ctx: dict) -> None:

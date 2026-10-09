@@ -913,6 +913,24 @@ def _validate_credentials_uniqueness(owners: dict[str, OwnerContext], warnings: 
             )
 
 
+LEGACY_DEFAULT_UNBOUND_WARNING = (
+    "Owner config: no owner is bound to legacy owner_id 'default'. Findings, review history "
+    "and comment authors recorded before multi-owner support stay hidden from every owner. "
+    "Add `aliases: [default]` to the owner that should inherit them."
+)
+
+
+def warn_if_legacy_default_unbound(registry: OwnerRegistry, log: logging.Logger) -> bool:
+    """Log the startup warning when named owners exist but none is bound to legacy 'default'.
+
+    Shared by API and worker startup so both emit the same text. Returns True if it warned.
+    """
+    if registry.owners and registry.legacy_default_alias() is None:
+        log.warning(LEGACY_DEFAULT_UNBOUND_WARNING)
+        return True
+    return False
+
+
 @lru_cache
 def get_owner_registry() -> OwnerRegistry:
     """Get the cached owner registry, building it on first access."""
