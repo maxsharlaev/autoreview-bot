@@ -50,6 +50,8 @@ def _get_alembic_config():
 
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", _get_asyncpg_url())
+    # Tell env.py to use our test URL instead of settings.database_url
+    config.attributes["use_test_url"] = True
     # Disable logger configuration to avoid breaking other tests
     config.attributes["configure_logger"] = False
     return config
