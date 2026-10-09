@@ -17,6 +17,8 @@ _webhook_enabled: bool = False
 _normalized_secret: str = ""
 # Multi-owner support: mapping of owner_id -> normalized webhook secret
 _owner_webhook_secrets: dict[str, str] = {}
+# Track if we're using legacy single-owner mode (GITHUB_WEBHOOK_SECRET only)
+_is_legacy_single_owner: bool = True
 
 
 def normalize_webhook_secret(secret: str) -> str:
@@ -47,6 +49,11 @@ def is_webhook_enabled() -> bool:
     return _webhook_enabled
 
 
+def is_legacy_single_owner_mode() -> bool:
+    """Return True if using legacy single-owner mode (GITHUB_WEBHOOK_SECRET from env only)."""
+    return _is_legacy_single_owner
+
+
 def get_normalized_secret() -> str:
     """Return the normalized webhook secret for HMAC computation (legacy single-owner)."""
     return _normalized_secret
@@ -62,9 +69,10 @@ def set_webhook_config(enabled: bool, secret: str) -> None:
 
     This is the legacy single-owner configuration path.
     """
-    global _webhook_enabled, _normalized_secret
+    global _webhook_enabled, _normalized_secret, _is_legacy_single_owner
     _webhook_enabled = enabled
     _normalized_secret = normalize_webhook_secret(secret) if enabled else ""
+    _is_legacy_single_owner = True
 
 
 def set_multi_owner_webhook_config(registry: OwnerRegistry) -> None:
@@ -72,7 +80,8 @@ def set_multi_owner_webhook_config(registry: OwnerRegistry) -> None:
 
     Called during startup validation when owners are configured.
     """
-    global _webhook_enabled, _owner_webhook_secrets, _normalized_secret
+    global _webhook_enabled, _owner_webhook_secrets, _normalized_secret, _is_legacy_single_owner
+    _is_legacy_single_owner = False
 
     _owner_webhook_secrets = {}
     for owner_id, ctx in registry.owners.items():

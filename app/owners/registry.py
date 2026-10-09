@@ -90,6 +90,22 @@ class OwnerRegistry:
                 return ctx
         return None
 
+    def canonicalize(self, owner_id: str) -> str | None:
+        """Resolve alias and case to the canonical owner_id.
+
+        Returns the canonical owner_id or None if the owner doesn't exist.
+        """
+        owner_lower = owner_id.lower()
+        # Try case-insensitive alias match
+        for alias, target in self.aliases.items():
+            if alias.lower() == owner_lower:
+                return target
+        # Try case-insensitive owner_id match
+        for oid in self.owners:
+            if oid.lower() == owner_lower:
+                return oid
+        return None
+
     def get_default(self) -> OwnerContext | None:
         """Get the default owner context, or None if no owners are configured."""
         if not self.default_owner_id:

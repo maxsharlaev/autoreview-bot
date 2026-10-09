@@ -20,6 +20,7 @@ from app.security.webhook import verify_github_signature, verify_github_signatur
 from app.security.webhook_config import (
     get_normalized_secret,
     get_owner_webhook_secrets,
+    is_legacy_single_owner_mode,
     is_webhook_enabled,
 )
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
@@ -98,6 +99,12 @@ async def pull_request_webhook(
 ) -> dict[str, Any]:
     """Handle webhook from GitHub (multi-owner: verifies against all valid secrets)."""
     if not is_webhook_enabled():
+        # Legacy Mode A: use original error message for backward compatibility
+        if is_legacy_single_owner_mode():
+            raise HTTPException(
+                status_code=503,
+                detail="webhook endpoint disabled: GITHUB_WEBHOOK_SECRET not configured",
+            )
         raise HTTPException(
             status_code=503,
             detail="webhook endpoint disabled: no valid webhook secrets configured",
@@ -129,13 +136,17 @@ async def pull_request_webhook(
 
     payload = await request.json() if body else {}
 
-    # Early return for ping/non-PR events (return 200, not 202)
+    # Early return for ping events (202 for Mode A backward compatibility)
     if x_github_event in {None, "ping"}:
-        return JSONResponse(content={"status": "ok", "event": x_github_event or "unknown"}, status_code=200)
+        return {"status": "ok", "event": x_github_event or "unknown"}
+
+    # Check for non-PR events before routing (ignored_event for Mode A compatibility)
+    if x_github_event != "pull_request":
+        return {"status": "skipped", "reason": "ignored_event"}
 
     full_name = _full_name(payload)
     if not full_name:
-        return JSONResponse(content={"status": "skipped", "reason": SKIP_REPO}, status_code=200)
+        return {"status": "skipped", "reason": SKIP_REPO}
 
     installation_id = _get_installation_id(payload)
 
@@ -151,10 +162,10 @@ async def pull_request_webhook(
         )
         record_routing(owner="", reason=route_result.reason, rejected=True)
         if route_result.reason == REJECT_UNKNOWN_OWNER:
-            return JSONResponse(content={"status": "skipped", "reason": "unknown_owner"}, status_code=200)
+            return {"status": "skipped", "reason": "unknown_owner"}
         if route_result.reason == REJECT_REPO_NOT_ALLOWED:
-            return JSONResponse(content={"status": "skipped", "reason": SKIP_REPO}, status_code=200)
-        return JSONResponse(content={"status": "skipped", "reason": route_result.reason}, status_code=200)
+            return {"status": "skipped", "reason": SKIP_REPO}
+        return {"status": "skipped", "reason": route_result.reason}
 
     owner_id = route_result.owner_id
 
@@ -180,7 +191,7 @@ async def pull_request_webhook(
     # Get owner context for config
     ctx = registry.get(owner_id)
     if ctx is None:
-        return JSONResponse(content={"status": "skipped", "reason": "owner_not_configured"}, status_code=200)
+        return {"status": "skipped", "reason": "owner_not_configured"}
 
     # Classify with owner's config
     skipped = classify_pull_request_event(
@@ -189,7 +200,7 @@ async def pull_request_webhook(
         override_label=ctx.config.size_guard.override_label,
     )
     if skipped is not None:
-        return JSONResponse(content=skipped, status_code=200)
+        return skipped
 
     pr_payload = payload.get("pull_request") or {}
     head = pr_payload.get("head") or {}
@@ -231,8 +242,9 @@ async def pull_request_webhook_for_owner(
 ) -> dict[str, Any]:
     """Handle webhook for a specific owner (verifies against that owner's secret only)."""
     registry = get_owner_registry()
-    ctx = registry.get(owner_id)
 
+    # Get owner context (case-insensitive, alias-aware lookup)
+    ctx = registry.get(owner_id)
     if ctx is None:
         raise HTTPException(status_code=404, detail="unknown_owner")
 
@@ -254,38 +266,47 @@ async def pull_request_webhook_for_owner(
 
     payload = await request.json() if body else {}
 
-    # Early return for ping/non-PR events (return 200, not 202)
+    # Early return for ping events (202 for Mode A backward compatibility)
     if x_github_event in {None, "ping"}:
-        return JSONResponse(content={"status": "ok", "event": x_github_event or "unknown"}, status_code=200)
+        return {"status": "ok", "event": x_github_event or "unknown"}
+
+    # Check for non-PR events before routing (ignored_event)
+    if x_github_event != "pull_request":
+        return {"status": "skipped", "reason": "ignored_event"}
 
     full_name = _full_name(payload)
     if not full_name:
-        return JSONResponse(content={"status": "skipped", "reason": SKIP_REPO}, status_code=200)
+        return {"status": "skipped", "reason": SKIP_REPO}
 
     installation_id = _get_installation_id(payload)
 
-    # Route with explicit owner
-    route_result = registry.resolve(full_name, installation_id=installation_id, explicit_owner=owner_id)
+    # Canonicalize owner_id (resolve alias and case)
+    canonical_owner_id = registry.canonicalize(owner_id)
+    if canonical_owner_id is None:
+        raise HTTPException(status_code=404, detail="unknown_owner")
+
+    # Route with explicit canonical owner
+    route_result = registry.resolve(full_name, installation_id=installation_id, explicit_owner=canonical_owner_id)
 
     if route_result.rejected():
         logger.info(
             "webhook routing rejected repo=%s owner=%s reason=%s",
             full_name,
-            owner_id,
+            canonical_owner_id,
             route_result.reason,
         )
-        record_routing(owner=owner_id, reason=route_result.reason, rejected=True)
+        record_routing(owner=canonical_owner_id, reason=route_result.reason, rejected=True)
         if route_result.reason == REJECT_OWNER_REPO_CONFLICT:
             raise HTTPException(status_code=409, detail="owner_repo_conflict")
         if route_result.reason == REJECT_REPO_NOT_ALLOWED:
-            return JSONResponse(content={"status": "skipped", "reason": SKIP_REPO}, status_code=200)
-        return JSONResponse(content={"status": "skipped", "reason": route_result.reason}, status_code=200)
+            return {"status": "skipped", "reason": SKIP_REPO}
+        return {"status": "skipped", "reason": route_result.reason}
 
-    record_routing(owner=owner_id, reason=route_result.reason, rejected=False)
+    record_routing(owner=canonical_owner_id, reason=route_result.reason, rejected=False)
     logger.info(
         "webhook routed repo=%s owner=%s reason=%s",
         full_name,
-        owner_id,
+        canonical_owner_id,
         route_result.reason,
     )
 
@@ -296,7 +317,7 @@ async def pull_request_webhook_for_owner(
         override_label=ctx.config.size_guard.override_label,
     )
     if skipped is not None:
-        return JSONResponse(content=skipped, status_code=200)
+        return skipped
 
     pr_payload = payload.get("pull_request") or {}
     head = pr_payload.get("head") or {}
@@ -317,12 +338,12 @@ async def pull_request_webhook_for_owner(
         trigger="webhook",
         force=payload.get("action") == "labeled",
         repository_visibility=repository_visibility(payload.get("repository")),
-        owner_id=owner_id,
+        owner_id=canonical_owner_id,
         installation_id=installation_id,
         route_reason=route_result.reason,
     )
     return {
         "status": run.status,
         "review_run_id": str(run.id),
-        "owner": owner_id,
+        "owner": canonical_owner_id,
     }
