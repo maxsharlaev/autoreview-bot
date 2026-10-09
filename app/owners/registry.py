@@ -529,7 +529,7 @@ class OwnerRegistry:
 
         exact_claims, wildcard_claims = _validate_claims(allowed_repos_map, warnings)
         installation_claims = _build_installation_claims(owners)
-        _validate_api_keys(owners)
+        _validate_api_keys(owners, operator_key=settings.review_api_key, has_legacy_owner=has_legacy_github)
         _validate_credentials_uniqueness(owners, warnings)
 
         return cls(
@@ -833,14 +833,37 @@ def _build_installation_claims(owners: dict[str, OwnerContext]) -> dict[int, str
     return installation_claims
 
 
-def _validate_api_keys(owners: dict[str, OwnerContext]) -> None:
-    """Validate that no two owners have the same API key."""
+def _validate_api_keys(
+    owners: dict[str, OwnerContext],
+    operator_key: str | None = None,
+    has_legacy_owner: bool = False,
+) -> None:
+    """Validate API key uniqueness and separation from operator key.
+
+    Checks:
+    1. No two owners share the same API key
+    2. No owner's API key equals the global operator key (REVIEW_API_KEY)
+       - This prevents privilege escalation where an owner-scoped key
+         would match as the operator key (which has access to all owners)
+       - Exception: In Mode A (legacy only), the default owner's key IS the
+         operator key by design - skip this check for the legacy owner
+    """
     key_to_owner: dict[str, str] = {}
     for owner_id, ctx in owners.items():
         if ctx.api_key:
+            # Check for duplicate keys between owners
             if ctx.api_key in key_to_owner:
                 raise OwnerConfigError(f"API key is used by both '{key_to_owner[ctx.api_key]}' and '{owner_id}'")
             key_to_owner[ctx.api_key] = owner_id
+
+            # Check that owner key doesn't equal operator key (privilege escalation)
+            # Skip for legacy default owner (Mode A) since its api_key IS the operator key
+            is_legacy_default = has_legacy_owner and owner_id == DEFAULT_OWNER_ID
+            if operator_key and not is_legacy_default and hmac.compare_digest(operator_key, ctx.api_key):
+                raise OwnerConfigError(
+                    f"Owner '{owner_id}' has an API key that equals the global REVIEW_API_KEY. "
+                    "Owner-scoped keys must be distinct from the operator key."
+                )
 
 
 def _validate_credentials_uniqueness(owners: dict[str, OwnerContext], warnings: list[str]) -> None:
