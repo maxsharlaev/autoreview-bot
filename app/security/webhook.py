@@ -12,12 +12,16 @@ def verify_github_signature(*, secret: str, body: bytes, header: str | None) -> 
     Returns True only when:
     - secret is non-empty
     - header is present and has the form 'sha256=<hex>'
+    - header contains only ASCII characters
     - the computed HMAC matches the provided digest (constant-time comparison)
 
     This is the ONLY authentication required for the webhook endpoint.
     GitHub webhooks cannot send custom API key headers.
     """
     if not secret or not header:
+        return False
+    # Reject non-ASCII characters in signature header
+    if not header.isascii():
         return False
     try:
         algorithm, digest = header.split("=", 1)
@@ -50,6 +54,10 @@ def verify_github_signature_multi(
         Empty set if no secrets matched or header is invalid.
     """
     if not header:
+        return set()
+
+    # Reject non-ASCII characters in signature header
+    if not header.isascii():
         return set()
 
     try:

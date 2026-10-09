@@ -32,6 +32,31 @@ def extract_comment_author_logins(comment_authors: list[Any] | None) -> list[str
     return logins
 
 
+def extract_comment_author_logins_for_owner(comment_authors: list[Any] | None, owner_id: str) -> list[str]:
+    """Extract login strings for a specific owner only.
+
+    Only returns logins where:
+    - Old format: always included (backward compatibility, treated as "default")
+    - New format: owner_id matches the specified owner
+
+    This ensures comment author deduplication is per-owner.
+    """
+    if not comment_authors:
+        return []
+
+    logins = []
+    for item in comment_authors:
+        if isinstance(item, str):
+            # Old format: include for "default" owner for backward compatibility
+            if owner_id == "default":
+                logins.append(item)
+        elif isinstance(item, dict) and "login" in item:
+            item_owner_id = item.get("owner_id", "default")
+            if item_owner_id == owner_id:
+                logins.append(item["login"])
+    return logins
+
+
 def build_comment_author_entry(login: str, owner_id: str = "default", kind: str | None = None) -> dict[str, Any]:
     """Build a comment_authors entry in the new format."""
     return {"login": login, "owner_id": owner_id, "kind": kind}

@@ -78,9 +78,17 @@ class OwnerRegistry:
     _owner_yamls: dict[str, OwnerYaml] = field(default_factory=dict, repr=False)
 
     def get(self, owner_id: str) -> OwnerContext | None:
-        """Get owner by id or alias."""
-        resolved = self.aliases.get(owner_id, owner_id)
-        return self.owners.get(resolved)
+        """Get owner by id or alias (case-insensitive)."""
+        owner_lower = owner_id.lower()
+        # Try case-insensitive alias match
+        for alias, target in self.aliases.items():
+            if alias.lower() == owner_lower:
+                return self.owners.get(target)
+        # Try case-insensitive owner_id match
+        for oid, ctx in self.owners.items():
+            if oid.lower() == owner_lower:
+                return ctx
+        return None
 
     def get_default(self) -> OwnerContext | None:
         """Get the default owner context, or None if no owners are configured."""
@@ -115,9 +123,23 @@ class OwnerRegistry:
         full_name_lower = full_name.lower()
         org = full_name_lower.split("/", 1)[0] if "/" in full_name_lower else ""
 
-        # Step 1: Explicit owner
+        # Step 1: Explicit owner (case-insensitive)
         if explicit_owner:
-            resolved_id = self.aliases.get(explicit_owner, explicit_owner)
+            explicit_lower = explicit_owner.lower()
+            resolved_id: str | None = None
+            # Try case-insensitive alias match
+            for alias, target in self.aliases.items():
+                if alias.lower() == explicit_lower:
+                    resolved_id = target
+                    break
+            # Try case-insensitive owner_id match
+            if resolved_id is None:
+                for oid in self.owners:
+                    if oid.lower() == explicit_lower:
+                        resolved_id = oid
+                        break
+            if resolved_id is None:
+                return RouteResult("", REJECT_UNKNOWN_OWNER)
             ctx = self.owners.get(resolved_id)
             if ctx is None:
                 return RouteResult("", REJECT_UNKNOWN_OWNER)

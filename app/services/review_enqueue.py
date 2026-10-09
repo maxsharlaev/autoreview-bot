@@ -34,6 +34,7 @@ async def queue_review(
     repository_visibility: Visibility | None = None,
     owner_id: str = "default",
     installation_id: int | None = None,
+    route_reason: str | None = None,
 ) -> ReviewRun:
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
@@ -141,6 +142,8 @@ async def queue_review(
         summary["repository_visibility"] = repository_visibility
     if installation_id is not None:
         summary["installation_id"] = installation_id
+    if route_reason is not None:
+        summary["route_reason"] = route_reason
 
     run = ReviewRun(
         id=uuid.uuid4(),

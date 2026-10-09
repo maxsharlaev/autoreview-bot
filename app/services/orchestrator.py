@@ -27,7 +27,7 @@ from app.models import (
     ReviewRun,
     TaskSnapshot,
     build_comment_author_entry,
-    extract_comment_author_logins,
+    extract_comment_author_logins_for_owner,
 )
 from app.owners.registry import OwnerRegistry, get_owner_registry
 from app.paths import data_file
@@ -95,14 +95,17 @@ async def _remember_comment_author(
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
-    existing_logins = extract_comment_author_logins(locked.comment_authors)
-    if login.casefold() not in {author.casefold() for author in existing_logins}:
+
+    # M2: Deduplicate by (login, owner_id) pair - check if this login is already recorded for this owner
+    existing_for_owner = extract_comment_author_logins_for_owner(locked.comment_authors, owner_id)
+    if login.casefold() not in {author.casefold() for author in existing_for_owner}:
         # M2: Write object format with owner_id and kind for multi-owner identity tracking
         cred_kind = github._credentials.kind if github._credentials else None
         entry = build_comment_author_entry(login, owner_id=owner_id, kind=cred_kind)
         locked.comment_authors = list(locked.comment_authors or []) + [entry]
-        existing_logins.append(login)
-    github.previous_comment_authors = tuple(existing_logins)
+
+    # For the current run, only trust logins from this owner
+    github.previous_comment_authors = tuple(extract_comment_author_logins_for_owner(locked.comment_authors, owner_id))
     await session.commit()
 
 
@@ -118,7 +121,7 @@ async def run_review(
     codex_fn=run_codex,
     registry: OwnerRegistry | None = None,
 ) -> ReviewRun:
-    from app.services.constants import SKIP_OWNER_CHANGED, SKIP_OWNER_NOT_CONFIGURED
+    from app.services.constants import SKIP_OWNER_CHANGED, SKIP_OWNER_DISABLED, SKIP_OWNER_NOT_CONFIGURED
 
     settings = settings or get_settings()
     registry = registry or get_owner_registry()
@@ -156,9 +159,37 @@ async def run_review(
         return await _skip(session, run, started, SKIP_OWNER_NOT_CONFIGURED)
 
     # Re-resolve routing to check if the route changed since enqueue
+    # Use the same explicit_owner if the original route was explicit
     installation_id = (run.summary or {}).get("installation_id")
-    route = registry.resolve(pr.repository.full_name, installation_id=installation_id)
-    if not route.rejected() and route.owner_id != owner_id:
+    route_reason = (run.summary or {}).get("route_reason")
+    explicit_owner = owner_id if route_reason == "explicit" else None
+    route = registry.resolve(pr.repository.full_name, installation_id=installation_id, explicit_owner=explicit_owner)
+
+    # Handle rejected re-resolve
+    if route.rejected():
+        from app.owners.registry import REJECT_OWNER_DISABLED
+
+        if route.reason == REJECT_OWNER_DISABLED:
+            logger.warning(
+                "owner_disabled owner=%s run=%s repo=%s",
+                owner_id,
+                run.id,
+                pr.repository.full_name,
+            )
+            progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
+            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
+        # Other rejection reasons: treat as owner_changed (route no longer valid)
+        logger.warning(
+            "owner_changed owner=%s reason=%s run=%s repo=%s",
+            owner_id,
+            route.reason,
+            run.id,
+            pr.repository.full_name,
+        )
+        progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
+        return await _skip(session, run, started, SKIP_OWNER_CHANGED)
+
+    if route.owner_id != owner_id:
         logger.warning(
             "owner_changed owner=%s new_owner=%s run=%s repo=%s",
             owner_id,
@@ -172,7 +203,8 @@ async def run_review(
     # Build clients from owner context (unless overridden for testing)
     config = config or ctx.config
     if github is None:
-        previous_authors = tuple(extract_comment_author_logins(pr.repository.comment_authors))
+        # M2: Only trust comment authors recorded for this owner
+        previous_authors = tuple(extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id))
         github = GitHubAppClient.from_credentials(
             ctx.github, owner_id=owner_id, previous_comment_authors=previous_authors
         )
@@ -218,7 +250,10 @@ async def run_review(
         return await _skip(session, run, started, SKIP_NO_WRITE)
 
     if isinstance(github, GitHubAppClient):
-        github.previous_comment_authors = tuple(extract_comment_author_logins(pr.repository.comment_authors))
+        # M2: Only trust comment authors recorded for this owner
+        github.previous_comment_authors = tuple(
+            extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id)
+        )
         await _remember_comment_author(session, github, pr.repository, owner, repo, owner_id=owner_id)
 
     webhook_metrics = (run.summary or {}).get("size_metrics") if run.head_sha == info.head_sha else None

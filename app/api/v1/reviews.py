@@ -54,7 +54,8 @@ async def start_review(
     if effective_owner:
         route = registry.resolve(full_name, explicit_owner=effective_owner)
         if route.rejected():
-            record_routing(owner=effective_owner or "", reason=route.reason, rejected=True)
+            # Don't use user-supplied selector as metrics label (cardinality explosion risk)
+            record_routing(owner="", reason=route.reason, rejected=True)
             if route.reason == REJECT_UNKNOWN_OWNER:
                 raise HTTPException(status_code=404, detail="unknown_owner")
             if route.reason == REJECT_OWNER_REPO_CONFLICT:
@@ -91,6 +92,18 @@ async def start_review(
             info = await github.get_pull_request(owner, repo, number)
         except GitHubError as exc:
             raise HTTPException(status_code=502, detail=f"github: {exc}") from exc
+
+        # Re-check routing if GitHub returned a different full_name (repo renamed)
+        if info.full_name.lower() != full_name.lower():
+            recheck = registry.resolve(info.full_name, explicit_owner=effective_owner)
+            if recheck.rejected():
+                record_routing(owner="", reason=recheck.reason, rejected=True)
+                if recheck.reason == REJECT_REPO_NOT_ALLOWED:
+                    raise HTTPException(status_code=403, detail=SKIP_REPO)
+                raise HTTPException(status_code=403, detail=recheck.reason)
+            if recheck.owner_id != owner_id:
+                raise HTTPException(status_code=409, detail=f"repo_renamed: {info.full_name} routes to different owner")
+
         full_name = info.full_name
         head_sha = info.head_sha
         base_sha = info.base_sha

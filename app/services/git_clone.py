@@ -66,11 +66,39 @@ def _redact(message: str, token: str) -> str:
 
 
 def _git_env(token: str, askpass: Path) -> dict[str, str]:
-    env = os.environ.copy()
+    """Build a minimal environment for git subprocess.
+
+    Only includes essential variables for git to function, reducing exposure
+    to potentially dangerous inherited environment variables.
+    """
+    # Start with a minimal env, not a copy of the full environment
+    env: dict[str, str] = {}
+
+    # Essential for locating executables
+    if "PATH" in os.environ:
+        env["PATH"] = os.environ["PATH"]
+
+    # Essential for home directory (SSH, git config)
+    if "HOME" in os.environ:
+        env["HOME"] = os.environ["HOME"]
+
+    # Locale settings for consistent output
+    if "LANG" in os.environ:
+        env["LANG"] = os.environ["LANG"]
+    if "LC_ALL" in os.environ:
+        env["LC_ALL"] = os.environ["LC_ALL"]
+
+    # TMP directory
+    for tmp_var in ("TMPDIR", "TMP", "TEMP"):
+        if tmp_var in os.environ:
+            env[tmp_var] = os.environ[tmp_var]
+
+    # Git-specific variables
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ASKPASS"] = str(askpass)
     env["GIT_PASSWORD"] = token
     env["GCM_INTERACTIVE"] = "never"
+
     return env
 
 
