@@ -1051,7 +1051,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     mock_registry.get.return_value = mock_ctx
     mock_registry.resolve.return_value = RouteResult("default", "exact")
     mock_registry.default_owner_id = "default"
-    mock_registry.legacy_default_alias.return_value = None
+    mock_registry.legacy_default_alias.return_value = "default"
     mock_registry.is_disabled.return_value = False
 
     await run_review(

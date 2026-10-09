@@ -135,7 +135,7 @@ async def test_hard_limit_uses_persisted_author_after_credential_change() -> Non
     mock_registry = MagicMock()
     mock_registry.get.return_value = mock_ctx
     mock_registry.resolve.return_value = RouteResult("default", "exact")
-    mock_registry.legacy_default_alias.return_value = None  # owner 'default' exists
+    mock_registry.legacy_default_alias.return_value = "default"  # owner 'default' exists (mode A)
 
     result = await run_review(
         session,
@@ -158,17 +158,27 @@ async def test_hard_limit_uses_persisted_author_after_credential_change() -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("owner_id", "legacy_alias", "expected_trusted"),
+    ("build", "owner_id", "expected_trusted"),
     [
-        # Modes C/D: no owner named 'default'; the default owner inherits legacy entries.
-        ("org-a", "org-a", ("old-bot", "older-bot", "new-bot")),
-        # Mode B: the legacy 'default' owner still exists; another owner must not inherit its entries.
-        ("org-b", None, ("new-bot",)),
+        # Mode B: the legacy 'default' owner keeps its entries; owner-b (default: true) does not get them.
+        ("mode_b", "default", ("old-bot", "older-bot", "new-bot")),
+        ("mode_b", "org-b", ("new-bot",)),
+        # Modes C/D with default: true but no `aliases: [default]`: nobody trusts legacy entries.
+        ("mode_c", "org-a", ("new-bot",)),
+        ("mode_c", "org-b", ("new-bot",)),
+        # `aliases: [default]` on org-a, default: true on org-b: only org-a trusts them.
+        ("alias_a_default_b", "org-a", ("old-bot", "older-bot", "new-bot")),
+        ("alias_a_default_b", "org-b", ("new-bot",)),
     ],
 )
-async def test_legacy_comment_authors_trusted_only_for_inheriting_owner(
-    owner_id, legacy_alias, expected_trusted
-) -> None:
+async def test_legacy_comment_authors_trusted_only_for_bound_owner(build, owner_id, expected_trusted) -> None:
+    from tests import test_legacy_default_alias as scenarios
+
+    real_registry = {
+        "mode_b": scenarios._mode_b,
+        "mode_c": scenarios._mode_c,
+        "alias_a_default_b": scenarios._mode_c_alias_on_a_default_on_b,
+    }[build]()
     info = PullRequestInfo(
         number=7,
         title="feat: validate",
@@ -221,8 +231,8 @@ async def test_legacy_comment_authors_trusted_only_for_inheriting_owner(
     mock_registry = MagicMock()
     mock_registry.get.return_value = mock_ctx
     mock_registry.resolve.return_value = RouteResult(owner_id, "exact")
-    mock_registry.default_owner_id = owner_id
-    mock_registry.legacy_default_alias.return_value = legacy_alias
+    mock_registry.default_owner_id = real_registry.default_owner_id
+    mock_registry.legacy_default_alias.side_effect = real_registry.legacy_default_alias
 
     result = await run_review(
         session,
