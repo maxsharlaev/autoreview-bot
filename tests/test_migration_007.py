@@ -159,24 +159,32 @@ class TestMigration007:
         )
         await conn.execute(
             """
-            INSERT INTO pull_requests (id, repository_id, number, html_url, title, author, state, base_sha, head_sha, head_ref, is_draft, is_fork)
-            VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
+            INSERT INTO pull_requests (
+                id, repository_id, number, html_url, title, author, state,
+                base_sha, head_sha, head_ref, is_draft, is_fork
+            ) VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
             """,
             pr_id,
             repo_id,
         )
         await conn.execute(
             """
-            INSERT INTO review_runs (id, pull_request_id, trigger, base_sha, head_sha, status, prompt_version, policy_version, owner_id)
-            VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-a')
+            INSERT INTO review_runs (
+                id, pull_request_id, trigger, base_sha, head_sha,
+                status, prompt_version, policy_version, owner_id
+            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-a')
             """,
             run_id,
             pr_id,
         )
         await conn.execute(
             """
-            INSERT INTO findings (id, pull_request_id, first_seen_run_id, last_seen_run_id, stable_id, severity, category, path, title, scenario, evidence, recommendation, current_status)
-            VALUES ($1, $2, $3, $3, 'stable-1', 'P2', 'security', 'src/app.py', 'Test finding', '', '', '', 'open')
+            INSERT INTO findings (
+                id, pull_request_id, first_seen_run_id, last_seen_run_id, stable_id,
+                severity, category, path, title, scenario, evidence, recommendation,
+                current_status
+            ) VALUES ($1, $2, $3, $3, 'stable-1', 'P2', 'security', 'src/app.py',
+                'Test finding', '', '', '', 'open')
             """,
             finding_id,
             pr_id,
@@ -227,31 +235,38 @@ class TestMigration007:
 
         await conn.execute(
             """
-            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors, owner_id)
-            VALUES ($1, 'org/shared-repo', true, 'default', '[]'::jsonb, 'org-a')
+            INSERT INTO repositories (
+                id, full_name, enabled, policy_profile, comment_authors, owner_id
+            ) VALUES ($1, 'org/shared-repo', true, 'default', '[]'::jsonb, 'org-a')
             """,
             repo_id,
         )
         await conn.execute(
             """
-            INSERT INTO pull_requests (id, repository_id, number, html_url, title, author, state, base_sha, head_sha, head_ref, is_draft, is_fork)
-            VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
+            INSERT INTO pull_requests (
+                id, repository_id, number, html_url, title, author, state,
+                base_sha, head_sha, head_ref, is_draft, is_fork
+            ) VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
             """,
             pr_id,
             repo_id,
         )
         await conn.execute(
             """
-            INSERT INTO review_runs (id, pull_request_id, trigger, base_sha, head_sha, status, prompt_version, policy_version, owner_id)
-            VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-a')
+            INSERT INTO review_runs (
+                id, pull_request_id, trigger, base_sha, head_sha,
+                status, prompt_version, policy_version, owner_id
+            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-a')
             """,
             run_a_id,
             pr_id,
         )
         await conn.execute(
             """
-            INSERT INTO review_runs (id, pull_request_id, trigger, base_sha, head_sha, status, prompt_version, policy_version, owner_id)
-            VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-b')
+            INSERT INTO review_runs (
+                id, pull_request_id, trigger, base_sha, head_sha,
+                status, prompt_version, policy_version, owner_id
+            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-b')
             """,
             run_b_id,
             pr_id,
@@ -260,8 +275,12 @@ class TestMigration007:
         # Insert finding for owner A
         await conn.execute(
             """
-            INSERT INTO findings (id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id, stable_id, severity, category, path, title, scenario, evidence, recommendation, current_status)
-            VALUES ($1, $2, $3, $3, 'org-a', 'same-stable-id', 'P2', 'security', 'src/app.py', 'Finding A', '', '', '', 'open')
+            INSERT INTO findings (
+                id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id,
+                stable_id, severity, category, path, title, scenario,
+                evidence, recommendation, current_status
+            ) VALUES ($1, $2, $3, $3, 'org-a', 'same-stable-id', 'P2', 'security',
+                'src/app.py', 'Finding A', '', '', '', 'open')
             """,
             finding_a_id,
             pr_id,
@@ -271,8 +290,12 @@ class TestMigration007:
         # Insert finding for owner B with SAME stable_id - should NOT conflict
         await conn.execute(
             """
-            INSERT INTO findings (id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id, stable_id, severity, category, path, title, scenario, evidence, recommendation, current_status)
-            VALUES ($1, $2, $3, $3, 'org-b', 'same-stable-id', 'P2', 'security', 'src/app.py', 'Finding B', '', '', '', 'open')
+            INSERT INTO findings (
+                id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id,
+                stable_id, severity, category, path, title, scenario,
+                evidence, recommendation, current_status
+            ) VALUES ($1, $2, $3, $3, 'org-b', 'same-stable-id', 'P2', 'security',
+                'src/app.py', 'Finding B', '', '', '', 'open')
             """,
             finding_b_id,
             pr_id,
@@ -351,31 +374,38 @@ class TestMigration007:
 
         await conn.execute(
             """
-            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors, owner_id)
-            VALUES ($1, 'org/downgrade-repo', true, 'default', '[]'::jsonb, 'org-a')
+            INSERT INTO repositories (
+                id, full_name, enabled, policy_profile, comment_authors, owner_id
+            ) VALUES ($1, 'org/downgrade-repo', true, 'default', '[]'::jsonb, 'org-a')
             """,
             repo_id,
         )
         await conn.execute(
             """
-            INSERT INTO pull_requests (id, repository_id, number, html_url, title, author, state, base_sha, head_sha, head_ref, is_draft, is_fork)
-            VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
+            INSERT INTO pull_requests (
+                id, repository_id, number, html_url, title, author, state,
+                base_sha, head_sha, head_ref, is_draft, is_fork
+            ) VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
             """,
             pr_id,
             repo_id,
         )
         await conn.execute(
             """
-            INSERT INTO review_runs (id, pull_request_id, trigger, base_sha, head_sha, status, prompt_version, policy_version, owner_id)
-            VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-a')
+            INSERT INTO review_runs (
+                id, pull_request_id, trigger, base_sha, head_sha,
+                status, prompt_version, policy_version, owner_id
+            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-a')
             """,
             run_a_id,
             pr_id,
         )
         await conn.execute(
             """
-            INSERT INTO review_runs (id, pull_request_id, trigger, base_sha, head_sha, status, prompt_version, policy_version, owner_id)
-            VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-b')
+            INSERT INTO review_runs (
+                id, pull_request_id, trigger, base_sha, head_sha,
+                status, prompt_version, policy_version, owner_id
+            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-b')
             """,
             run_b_id,
             pr_id,
@@ -384,8 +414,12 @@ class TestMigration007:
         # Insert older finding for owner A
         await conn.execute(
             """
-            INSERT INTO findings (id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id, stable_id, severity, category, path, title, scenario, evidence, recommendation, current_status, created_at)
-            VALUES ($1, $2, $3, $3, 'org-a', 'conflict-stable-id', 'P2', 'security', 'src/app.py', 'Finding A', '', '', '', 'open', NOW() - INTERVAL '1 hour')
+            INSERT INTO findings (
+                id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id,
+                stable_id, severity, category, path, title, scenario,
+                evidence, recommendation, current_status, created_at
+            ) VALUES ($1, $2, $3, $3, 'org-a', 'conflict-stable-id', 'P2', 'security',
+                'src/app.py', 'Finding A', '', '', '', 'open', NOW() - INTERVAL '1 hour')
             """,
             finding_a_id,
             pr_id,
@@ -395,8 +429,12 @@ class TestMigration007:
         # Insert newer finding for owner B with same stable_id
         await conn.execute(
             """
-            INSERT INTO findings (id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id, stable_id, severity, category, path, title, scenario, evidence, recommendation, current_status, created_at)
-            VALUES ($1, $2, $3, $3, 'org-b', 'conflict-stable-id', 'P2', 'security', 'src/app.py', 'Finding B', '', '', '', 'open', NOW())
+            INSERT INTO findings (
+                id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id,
+                stable_id, severity, category, path, title, scenario,
+                evidence, recommendation, current_status, created_at
+            ) VALUES ($1, $2, $3, $3, 'org-b', 'conflict-stable-id', 'P2', 'security',
+                'src/app.py', 'Finding B', '', '', '', 'open', NOW())
             """,
             finding_b_id,
             pr_id,
@@ -429,15 +467,18 @@ class TestMigration007:
 
         await conn.execute(
             """
-            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors, owner_id)
-            VALUES ($1, 'org/legacy-repo', true, 'default', '[]'::jsonb, 'default')
+            INSERT INTO repositories (
+                id, full_name, enabled, policy_profile, comment_authors, owner_id
+            ) VALUES ($1, 'org/legacy-repo', true, 'default', '[]'::jsonb, 'default')
             """,
             repo_id,
         )
         await conn.execute(
             """
-            INSERT INTO pull_requests (id, repository_id, number, html_url, title, author, state, base_sha, head_sha, head_ref, is_draft, is_fork)
-            VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
+            INSERT INTO pull_requests (
+                id, repository_id, number, html_url, title, author, state,
+                base_sha, head_sha, head_ref, is_draft, is_fork
+            ) VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
             """,
             pr_id,
             repo_id,
@@ -445,16 +486,22 @@ class TestMigration007:
         # Legacy run with owner_id='default'
         await conn.execute(
             """
-            INSERT INTO review_runs (id, pull_request_id, trigger, base_sha, head_sha, status, prompt_version, policy_version, owner_id)
-            VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'default')
+            INSERT INTO review_runs (
+                id, pull_request_id, trigger, base_sha, head_sha,
+                status, prompt_version, policy_version, owner_id
+            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'default')
             """,
             run_id,
             pr_id,
         )
         await conn.execute(
             """
-            INSERT INTO findings (id, pull_request_id, first_seen_run_id, last_seen_run_id, stable_id, severity, category, path, title, scenario, evidence, recommendation, current_status)
-            VALUES ($1, $2, $3, $3, 'legacy-stable', 'P1', 'security', 'src/legacy.py', 'Legacy finding', '', '', '', 'open')
+            INSERT INTO findings (
+                id, pull_request_id, first_seen_run_id, last_seen_run_id, stable_id,
+                severity, category, path, title, scenario, evidence, recommendation,
+                current_status
+            ) VALUES ($1, $2, $3, $3, 'legacy-stable', 'P1', 'security',
+                'src/legacy.py', 'Legacy finding', '', '', '', 'open')
             """,
             finding_id,
             pr_id,
