@@ -26,8 +26,12 @@ MARKER = "<!-- open-pr-review -->"
 
 # Module-level caches keyed by (app_id, installation_id) for multi-owner support
 _INSTALLATION_TOKEN_CACHE: dict[tuple[int, int], tuple[str, float]] = {}  # (token, expires_at)
-_INSTALLATION_ID_CACHE: dict[tuple[int, str], int] = {}  # (app_id, full_name) -> installation_id
+# (app_id, full_name) -> (installation_id, cached_at)
+_INSTALLATION_ID_CACHE: dict[tuple[int, str], tuple[int, float]] = {}
 _COMMENT_AUTHOR_LOGINS: dict[str, str] = {}
+
+# Installation ID cache TTL in seconds (1 hour)
+_INSTALLATION_ID_CACHE_TTL = 3600
 
 
 def _clear_caches() -> None:
@@ -35,6 +39,16 @@ def _clear_caches() -> None:
     _INSTALLATION_TOKEN_CACHE.clear()
     _INSTALLATION_ID_CACHE.clear()
     _COMMENT_AUTHOR_LOGINS.clear()
+
+
+def _evict_caches_for_installation(app_id: int, installation_id: int) -> None:
+    """Evict cached tokens and installation IDs for a given app/installation."""
+    cache_key = (app_id, installation_id)
+    _INSTALLATION_TOKEN_CACHE.pop(cache_key, None)
+    # Evict installation ID cache entries that map to this installation_id
+    to_remove = [k for k, (iid, _) in _INSTALLATION_ID_CACHE.items() if k[0] == app_id and iid == installation_id]
+    for k in to_remove:
+        _INSTALLATION_ID_CACHE.pop(k, None)
 
 
 class GitHubError(RuntimeError):
@@ -164,7 +178,7 @@ class GitHubAppClient:
             )
         return response
 
-    async def resolve_installation_id(self, owner: str, repo: str) -> int:
+    async def resolve_installation_id(self, owner: str, repo: str, *, _retry: bool = True) -> int:
         if self._installation_id:
             return self._installation_id
 
@@ -179,26 +193,38 @@ class GitHubAppClient:
             self._installation_id = configured
             return configured
 
-        # Check module-level cache by (app_id, full_name)
+        # Check module-level cache by (app_id, full_name) with TTL
         app_id = self._app_id()
         full_name = f"{owner}/{repo}"
         cache_key = (app_id, full_name)
         if cache_key in _INSTALLATION_ID_CACHE:
-            self._installation_id = _INSTALLATION_ID_CACHE[cache_key]
-            return self._installation_id
+            installation_id, cached_at = _INSTALLATION_ID_CACHE[cache_key]
+            if time.time() < cached_at + _INSTALLATION_ID_CACHE_TTL:
+                self._installation_id = installation_id
+                return self._installation_id
+            # TTL expired, remove from cache
+            _INSTALLATION_ID_CACHE.pop(cache_key, None)
 
         # Fetch from GitHub API
-        response = await self._request(
-            "GET",
-            f"{API}/repos/{owner}/{repo}/installation",
-            token=self._jwt(),
-        )
+        try:
+            response = await self._request(
+                "GET",
+                f"{API}/repos/{owner}/{repo}/installation",
+                token=self._jwt(),
+            )
+        except GitHubError as e:
+            if e.status_code in (401, 404) and _retry:
+                # Evict any stale cache entries and retry once
+                _evict_caches_for_installation(app_id, self._installation_id)
+                self._installation_id = 0
+                return await self.resolve_installation_id(owner, repo, _retry=False)
+            raise
         installation_id = int(response.json()["id"])
         self._installation_id = installation_id
-        _INSTALLATION_ID_CACHE[cache_key] = installation_id
+        _INSTALLATION_ID_CACHE[cache_key] = (installation_id, time.time())
         return self._installation_id
 
-    async def installation_token(self, owner: str, repo: str) -> str:
+    async def installation_token(self, owner: str, repo: str, *, _retry: bool = True) -> str:
         pat = self._personal_token()
         if pat:
             return pat
@@ -221,11 +247,21 @@ class GitHubAppClient:
         if self._token and time.time() < self._token_expires - 60:
             return self._token
 
-        response = await self._request(
-            "POST",
-            f"{API}/app/installations/{installation_id}/access_tokens",
-            token=self._jwt(),
-        )
+        try:
+            response = await self._request(
+                "POST",
+                f"{API}/app/installations/{installation_id}/access_tokens",
+                token=self._jwt(),
+            )
+        except GitHubError as e:
+            if e.status_code in (401, 404) and _retry:
+                # Evict caches and retry once with fresh installation_id lookup
+                _evict_caches_for_installation(app_id, installation_id)
+                self._installation_id = 0
+                self._token = None
+                self._token_expires = 0.0
+                return await self.installation_token(owner, repo, _retry=False)
+            raise
         data = response.json()
         token = data["token"]
         expires_at = time.time() + 3500

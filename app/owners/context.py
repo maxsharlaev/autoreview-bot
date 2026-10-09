@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from app.config import AppConfig
+
+WEBHOOK_SECRET_MIN_LENGTH = 16
 
 
 @dataclass(frozen=True)
@@ -14,9 +16,9 @@ class GitHubCredentials:
     """GitHub authentication credentials for an owner."""
 
     kind: Literal["app", "pat"]
-    token: str | None = None
+    token: str | None = field(default=None, repr=False)
     app_id: int | None = None
-    private_key_pem: str | None = None
+    private_key_pem: str | None = field(default=None, repr=False)
     installation_id: int = 0
 
     def __post_init__(self) -> None:
@@ -32,8 +34,8 @@ class JiraBinding:
 
     base_url: str
     email: str
-    api_token: str
-    projects: dict[str, str]  # project key -> rework_status
+    api_token: str = field(repr=False)
+    projects: dict[str, str] = field(default_factory=dict)  # project key -> rework_status
 
     def enabled(self) -> bool:
         return bool(self.base_url and self.email and self.api_token)
@@ -45,7 +47,7 @@ class SlackBinding:
 
     enabled: bool
     channel: str
-    bot_token: str
+    bot_token: str = field(repr=False)
 
     def is_enabled(self) -> bool:
         return bool(self.enabled and self.bot_token and self.channel)
@@ -58,13 +60,18 @@ class OwnerContext:
     id: str
     is_default: bool
     github: GitHubCredentials
-    webhook_secret: str | None
-    api_key: str | None
-    jira: JiraBinding | None
-    slack: SlackBinding | None
-    openai_api_key: str | None
-    config: AppConfig
+    config: AppConfig = field(repr=False)
+    webhook_secret: str | None = field(default=None, repr=False)
+    api_key: str | None = field(default=None, repr=False)
+    jira: JiraBinding | None = None
+    slack: SlackBinding | None = None
+    openai_api_key: str | None = field(default=None, repr=False)
 
     def webhook_enabled(self) -> bool:
         """Return True if this owner has a valid webhook secret."""
-        return bool(self.webhook_secret and len(self.webhook_secret.strip()) >= 16)
+        if not self.webhook_secret:
+            return False
+        from app.security.webhook_config import is_webhook_secret_valid
+
+        valid, _ = is_webhook_secret_valid(self.webhook_secret)
+        return valid

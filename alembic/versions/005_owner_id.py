@@ -59,8 +59,8 @@ def upgrade() -> None:
     # Old format: ["login1", "login2"]
     # New format: [{"login": "login1", "owner_id": "default", "kind": null}, ...]
     #
-    # This migration is tolerant: if comment_authors already contains objects, it skips them.
-    # The reader code must also be tolerant of both formats during the rollout period.
+    # This migration normalizes every element (no first-element heuristic).
+    # Mixed lists (strings + objects) are fully converted.
     conn = op.get_bind()
     result = conn.execute(sa.text("SELECT id, comment_authors FROM repositories WHERE comment_authors IS NOT NULL"))
     rows = list(result)
@@ -72,28 +72,22 @@ def upgrade() -> None:
         if not authors or not isinstance(authors, list):
             continue
 
-        # Check if already migrated (first element is an object)
-        if authors and isinstance(authors[0], dict):
-            continue
-
-        # Convert strings to objects
+        # Normalize every element: strings -> objects, objects pass through
         new_authors = []
+        needs_update = False
         for author in authors:
             if isinstance(author, str):
-                new_authors.append(
-                    {
-                        "login": author,
-                        "owner_id": "default",
-                        "kind": None,
-                    }
-                )
+                new_authors.append({"login": author, "owner_id": "default", "kind": None})
+                needs_update = True
             elif isinstance(author, dict):
                 new_authors.append(author)
+            # Skip invalid entries
 
-        conn.execute(
-            sa.text("UPDATE repositories SET comment_authors = :authors::jsonb WHERE id = :id"),
-            {"authors": json.dumps(new_authors), "id": repo_id},
-        )
+        if needs_update:
+            conn.execute(
+                sa.text("UPDATE repositories SET comment_authors = CAST(:authors AS jsonb) WHERE id = :id"),
+                {"authors": json.dumps(new_authors), "id": repo_id},
+            )
 
 
 def downgrade() -> None:
@@ -109,22 +103,22 @@ def downgrade() -> None:
         if not authors or not isinstance(authors, list):
             continue
 
-        # Check if it's in the old format already (first element is a string)
-        if authors and isinstance(authors[0], str):
-            continue
-
-        # Convert objects back to strings
+        # Normalize every element: objects -> strings, strings pass through
         new_authors = []
+        needs_update = False
         for author in authors:
             if isinstance(author, dict) and "login" in author:
                 new_authors.append(author["login"])
+                needs_update = True
             elif isinstance(author, str):
                 new_authors.append(author)
+            # Skip invalid entries
 
-        conn.execute(
-            sa.text("UPDATE repositories SET comment_authors = :authors::jsonb WHERE id = :id"),
-            {"authors": json.dumps(new_authors), "id": repo_id},
-        )
+        if needs_update:
+            conn.execute(
+                sa.text("UPDATE repositories SET comment_authors = CAST(:authors AS jsonb) WHERE id = :id"),
+                {"authors": json.dumps(new_authors), "id": repo_id},
+            )
 
     # Remove owner_id index and column from repositories
     op.drop_index("ix_repositories_owner_id", table_name="repositories")

@@ -30,9 +30,11 @@ async def test_comment_author_is_persisted_before_publication() -> None:
 
     await _remember_comment_author(session, github, repository, "org", "repo")
 
-    # Use tolerant reader since new entries are now objects
+    # M1 writes plain strings for backward compatibility; tolerant reader handles both formats
     logins = extract_comment_author_logins(repository.comment_authors)
     assert logins == ["old-bot", "new-bot"]
+    # Verify the raw format is plain strings in M1
+    assert repository.comment_authors == ["old-bot", "new-bot"]
     assert github.previous_comment_authors == ("old-bot", "new-bot")
     session.commit.assert_awaited_once()
 

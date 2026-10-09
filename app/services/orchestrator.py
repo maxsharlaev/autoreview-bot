@@ -26,7 +26,6 @@ from app.models import (
     Repository,
     ReviewRun,
     TaskSnapshot,
-    build_comment_author_entry,
     extract_comment_author_logins,
 )
 from app.paths import data_file
@@ -95,8 +94,10 @@ async def _remember_comment_author(
     ).scalar_one()
     existing_logins = extract_comment_author_logins(locked.comment_authors)
     if login.casefold() not in {author.casefold() for author in existing_logins}:
-        new_entry = build_comment_author_entry(login, owner_id=github.owner_id)
-        locked.comment_authors = list(locked.comment_authors or []) + [new_entry]
+        # M1: Write plain strings for backward compatibility with old images.
+        # The tolerant reader handles both formats during rollout.
+        # M2 will switch to writing the object format with owner_id.
+        locked.comment_authors = list(locked.comment_authors or []) + [login]
         existing_logins.append(login)
     github.previous_comment_authors = tuple(existing_logins)
     await session.commit()

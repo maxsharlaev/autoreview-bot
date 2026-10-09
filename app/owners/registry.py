@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -44,16 +45,11 @@ class OwnerRegistry:
         resolved = self.aliases.get(owner_id, owner_id)
         return self.owners.get(resolved)
 
-    def get_default(self) -> OwnerContext:
-        """Get the default owner context."""
-        ctx = self.owners.get(self.default_owner_id)
-        if ctx is None:
-            raise OwnerConfigError("No default owner configured")
-        return ctx
-
-    def all_owners(self) -> list[OwnerContext]:
-        """Return all enabled owner contexts."""
-        return [ctx for ctx in self.owners.values() if ctx.id in self.owners]
+    def get_default(self) -> OwnerContext | None:
+        """Get the default owner context, or None if no owners are configured."""
+        if not self.default_owner_id:
+            return None
+        return self.owners.get(self.default_owner_id)
 
     def webhook_secrets(self) -> dict[str, str]:
         """Return mapping of owner_id -> webhook_secret for owners with valid secrets."""
@@ -96,7 +92,18 @@ class OwnerRegistry:
                     owners_yaml[owner_id] = raw_config
                 else:
                     raise OwnerConfigError(f"Invalid owner config type for '{owner_id}'")
+            except OwnerConfigError:
+                raise
             except Exception as e:
+                # Render Pydantic errors without input values to avoid leaking secrets
+                from pydantic import ValidationError
+
+                if isinstance(e, ValidationError):
+                    error_str = "; ".join(
+                        f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}"
+                        for err in e.errors(include_input=False)
+                    )
+                    raise OwnerConfigError(f"Invalid configuration for owner '{owner_id}': {error_str}") from None
                 raise OwnerConfigError(f"Invalid configuration for owner '{owner_id}': {e}") from e
 
         has_legacy_github = _has_legacy_github_creds(settings)
@@ -113,13 +120,31 @@ class OwnerRegistry:
             default_owner_id = DEFAULT_OWNER_ID
 
         if has_owners_block:
-            if has_legacy_github and DEFAULT_OWNER_ID in owners_yaml:
+            # M1: Reject owners block without legacy credentials.
+            # In M1, adapters are not fully wired to owner contexts yet - they still read from settings.
+            # M2 will wire the adapters and remove this restriction.
+            if not has_legacy_github:
+                raise OwnerConfigError(
+                    "M1 requires legacy GitHub credentials when using the owners block. "
+                    "Set GITHUB_TOKEN/GITHUB_PAT or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY in addition to "
+                    "the owners block. M2 will remove this restriction when adapter wiring is complete."
+                )
+
+            if DEFAULT_OWNER_ID in owners_yaml:
                 raise OwnerConfigError(
                     f"Cannot have owner '{DEFAULT_OWNER_ID}' in owners block when legacy GitHub credentials are set "
                     "(mode B conflict). Either remove legacy env vars or rename the owner."
                 )
 
-            explicit_defaults = [oid for oid, cfg in owners_yaml.items() if cfg.default]
+            # Check for disabled owners with default:true
+            for oid, cfg in owners_yaml.items():
+                if cfg.default and not cfg.enabled:
+                    warnings.append(
+                        f"Owner '{oid}' has default=true but enabled=false; it will not be counted as the default."
+                    )
+
+            # Only count enabled owners as explicit defaults
+            explicit_defaults = [oid for oid, cfg in owners_yaml.items() if cfg.default and cfg.enabled]
             if len(explicit_defaults) > 1:
                 raise OwnerConfigError(
                     f"Multiple owners have default=true: {', '.join(explicit_defaults)}. "
@@ -134,6 +159,11 @@ class OwnerRegistry:
                         raise OwnerConfigError(f"Alias '{alias}' is used by multiple owners")
                     if alias in owners_yaml:
                         raise OwnerConfigError(f"Alias '{alias}' conflicts with owner id")
+                    # In mode B, 'default' alias conflicts with the legacy owner
+                    if alias == DEFAULT_OWNER_ID and has_legacy_github:
+                        raise OwnerConfigError(
+                            f"Alias '{DEFAULT_OWNER_ID}' conflicts with the legacy default owner in mode B"
+                        )
                     aliases[alias] = owner_id
 
                 if not owner_yaml.enabled:
@@ -149,6 +179,26 @@ class OwnerRegistry:
                     warnings=warnings,
                 )
                 owners[owner_id] = ctx
+
+                # M1: Warn if override fields are set (they're ignored until M3)
+                if owner_yaml.has_overrides():
+                    override_fields = []
+                    if owner_yaml.public_repos is not None:
+                        override_fields.append("public_repos")
+                    if owner_yaml.language is not None:
+                        override_fields.append("language")
+                    if owner_yaml.features is not None:
+                        override_fields.append("features")
+                    if owner_yaml.codex is not None:
+                        override_fields.append("codex")
+                    if owner_yaml.pr_description is not None:
+                        override_fields.append("pr_description")
+                    if owner_yaml.size_guard is not None:
+                        override_fields.append("size_guard")
+                    warnings.append(
+                        f"Owner '{owner_id}' has override fields ({', '.join(override_fields)}) "
+                        "that are ignored in M1. Per-owner overrides will be implemented in M3."
+                    )
 
                 if owner_yaml.default:
                     if has_legacy_github:
@@ -169,16 +219,35 @@ class OwnerRegistry:
                         )
 
         elif not has_legacy_github:
-            raise OwnerConfigError(
+            # Mode A without any credentials: warning only, startup proceeds
+            # This matches the current behavior on main where missing credentials
+            # don't prevent startup - the webhook endpoint will be disabled.
+            warnings.append(
                 "No GitHub credentials configured. Set GITHUB_TOKEN/GITHUB_PAT or "
-                "GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY, or add an owners block to config."
+                "GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY to enable webhook processing."
+            )
+            # Return early with empty registry - no owners configured
+            return cls(
+                owners={},
+                aliases={},
+                default_owner_id="",
+                routing=routing,
+                warnings=warnings,
             )
 
         if default_owner_id is None and owners:
             default_owner_id = next(iter(owners.keys()))
 
-        if default_owner_id is None:
-            raise OwnerConfigError("No owners configured")
+        if not owners:
+            # No owners configured - this can happen in mode A without credentials
+            # The warning was already added above
+            return cls(
+                owners={},
+                aliases={},
+                default_owner_id="",
+                routing=routing,
+                warnings=warnings,
+            )
 
         # Build allowed_repos map for validation
         # For legacy owner, use app_config.github.allowed_repos
@@ -205,7 +274,8 @@ class OwnerRegistry:
 
 def _has_legacy_github_creds(settings: Settings) -> bool:
     """Check if legacy GitHub credentials are set (PAT or App)."""
-    has_pat = bool(getattr(settings, "github_token", ""))
+    token = (getattr(settings, "github_token", "") or "").strip()
+    has_pat = bool(token)
     has_app = bool(getattr(settings, "github_app_id", 0) and getattr(settings, "github_app_private_key", ""))
     return has_pat or has_app
 
@@ -243,12 +313,13 @@ def _build_legacy_owner(
 
     Exactly matches the logic of get_app_config() for backward compatibility.
     """
-    has_pat = bool(getattr(settings, "github_token", ""))
+    token = (getattr(settings, "github_token", "") or "").strip()
+    has_pat = bool(token)
 
     if has_pat:
         github_creds = GitHubCredentials(
             kind="pat",
-            token=settings.github_token,
+            token=token,
         )
     else:
         pem = settings.github_private_key_pem()
@@ -286,12 +357,12 @@ def _build_legacy_owner(
         id=DEFAULT_OWNER_ID,
         is_default=True,
         github=github_creds,
+        config=app_config,
         webhook_secret=settings.github_webhook_secret,
         api_key=settings.review_api_key,
         jira=jira_binding,
         slack=slack_binding,
         openai_api_key=settings.openai_api_key,
-        config=app_config,
     )
 
 
@@ -412,12 +483,12 @@ def _build_owner_context(
         id=owner_id,
         is_default=owner_yaml.default,
         github=github_creds,
+        config=effective_config,
         webhook_secret=webhook_secret if webhook_secret else None,
         api_key=api_key if api_key else None,
         jira=jira_binding,
         slack=slack_binding,
         openai_api_key=openai_key,
-        config=effective_config,
     )
 
 
@@ -489,8 +560,6 @@ def _validate_credentials_uniqueness(owners: dict[str, OwnerContext], warnings: 
                 )
             app_creds[key] = owner_id
         elif creds.kind == "pat" and creds.token and isinstance(creds.token, str):
-            import hashlib
-
             token_hash = hashlib.sha256(creds.token.encode()).hexdigest()[:16]
             if token_hash in pat_hashes:
                 pat_hashes[token_hash].append(owner_id)

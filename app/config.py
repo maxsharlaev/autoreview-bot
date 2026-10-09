@@ -156,7 +156,7 @@ class AppConfig(BaseModel):
     # Multi-owner support (M1): owners block and routing config
     # Raw dicts are validated in app.owners.registry.OwnerRegistry.build()
     # The YAML ignores unknown keys (model default), allowing old code to read new configs
-    owners: dict = Field(default_factory=dict)
+    owners: dict[str, dict] = Field(default_factory=dict)
     routing: RoutingYaml = Field(default_factory=RoutingYaml)
 
 

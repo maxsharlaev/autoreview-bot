@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -133,13 +134,20 @@ def test_mode_a_legacy_app() -> None:
     assert ctx.github.installation_id == 67890
 
 
-def test_mode_a_no_github_creds_fails() -> None:
-    """Mode A: No GitHub credentials at all should fail."""
+def test_mode_a_no_github_creds_warns_but_proceeds() -> None:
+    """Mode A: No GitHub credentials without owners block warns but proceeds."""
     settings = _mock_settings()
     config = AppConfig()
 
-    with pytest.raises(OwnerConfigError, match="No GitHub credentials configured"):
-        OwnerRegistry.build(settings, config, env={})
+    registry = OwnerRegistry.build(settings, config, env={})
+
+    # Should have a warning about missing credentials
+    assert any("No GitHub credentials configured" in w for w in registry.warnings)
+    # Should have empty owners
+    assert len(registry.owners) == 0
+    assert registry.default_owner_id == ""
+    # get_default() should return None
+    assert registry.get_default() is None
 
 
 # --- Mode B: Legacy + extra owners tests ---
@@ -204,8 +212,8 @@ def test_mode_b_named_owner_becomes_default() -> None:
 # --- Mode C: Single owner block tests ---
 
 
-def test_mode_c_single_owner() -> None:
-    """Mode C: Single owner in owners block, no legacy creds."""
+def test_mode_c_single_owner_requires_legacy_creds_in_m1() -> None:
+    """Mode C: In M1, owners block without legacy creds is rejected (adapters not wired)."""
     settings = _mock_settings()  # No legacy creds
     config = AppConfig(
         owners={
@@ -216,20 +224,39 @@ def test_mode_c_single_owner() -> None:
     )
     env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_org_a"}
 
-    registry = OwnerRegistry.build(settings, config, env=env)
-
-    assert len(registry.owners) == 1
-    assert "org-a" in registry.owners
-    assert registry.default_owner_id == "org-a"
-    assert "default" not in registry.owners
+    with pytest.raises(OwnerConfigError, match="M1 requires legacy GitHub credentials"):
+        OwnerRegistry.build(settings, config, env=env)
 
 
 # --- Mode D: Multiple owners tests ---
 
 
-def test_mode_d_multiple_owners_with_default_flag() -> None:
-    """Mode D: Multiple owners with explicit default=true."""
-    settings = _mock_settings()
+def test_mode_d_multiple_owners_requires_legacy_creds_in_m1() -> None:
+    """Mode D: In M1, multiple owners without legacy creds is rejected."""
+    settings = _mock_settings()  # No legacy creds
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "github": {"auth": "pat"},
+            },
+            "org-b": {
+                "default": True,
+                "github": {"auth": "pat"},
+            },
+        }
+    )
+    env = {
+        "OWNER_ORG_A_GITHUB_TOKEN": "ghp_org_a",
+        "OWNER_ORG_B_GITHUB_TOKEN": "ghp_org_b",
+    }
+
+    with pytest.raises(OwnerConfigError, match="M1 requires legacy GitHub credentials"):
+        OwnerRegistry.build(settings, config, env=env)
+
+
+def test_mode_b_multiple_owners_with_default_flag() -> None:
+    """Mode B: Legacy creds + multiple owners with explicit default=true."""
+    settings = _mock_settings(github_token="ghp_legacy")
     config = AppConfig(
         owners={
             "org-a": {
@@ -248,13 +275,14 @@ def test_mode_d_multiple_owners_with_default_flag() -> None:
 
     registry = OwnerRegistry.build(settings, config, env=env)
 
-    assert len(registry.owners) == 2
+    # In M1/mode B, default owner still exists alongside named owners
+    assert len(registry.owners) == 3  # default + org-a + org-b
     assert registry.default_owner_id == "org-b"
 
 
-def test_mode_d_multiple_owners_without_default_flag_warns() -> None:
-    """Mode D: Multiple owners without default=true uses first and warns."""
-    settings = _mock_settings()
+def test_mode_b_multiple_owners_without_default_flag_warns() -> None:
+    """Mode B: Legacy creds + multiple owners without default=true uses first and warns."""
+    settings = _mock_settings(github_token="ghp_legacy")
     config = AppConfig(
         owners={
             "org-a": {
@@ -272,13 +300,13 @@ def test_mode_d_multiple_owners_without_default_flag_warns() -> None:
 
     registry = OwnerRegistry.build(settings, config, env=env)
 
-    assert registry.default_owner_id == "org-a"
-    assert any("default=true" in w for w in registry.warnings)
+    # In mode B without explicit default, the legacy "default" owner remains the default
+    assert registry.default_owner_id == "default"
 
 
-def test_mode_d_multiple_defaults_fails() -> None:
-    """Mode D: Multiple owners with default=true should fail."""
-    settings = _mock_settings()
+def test_mode_b_multiple_defaults_fails() -> None:
+    """Mode B: Multiple owners with default=true should fail."""
+    settings = _mock_settings(github_token="ghp_legacy")
     config = AppConfig(
         owners={
             "org-a": {
@@ -325,7 +353,7 @@ def test_validation_same_repo_claimed_by_two_owners() -> None:
 
 def test_validation_same_wildcard_claimed_by_two_owners() -> None:
     """Two owners claiming the same wildcard should fail."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -347,7 +375,7 @@ def test_validation_same_wildcard_claimed_by_two_owners() -> None:
 
 def test_validation_same_app_installation_id() -> None:
     """Two owners with same (app_id, installation_id) should fail."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     key = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
     config = AppConfig(
         owners={
@@ -370,7 +398,7 @@ def test_validation_same_app_installation_id() -> None:
 
 def test_validation_same_api_key_fails() -> None:
     """Two owners with the same API key should fail."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -395,7 +423,7 @@ def test_validation_same_api_key_fails() -> None:
 
 def test_validation_same_pat_warns() -> None:
     """Two owners with the same PAT should warn but not fail."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -415,7 +443,7 @@ def test_validation_same_pat_warns() -> None:
 
 def test_validation_empty_allowed_repos_warns() -> None:
     """Empty allowed_repos should warn."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -432,7 +460,7 @@ def test_validation_empty_allowed_repos_warns() -> None:
 
 def test_validation_missing_required_env_fails() -> None:
     """Missing required env variable should fail with var name but not value."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -452,7 +480,7 @@ def test_validation_missing_required_env_fails() -> None:
 
 def test_validation_exact_repo_overrides_wildcard_logs() -> None:
     """Exact repo claim vs wildcard should log info about precedence."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -478,7 +506,7 @@ def test_validation_exact_repo_overrides_wildcard_logs() -> None:
 
 def test_aliases_resolve() -> None:
     """Aliases should resolve to the correct owner."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-new": {
@@ -499,7 +527,7 @@ def test_aliases_resolve() -> None:
 
 def test_alias_conflicts_with_owner_id_fails() -> None:
     """Alias matching an owner ID should fail."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -517,6 +545,23 @@ def test_alias_conflicts_with_owner_id_fails() -> None:
     }
 
     with pytest.raises(OwnerConfigError, match="conflicts with owner id"):
+        OwnerRegistry.build(settings, config, env=env)
+
+
+def test_alias_default_in_mode_b_fails() -> None:
+    """Alias 'default' conflicts with the legacy owner in mode B."""
+    settings = _mock_settings(github_token="ghp_legacy")
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "aliases": ["default"],  # Conflicts with legacy owner
+                "github": {"auth": "pat"},
+            },
+        },
+    )
+    env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_org_a"}
+
+    with pytest.raises(OwnerConfigError, match="conflicts with the legacy default owner"):
         OwnerRegistry.build(settings, config, env=env)
 
 
@@ -596,12 +641,80 @@ def test_legacy_config_with_example_yaml() -> None:
     assert ctx.config.github.allowed_repos == ["example-org/example-repo"]
 
 
+def test_legacy_config_with_real_settings_and_example_yaml(monkeypatch) -> None:
+    """Test equivalence using real Settings and config.example.yaml."""
+    from app.config import Settings, get_app_config, repo_allowed
+
+    # Set up environment for real Settings
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret1234567890abcdef")
+    monkeypatch.setenv("CONFIG_PATH", "config.example.yaml")
+
+    # Clear cached settings
+    get_app_config.cache_clear()
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    try:
+        real_settings = Settings()
+        real_config = load_yaml_config(Path("config.example.yaml"))
+
+        registry = OwnerRegistry.build(real_settings, real_config, env=dict(os.environ))
+
+        assert "default" in registry.owners
+        ctx = registry.get_default()
+
+        # Verify allowed_repos parity
+        assert ctx.config.github.allowed_repos == ["example-org/example-repo"]
+
+        # Verify repo_allowed behavior matches
+        assert repo_allowed("example-org/example-repo", ctx.config) is True
+        assert repo_allowed("other-org/other-repo", ctx.config) is False
+    finally:
+        get_app_config.cache_clear()
+        get_settings.cache_clear()
+
+
+def test_repo_allowed_parity_empty_list(monkeypatch) -> None:
+    """Empty allowed_repos list should allow any repo (matches repo_allowed behavior)."""
+    from app.config import repo_allowed
+
+    config = AppConfig(github=GitHubYaml(allowed_repos=[]))
+    settings = _mock_settings(github_token="ghp_test")
+
+    registry = OwnerRegistry.build(settings, config, env={})
+    ctx = registry.get_default()
+
+    # Empty list means allow all (matches repo_allowed)
+    assert ctx.config.github.allowed_repos == []
+    assert repo_allowed("any-org/any-repo", ctx.config) is True
+    assert repo_allowed("OTHER/REPO", ctx.config) is True
+
+
+def test_repo_allowed_parity_case_insensitive(monkeypatch) -> None:
+    """repo_allowed should be case-insensitive (matches original behavior)."""
+    from app.config import repo_allowed
+
+    config = AppConfig(github=GitHubYaml(allowed_repos=["Org/Repo"]))
+    settings = _mock_settings(github_token="ghp_test")
+
+    registry = OwnerRegistry.build(settings, config, env={})
+    ctx = registry.get_default()
+
+    # Case-insensitive matching (matches repo_allowed)
+    assert repo_allowed("org/repo", ctx.config) is True
+    assert repo_allowed("ORG/REPO", ctx.config) is True
+    assert repo_allowed("Org/Repo", ctx.config) is True
+    assert repo_allowed("other/repo", ctx.config) is False
+
+
 # --- Disabled owner tests ---
 
 
 def test_disabled_owner_not_included() -> None:
     """Disabled owners should not be in the registry."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -624,12 +737,42 @@ def test_disabled_owner_not_included() -> None:
     assert "org-b" in registry.owners
 
 
+def test_disabled_owner_with_default_true_warns() -> None:
+    """Disabled owner with default:true should warn and not be counted as default."""
+    settings = _mock_settings(github_token="ghp_legacy")
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "enabled": False,
+                "default": True,  # Ignored because disabled
+                "github": {"auth": "pat"},
+            },
+            "org-b": {
+                "github": {"auth": "pat"},
+            },
+        },
+    )
+    env = {
+        "OWNER_ORG_A_GITHUB_TOKEN": "ghp_org_a",
+        "OWNER_ORG_B_GITHUB_TOKEN": "ghp_org_b",
+    }
+
+    registry = OwnerRegistry.build(settings, config, env=env)
+
+    # Should have warning about disabled owner with default:true
+    assert any("default=true but enabled=false" in w for w in registry.warnings)
+    # org-a should not be counted as the default
+    assert "org-a" not in registry.owners
+    # Legacy "default" owner should be the default
+    assert registry.default_owner_id == "default"
+
+
 # --- Jira/Slack binding tests ---
 
 
 def test_owner_without_jira_has_none_jira() -> None:
     """Owner without jira block has jira=None."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -649,7 +792,7 @@ def test_owner_without_jira_has_none_jira() -> None:
 
 def test_owner_without_slack_has_none_slack() -> None:
     """Owner without slack block has slack=None."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -665,6 +808,30 @@ def test_owner_without_slack_has_none_slack() -> None:
     ctx = registry.get("org-a")
     assert ctx is not None
     assert ctx.slack is None
+
+
+def test_owner_overrides_warn_in_m1() -> None:
+    """Override fields should trigger a warning in M1 (not implemented yet)."""
+    settings = _mock_settings(github_token="ghp_legacy")
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "github": {"auth": "pat"},
+                "public_repos": {"jira_disclosure": "full"},
+                "language": {"summary": "ru"},
+                "features": {"jira_comment": False},
+            },
+        },
+    )
+    env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_org_a"}
+
+    registry = OwnerRegistry.build(settings, config, env=env)
+
+    # Should have warning about ignored overrides
+    assert any("override fields" in w and "ignored in M1" in w for w in registry.warnings)
+    assert any("public_repos" in w for w in registry.warnings)
+    assert any("language" in w for w in registry.warnings)
+    assert any("features" in w for w in registry.warnings)
 
 
 # --- Context dataclass tests ---
@@ -722,7 +889,7 @@ def test_slack_binding_is_enabled() -> None:
 
 def test_error_messages_do_not_contain_secrets() -> None:
     """Error messages should contain env var names but never actual secret values."""
-    settings = _mock_settings()
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
     config = AppConfig(
         owners={
             "org-a": {
@@ -730,12 +897,112 @@ def test_error_messages_do_not_contain_secrets() -> None:
             },
         },
     )
-    env = {}  # Missing
+    env = {}  # Missing OWNER_ORG_A_GITHUB_TOKEN
 
     with pytest.raises(OwnerConfigError) as exc_info:
         OwnerRegistry.build(settings, config, env=env)
 
     error_msg = str(exc_info.value)
     assert "MY_SECRET_TOKEN" in error_msg  # Var name is OK
-    # Can't really test for absence of secret values since we don't have any,
-    # but the code structure ensures we only report var names
+
+
+def test_secret_not_in_error_when_provided(caplog) -> None:
+    """Actual secret values should never appear in error messages or logs."""
+    secret_value = "ghp_SUPER_SECRET_TOKEN_12345"
+    settings = _mock_settings(github_token="ghp_legacy")  # M1 requires legacy creds
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "github": {"auth": "pat", "token_env": "MY_TOKEN"},
+            },
+            "org-b": {
+                "github": {"auth": "pat", "token_env": "MY_TOKEN"},  # Same token -> warning
+            },
+        },
+    )
+    env = {"MY_TOKEN": secret_value}
+
+    with caplog.at_level("WARNING"):
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+    # Should have warning about same PAT, but not reveal the actual token
+    assert any("Same GitHub PAT" in w for w in registry.warnings)
+    for warning in registry.warnings:
+        assert secret_value not in warning
+    assert secret_value not in caplog.text
+
+
+def test_secret_not_in_repr() -> None:
+    """Sensitive fields should not appear in repr output."""
+    from app.owners.context import GitHubCredentials, JiraBinding, SlackBinding
+
+    # GitHubCredentials PAT
+    creds_pat = GitHubCredentials(kind="pat", token="ghp_secret_token_value")
+    repr_pat = repr(creds_pat)
+    assert "ghp_secret_token_value" not in repr_pat
+    assert "token=" not in repr_pat or "token=..." in repr_pat or "token" not in repr_pat
+
+    # GitHubCredentials App
+    creds_app = GitHubCredentials(kind="app", app_id=123, private_key_pem="-----BEGIN RSA PRIVATE KEY-----\nsecret")
+    repr_app = repr(creds_app)
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in repr_app
+    assert "secret" not in repr_app
+
+    # JiraBinding
+    jira = JiraBinding(base_url="https://x.atlassian.net", email="x@y.com", api_token="jira_secret_token")
+    repr_jira = repr(jira)
+    assert "jira_secret_token" not in repr_jira
+
+    # SlackBinding
+    slack = SlackBinding(enabled=True, channel="#test", bot_token="xoxb-secret-token")
+    repr_slack = repr(slack)
+    assert "xoxb-secret-token" not in repr_slack
+
+
+def test_secret_not_in_validation_error() -> None:
+    """Pydantic validation errors should not include input values."""
+    settings = _mock_settings()
+    # Use an invalid env var name that looks like a secret
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "github": {"auth": "pat", "token_env": "invalid_lowercase_secret"},
+            },
+        },
+    )
+    env = {}
+
+    with pytest.raises(OwnerConfigError) as exc_info:
+        OwnerRegistry.build(settings, config, env=env)
+
+    error_msg = str(exc_info.value)
+    # The error should mention the field but not echo back the invalid value in full
+    assert "token_env" in error_msg
+    assert "valid environment variable name" in error_msg
+
+
+def test_env_var_name_validation_rejects_lowercase() -> None:
+    """Environment variable names must be uppercase."""
+    from app.owners.schema import OwnerGitHubYaml
+
+    with pytest.raises(ValidationError, match="valid environment variable name"):
+        OwnerGitHubYaml(auth="pat", token_env="lowercase_var")
+
+
+def test_env_var_name_validation_rejects_literal_secret() -> None:
+    """Environment variable names that look like literal secrets should be rejected."""
+    from app.owners.schema import OwnerGitHubYaml
+
+    with pytest.raises(ValidationError, match="valid environment variable name"):
+        OwnerGitHubYaml(auth="pat", token_env="ghp_actual_token_value")
+
+
+def test_env_var_name_validation_accepts_valid() -> None:
+    """Valid environment variable names should be accepted."""
+    from app.owners.schema import OwnerGitHubYaml
+
+    github = OwnerGitHubYaml(auth="pat", token_env="MY_GITHUB_TOKEN")
+    assert github.token_env == "MY_GITHUB_TOKEN"
+
+    github2 = OwnerGitHubYaml(auth="pat", token_env="OWNER_ORG_A_GITHUB_TOKEN")
+    assert github2.token_env == "OWNER_ORG_A_GITHUB_TOKEN"

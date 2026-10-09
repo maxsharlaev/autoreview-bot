@@ -8,6 +8,22 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 OWNER_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _validate_env_var_name(value: str | None, field_name: str) -> str | None:
+    """Validate that an env var name matches ^[A-Z][A-Z0-9_]*$ and is not a literal secret."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if not ENV_VAR_NAME_PATTERN.match(value):
+        raise ValueError(
+            f"{field_name} must be a valid environment variable name "
+            f"(uppercase letters, digits, underscores, starting with a letter)"
+        )
+    return value
 
 
 class OwnerGitHubYaml(BaseModel, extra="forbid"):
@@ -22,6 +38,11 @@ class OwnerGitHubYaml(BaseModel, extra="forbid"):
     token_env: str | None = None
     webhook_secret_env: str | None = None
     allowed_repos: list[str] = Field(default_factory=list)
+
+    @field_validator("app_id_env", "private_key_env", "token_env", "webhook_secret_env", mode="after")
+    @classmethod
+    def validate_env_var_names(cls, value: str | None, info) -> str | None:
+        return _validate_env_var_name(value, info.field_name)
 
     @model_validator(mode="after")
     def validate_auth_fields(self) -> OwnerGitHubYaml:
@@ -45,6 +66,11 @@ class OwnerApiYaml(BaseModel, extra="forbid"):
 
     key_env: str | None = None
 
+    @field_validator("key_env", mode="after")
+    @classmethod
+    def validate_env_var_name(cls, value: str | None, info) -> str | None:
+        return _validate_env_var_name(value, info.field_name)
+
 
 class OwnerJiraProjectYaml(BaseModel, extra="forbid"):
     """Jira project settings for an owner."""
@@ -60,6 +86,11 @@ class OwnerJiraYaml(BaseModel, extra="forbid"):
     api_token_env: str | None = None
     projects: dict[str, OwnerJiraProjectYaml] = Field(default_factory=dict)
 
+    @field_validator("api_token_env", mode="after")
+    @classmethod
+    def validate_env_var_name(cls, value: str | None, info) -> str | None:
+        return _validate_env_var_name(value, info.field_name)
+
 
 class OwnerSlackYaml(BaseModel, extra="forbid"):
     """Slack binding for an owner."""
@@ -67,6 +98,11 @@ class OwnerSlackYaml(BaseModel, extra="forbid"):
     enabled: bool = True
     channel: str = ""
     bot_token_env: str | None = None
+
+    @field_validator("bot_token_env", mode="after")
+    @classmethod
+    def validate_env_var_name(cls, value: str | None, info) -> str | None:
+        return _validate_env_var_name(value, info.field_name)
 
 
 class OwnerPublicReposYaml(BaseModel, extra="forbid"):
@@ -98,6 +134,25 @@ class OwnerCodexYaml(BaseModel, extra="forbid"):
     reasoning_effort: str | None = None
     api_key_env: str | None = None
 
+    @field_validator("api_key_env", mode="after")
+    @classmethod
+    def validate_env_var_name(cls, value: str | None, info) -> str | None:
+        return _validate_env_var_name(value, info.field_name)
+
+
+class OwnerPrDescriptionYaml(BaseModel, extra="forbid"):
+    """Override pr_description settings for an owner (partial)."""
+
+    enabled: bool | None = None
+    mode: Literal["comment", "fill_empty", "append"] | None = None
+    title_mode: Literal["off", "until_human_edit", "when_invalid_or_inconsistent"] | None = None
+
+
+class OwnerSizeGuardYaml(BaseModel, extra="forbid"):
+    """Override size_guard settings for an owner (partial)."""
+
+    override_label: str | None = None
+
 
 class OwnerYaml(BaseModel, extra="forbid"):
     """Configuration for a single owner in the owners block."""
@@ -111,10 +166,13 @@ class OwnerYaml(BaseModel, extra="forbid"):
     jira: OwnerJiraYaml | None = None
     slack: OwnerSlackYaml | None = None
 
+    # Override fields (M3 will merge these over global config)
     public_repos: OwnerPublicReposYaml | None = None
     language: OwnerLanguageYaml | None = None
     features: OwnerFeaturesYaml | None = None
     codex: OwnerCodexYaml | None = None
+    pr_description: OwnerPrDescriptionYaml | None = None
+    size_guard: OwnerSizeGuardYaml | None = None
 
     @field_validator("aliases")
     @classmethod
@@ -123,6 +181,19 @@ class OwnerYaml(BaseModel, extra="forbid"):
             if not OWNER_ID_PATTERN.match(alias):
                 raise ValueError(f"Invalid alias '{alias}': must match {OWNER_ID_PATTERN.pattern}")
         return value
+
+    def has_overrides(self) -> bool:
+        """Return True if any override fields are set."""
+        return any(
+            [
+                self.public_repos is not None,
+                self.language is not None,
+                self.features is not None,
+                self.codex is not None,
+                self.pr_description is not None,
+                self.size_guard is not None,
+            ]
+        )
 
 
 def validate_owner_id(owner_id: str) -> None:
