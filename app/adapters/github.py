@@ -8,7 +8,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import jwt
@@ -16,11 +16,25 @@ import jwt
 from app.config import Settings, get_settings
 from app.services.visibility import Visibility, repository_visibility
 
+if TYPE_CHECKING:
+    from app.owners.context import GitHubCredentials
+
 logger = logging.getLogger(__name__)
 
 API = "https://api.github.com"
 MARKER = "<!-- open-pr-review -->"
+
+# Module-level caches keyed by (app_id, installation_id) for multi-owner support
+_INSTALLATION_TOKEN_CACHE: dict[tuple[int, int], tuple[str, float]] = {}  # (token, expires_at)
+_INSTALLATION_ID_CACHE: dict[tuple[int, str], int] = {}  # (app_id, full_name) -> installation_id
 _COMMENT_AUTHOR_LOGINS: dict[str, str] = {}
+
+
+def _clear_caches() -> None:
+    """Clear all module-level caches (for testing)."""
+    _INSTALLATION_TOKEN_CACHE.clear()
+    _INSTALLATION_ID_CACHE.clear()
+    _COMMENT_AUTHOR_LOGINS.clear()
 
 
 class GitHubError(RuntimeError):
@@ -66,19 +80,64 @@ class ChangedFile:
 
 @dataclass
 class GitHubAppClient:
+    """GitHub API client supporting both App and PAT authentication.
+
+    Can be constructed in two ways:
+    1. Legacy: GitHubAppClient() or GitHubAppClient(settings) - uses global settings
+    2. Owner context: GitHubAppClient.from_credentials(credentials, owner_id) - uses owner credentials
+
+    The module-level caches are keyed by (app_id, installation_id) to support multi-owner.
+    """
+
     settings: Settings = field(default_factory=get_settings)
     previous_comment_authors: tuple[str, ...] = ()
-    _token: str | None = None
-    _token_expires: float = 0.0
-    _installation_id: int = 0
+    owner_id: str = "default"
+
+    # Per-owner credentials (if provided, override settings)
+    _credentials: GitHubCredentials | None = field(default=None, repr=False)
+
+    # Instance-level cache for backward compatibility
+    _token: str | None = field(default=None, repr=False)
+    _token_expires: float = field(default=0.0, repr=False)
+    _installation_id: int = field(default=0, repr=False)
+
+    @classmethod
+    def from_credentials(
+        cls,
+        credentials: GitHubCredentials,
+        owner_id: str = "default",
+        previous_comment_authors: tuple[str, ...] = (),
+    ) -> GitHubAppClient:
+        """Create a client from owner credentials."""
+        return cls(
+            settings=get_settings(),
+            previous_comment_authors=previous_comment_authors,
+            owner_id=owner_id,
+            _credentials=credentials,
+            _installation_id=credentials.installation_id,
+        )
 
     def _personal_token(self) -> str:
+        if self._credentials is not None:
+            if self._credentials.kind == "pat":
+                return self._credentials.token or ""
+            return ""
         return (self.settings.github_token or "").strip()
+
+    def _app_id(self) -> int:
+        if self._credentials is not None:
+            return self._credentials.app_id or 0
+        return self.settings.github_app_id
+
+    def _private_key_pem(self) -> str:
+        if self._credentials is not None:
+            return self._credentials.private_key_pem or ""
+        return self.settings.github_private_key_pem()
 
     def _jwt(self) -> str:
         now = int(time.time())
-        payload = {"iat": now - 60, "exp": now + 540, "iss": str(self.settings.github_app_id)}
-        return jwt.encode(payload, self.settings.github_private_key_pem(), algorithm="RS256")
+        payload = {"iat": now - 60, "exp": now + 540, "iss": str(self._app_id())}
+        return jwt.encode(payload, self._private_key_pem(), algorithm="RS256")
 
     async def _request(
         self,
@@ -108,36 +167,75 @@ class GitHubAppClient:
     async def resolve_installation_id(self, owner: str, repo: str) -> int:
         if self._installation_id:
             return self._installation_id
+
+        # Check if credentials specify a fixed installation_id
+        if self._credentials is not None and self._credentials.installation_id:
+            self._installation_id = self._credentials.installation_id
+            return self._installation_id
+
+        # Check legacy settings
         configured = self.settings.github_installation_id
         if configured:
             self._installation_id = configured
             return configured
+
+        # Check module-level cache by (app_id, full_name)
+        app_id = self._app_id()
+        full_name = f"{owner}/{repo}"
+        cache_key = (app_id, full_name)
+        if cache_key in _INSTALLATION_ID_CACHE:
+            self._installation_id = _INSTALLATION_ID_CACHE[cache_key]
+            return self._installation_id
+
+        # Fetch from GitHub API
         response = await self._request(
             "GET",
             f"{API}/repos/{owner}/{repo}/installation",
             token=self._jwt(),
         )
-        self._installation_id = int(response.json()["id"])
+        installation_id = int(response.json()["id"])
+        self._installation_id = installation_id
+        _INSTALLATION_ID_CACHE[cache_key] = installation_id
         return self._installation_id
 
     async def installation_token(self, owner: str, repo: str) -> str:
         pat = self._personal_token()
         if pat:
             return pat
+
+        app_id = self._app_id()
+        private_key = self._private_key_pem()
+        if not app_id or not private_key.strip():
+            raise GitHubError("GitHub credentials missing: set GITHUB_TOKEN (PAT) or GitHub App id + private key")
+
+        installation_id = await self.resolve_installation_id(owner, repo)
+        cache_key = (app_id, installation_id)
+
+        # Check module-level cache first
+        if cache_key in _INSTALLATION_TOKEN_CACHE:
+            token, expires_at = _INSTALLATION_TOKEN_CACHE[cache_key]
+            if time.time() < expires_at - 60:
+                return token
+
+        # Check instance cache for backward compatibility
         if self._token and time.time() < self._token_expires - 60:
             return self._token
-        if not self.settings.github_app_id or not self.settings.github_app_private_key.strip():
-            raise GitHubError("GitHub credentials missing: set GITHUB_TOKEN (PAT) or GitHub App id + private key")
-        installation_id = await self.resolve_installation_id(owner, repo)
+
         response = await self._request(
             "POST",
             f"{API}/app/installations/{installation_id}/access_tokens",
             token=self._jwt(),
         )
         data = response.json()
-        self._token = data["token"]
-        self._token_expires = time.time() + 3500
-        return self._token
+        token = data["token"]
+        expires_at = time.time() + 3500
+
+        # Store in both caches
+        _INSTALLATION_TOKEN_CACHE[cache_key] = (token, expires_at)
+        self._token = token
+        self._token_expires = expires_at
+
+        return token
 
     async def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestInfo:
         token = await self.installation_token(owner, repo)
@@ -305,9 +403,14 @@ class GitHubAppClient:
 
     async def comment_author_login(self, token: str) -> str:
         personal = bool(self._personal_token())
-        cache_key = (
-            f"pat:{hashlib.sha256(token.encode()).hexdigest()}" if personal else f"app:{self.settings.github_app_id}"
-        )
+        app_id = self._app_id()
+
+        # Cache key includes owner_id to support per-owner author identification
+        if personal:
+            cache_key = f"pat:{hashlib.sha256(token.encode()).hexdigest()}"
+        else:
+            cache_key = f"app:{app_id}:{self.owner_id}"
+
         if cached := _COMMENT_AUTHOR_LOGINS.get(cache_key):
             return cached
         if personal:

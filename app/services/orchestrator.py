@@ -26,6 +26,8 @@ from app.models import (
     Repository,
     ReviewRun,
     TaskSnapshot,
+    build_comment_author_entry,
+    extract_comment_author_logins,
 )
 from app.paths import data_file
 from app.progress import ReviewProgress
@@ -91,11 +93,12 @@ async def _remember_comment_author(
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
-    authors = list(locked.comment_authors or ())
-    if login.casefold() not in {author.casefold() for author in authors}:
-        locked.comment_authors = [*authors, login]
-        authors.append(login)
-    github.previous_comment_authors = tuple(authors)
+    existing_logins = extract_comment_author_logins(locked.comment_authors)
+    if login.casefold() not in {author.casefold() for author in existing_logins}:
+        new_entry = build_comment_author_entry(login, owner_id=github.owner_id)
+        locked.comment_authors = list(locked.comment_authors or []) + [new_entry]
+        existing_logins.append(login)
+    github.previous_comment_authors = tuple(existing_logins)
     await session.commit()
 
 
@@ -164,7 +167,7 @@ async def run_review(
         return await _skip(session, run, started, SKIP_NO_WRITE)
 
     if isinstance(github, GitHubAppClient):
-        github.previous_comment_authors = tuple(pr.repository.comment_authors or ())
+        github.previous_comment_authors = tuple(extract_comment_author_logins(pr.repository.comment_authors))
         await _remember_comment_author(session, github, pr.repository, owner, repo)
 
     webhook_metrics = (run.summary or {}).get("size_metrics") if run.head_sha == info.head_sha else None

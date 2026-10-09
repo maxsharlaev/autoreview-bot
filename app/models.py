@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -10,6 +11,30 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+def extract_comment_author_logins(comment_authors: list[Any] | None) -> list[str]:
+    """Extract login strings from comment_authors in either old or new format.
+
+    Tolerant reader: handles both:
+    - Old format: ["login1", "login2"]
+    - New format: [{"login": "login1", "owner_id": "default", "kind": null}, ...]
+    """
+    if not comment_authors:
+        return []
+
+    logins = []
+    for item in comment_authors:
+        if isinstance(item, str):
+            logins.append(item)
+        elif isinstance(item, dict) and "login" in item:
+            logins.append(item["login"])
+    return logins
+
+
+def build_comment_author_entry(login: str, owner_id: str = "default", kind: str | None = None) -> dict[str, Any]:
+    """Build a comment_authors entry in the new format."""
+    return {"login": login, "owner_id": owner_id, "kind": kind}
 
 
 class TimestampMixin:
@@ -26,7 +51,8 @@ class Repository(TimestampMixin, Base):
     full_name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     policy_profile: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
-    comment_authors: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    comment_authors: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False, index=True)
 
     pull_requests: Mapped[list[PullRequest]] = relationship(back_populates="repository")
 
@@ -78,6 +104,7 @@ class ReviewRun(TimestampMixin, Base):
     skip_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     arq_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    owner_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False, index=True)
 
     pull_request: Mapped[PullRequest] = relationship(back_populates="review_runs")
     task_snapshot: Mapped[TaskSnapshot | None] = relationship(back_populates="review_run", uselist=False)
@@ -154,3 +181,4 @@ class DigestRun(TimestampMixin, Base):
     blocker_pr_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     slack_sent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
