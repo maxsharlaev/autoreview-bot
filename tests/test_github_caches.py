@@ -13,7 +13,6 @@ from app.adapters.github import (
     GitHubAppClient,
     GitHubError,
     _clear_caches,
-    _evict_caches_for_installation,
 )
 from app.config import Settings
 
@@ -173,32 +172,6 @@ class TestCacheEviction:
         # No mock_request needed - should not make any API call
         result = await client.resolve_installation_id("org", "repo")
         assert result == 67890
-
-
-class TestEvictCachesForInstallation:
-    """Tests for _evict_caches_for_installation helper."""
-
-    def test_evicts_token_cache(self):
-        """Should evict token cache entry for given installation."""
-        _INSTALLATION_TOKEN_CACHE[(12345, 67890)] = ("token", time.time())
-        _INSTALLATION_TOKEN_CACHE[(12345, 11111)] = ("other", time.time())
-
-        _evict_caches_for_installation(12345, 67890)
-
-        assert (12345, 67890) not in _INSTALLATION_TOKEN_CACHE
-        assert (12345, 11111) in _INSTALLATION_TOKEN_CACHE
-
-    def test_evicts_installation_id_cache(self):
-        """Should evict installation ID cache entries mapping to given installation."""
-        _INSTALLATION_ID_CACHE[(12345, "org/repo")] = (67890, time.time())
-        _INSTALLATION_ID_CACHE[(12345, "org/other")] = (11111, time.time())
-        _INSTALLATION_ID_CACHE[(99999, "org/repo")] = (67890, time.time())
-
-        _evict_caches_for_installation(12345, 67890)
-
-        assert (12345, "org/repo") not in _INSTALLATION_ID_CACHE
-        assert (12345, "org/other") in _INSTALLATION_ID_CACHE
-        assert (99999, "org/repo") in _INSTALLATION_ID_CACHE  # Different app_id
 
 
 class TestClearCaches:

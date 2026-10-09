@@ -32,12 +32,24 @@ async def queue_review(
     trigger: str = "webhook",
     force: bool = False,
     repository_visibility: Visibility | None = None,
+    owner_id: str = "default",
+    installation_id: int | None = None,
 ) -> ReviewRun:
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
-        repo = Repository(full_name=full_name, enabled=True)
+        repo = Repository(full_name=full_name, enabled=True, owner_id=owner_id)
         session.add(repo)
         await session.flush()
+    elif repo.owner_id != owner_id:
+        # Repository moved to another owner - update and log
+        old_owner = repo.owner_id
+        repo.owner_id = owner_id
+        logger.info(
+            "repository_owner_changed full_name=%s old_owner=%s new_owner=%s",
+            full_name,
+            old_owner,
+            owner_id,
+        )
 
     pr = (
         await session.execute(
@@ -89,14 +101,15 @@ async def queue_review(
         elif not force:
             await session.commit()
             logger.info(
-                "reuse review_run=%s status=%s %s#%s sha=%s",
+                "reuse review_run=%s status=%s %s#%s sha=%s owner=%s",
                 existing.id,
                 existing.status,
                 full_name,
                 number,
                 head_sha[:12],
+                owner_id,
             )
-            record_enqueue("reused")
+            record_enqueue("reused", owner=owner_id)
             return existing
         elif existing.status in IN_FLIGHT_STATUSES:
             await abort_job(redis, existing.arq_job_id)
@@ -121,11 +134,13 @@ async def queue_review(
         old.status = "cancelled"
 
     metric_keys = ("commits", "additions", "deletions", "changed_files")
-    webhook_size: dict[str, Any] = {}
+    summary: dict[str, Any] = {}
     if trigger == "webhook" and all(pr_payload.get(key) is not None for key in metric_keys):
-        webhook_size["size_metrics"] = {key: int(pr_payload[key]) for key in metric_keys}
+        summary["size_metrics"] = {key: int(pr_payload[key]) for key in metric_keys}
     if repository_visibility is not None:
-        webhook_size["repository_visibility"] = repository_visibility
+        summary["repository_visibility"] = repository_visibility
+    if installation_id is not None:
+        summary["installation_id"] = installation_id
 
     run = ReviewRun(
         id=uuid.uuid4(),
@@ -134,7 +149,8 @@ async def queue_review(
         base_sha=base_sha,
         head_sha=head_sha,
         status="pending",
-        summary=webhook_size or None,
+        summary=summary or None,
+        owner_id=owner_id,
     )
     session.add(run)
     await session.flush()
@@ -142,12 +158,13 @@ async def queue_review(
     run.arq_job_id = job_id
     await session.commit()
     logger.info(
-        "queued review_run=%s %s#%s sha=%s trigger=%s",
+        "queued review_run=%s %s#%s sha=%s trigger=%s owner=%s",
         run.id,
         full_name,
         number,
         head_sha[:12],
         trigger,
+        owner_id,
     )
-    record_enqueue("queued")
+    record_enqueue("queued", owner=owner_id)
     return run

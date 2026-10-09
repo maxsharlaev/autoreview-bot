@@ -85,16 +85,32 @@ async def digest_open_prs(ctx: dict) -> str:
     if not config.features.digest_enabled or not config.schedule.review_digest.enabled:
         return "disabled"
     factory = ctx["session_factory"]
-    github = None
-    try:
-        from app.adapters.github import GitHubAppClient
 
-        github = GitHubAppClient()
-    except Exception:
-        logger.exception("GitHub client unavailable for digest refresh")
-    async with factory() as session:
-        digest = await run_digest(session, config=config, github=github)
-        return str(digest.id)
+    from app.owners.registry import get_owner_registry
+
+    registry = get_owner_registry()
+
+    # Run digest for each owner with their own credentials
+    digest_ids: list[str] = []
+    for owner_id, owner_ctx in registry.owners.items():
+        try:
+            from app.adapters.github import GitHubAppClient
+
+            github = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=owner_id)
+        except Exception:
+            logger.exception("GitHub client unavailable for digest refresh, owner=%s", owner_id)
+            continue
+
+        async with factory() as session:
+            digest = await run_digest(
+                session,
+                config=owner_ctx.config,
+                github=github,
+                owner_id=owner_id,
+            )
+            digest_ids.append(str(digest.id))
+
+    return ",".join(digest_ids) if digest_ids else "no_owners"
 
 
 def _cron_jobs() -> list:

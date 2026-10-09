@@ -97,7 +97,7 @@ def test_webhook_accepts_valid_signature_without_api_key() -> None:
     with (
         patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
         patch("app.api.v1.pull_request.get_normalized_secret", return_value=secret),
-        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
+        patch("app.api.v1.pull_request.get_owner_webhook_secrets", return_value={}),
     ):
         response = client.post(
             "/pull-request",
@@ -171,6 +171,8 @@ def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
     """Labeled event with autoreview:force label queues review with force=True."""
     import json
 
+    from app.owners.registry import RouteResult
+
     app, client = _create_test_app()
     secret = "webhook-secret-16ch"
     payload = {
@@ -191,14 +193,22 @@ def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
     mock_run.status = "queued"
     mock_run.id = "run-123"
 
+    mock_ctx = MagicMock()
+    mock_ctx.config.size_guard.override_label = "autoreview:force"
+    mock_ctx.webhook_enabled.return_value = True
+    mock_ctx.webhook_secret = secret
+
+    mock_registry = MagicMock()
+    mock_registry.resolve.return_value = RouteResult("default", "exact")
+    mock_registry.get.return_value = mock_ctx
+
     with (
         patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
         patch("app.api.v1.pull_request.get_normalized_secret", return_value=secret),
-        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
-        patch("app.api.v1.pull_request.get_app_config") as mock_config,
+        patch("app.api.v1.pull_request.get_owner_webhook_secrets", return_value={}),
+        patch("app.api.v1.pull_request.get_owner_registry", return_value=mock_registry),
         patch("app.api.v1.pull_request.queue_review", return_value=mock_run) as mock_queue,
     ):
-        mock_config.return_value.size_guard.override_label = "autoreview:force"
         response = client.post(
             "/pull-request",
             content=body,
@@ -413,7 +423,7 @@ def test_webhook_endpoint_returns_503_when_disabled() -> None:
             json={},
         )
         assert response.status_code == 503
-        assert "not configured" in response.json()["detail"]
+        assert "webhook" in response.json()["detail"].lower()
 
 
 # --- /api/v1/reviews endpoint requires API key ---

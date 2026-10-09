@@ -47,13 +47,20 @@ def format_digest_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def build_digest_payload(session: AsyncSession) -> dict[str, Any]:
-    result = await session.execute(
+async def build_digest_payload(
+    session: AsyncSession,
+    owner_id: str | None = None,
+) -> dict[str, Any]:
+    query = (
         select(PullRequest)
         .options(selectinload(PullRequest.repository), selectinload(PullRequest.findings))
         .where(PullRequest.state == "open")
-        .order_by(PullRequest.updated_at.desc())
     )
+    if owner_id:
+        query = query.join(PullRequest.repository).where(Repository.owner_id == owner_id)
+    query = query.order_by(PullRequest.updated_at.desc())
+
+    result = await session.execute(query)
     items = []
     blocker_count = 0
     for pr in result.scalars().unique():
@@ -87,9 +94,10 @@ async def run_digest(
     config: AppConfig | None = None,
     slack: SlackClient | None = None,
     github: GitHubAppClient | None = None,
+    owner_id: str | None = None,
 ) -> DigestRun:
     cfg = config or get_app_config()
-    payload = await build_digest_payload(session)
+    payload = await build_digest_payload(session, owner_id=owner_id)
     if github and cfg.github.allowed_repos:
         # Best-effort refresh of open PR metadata for registered repos.
         for full_name in cfg.github.allowed_repos:
@@ -103,7 +111,7 @@ async def run_digest(
                 continue
             for raw in pulls:
                 await _upsert_open_pr(session, full_name, raw)
-        payload = await build_digest_payload(session)
+        payload = await build_digest_payload(session, owner_id=owner_id)
 
     slack_sent = False
     client = slack or SlackClient(cfg)
@@ -118,6 +126,7 @@ async def run_digest(
         blocker_pr_count=payload["blocker_pr_count"],
         slack_sent=slack_sent,
         payload=payload,
+        owner_id=owner_id or "default",
     )
     session.add(digest)
     await session.commit()

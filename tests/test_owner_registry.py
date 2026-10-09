@@ -212,8 +212,8 @@ def test_mode_b_named_owner_becomes_default() -> None:
 # --- Mode C: Single owner block tests ---
 
 
-def test_mode_c_single_owner_requires_legacy_creds_in_m1() -> None:
-    """Mode C: In M1, owners block without legacy creds is rejected (adapters not wired)."""
+def test_mode_c_single_owner_without_legacy_creds() -> None:
+    """Mode C: Single owner block without legacy creds works in M2."""
     settings = _mock_settings()  # No legacy creds
     config = AppConfig(
         owners={
@@ -224,15 +224,23 @@ def test_mode_c_single_owner_requires_legacy_creds_in_m1() -> None:
     )
     env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_org_a"}
 
-    with pytest.raises(OwnerConfigError, match="M1 requires legacy GitHub credentials"):
-        OwnerRegistry.build(settings, config, env=env)
+    registry = OwnerRegistry.build(settings, config, env=env)
+
+    assert len(registry.owners) == 1
+    assert "org-a" in registry.owners
+    assert registry.default_owner_id == "org-a"
+
+    ctx = registry.get("org-a")
+    assert ctx is not None
+    assert ctx.github.kind == "pat"
+    assert ctx.github.token == "ghp_org_a"
 
 
 # --- Mode D: Multiple owners tests ---
 
 
-def test_mode_d_multiple_owners_requires_legacy_creds_in_m1() -> None:
-    """Mode D: In M1, multiple owners without legacy creds is rejected."""
+def test_mode_d_multiple_owners_without_legacy_creds() -> None:
+    """Mode D: Multiple owners without legacy creds works in M2."""
     settings = _mock_settings()  # No legacy creds
     config = AppConfig(
         owners={
@@ -250,8 +258,20 @@ def test_mode_d_multiple_owners_requires_legacy_creds_in_m1() -> None:
         "OWNER_ORG_B_GITHUB_TOKEN": "ghp_org_b",
     }
 
-    with pytest.raises(OwnerConfigError, match="M1 requires legacy GitHub credentials"):
-        OwnerRegistry.build(settings, config, env=env)
+    registry = OwnerRegistry.build(settings, config, env=env)
+
+    assert len(registry.owners) == 2
+    assert "org-a" in registry.owners
+    assert "org-b" in registry.owners
+    assert registry.default_owner_id == "org-b"  # explicit default=true
+
+    ctx_a = registry.get("org-a")
+    assert ctx_a is not None
+    assert ctx_a.github.token == "ghp_org_a"
+
+    ctx_b = registry.get("org-b")
+    assert ctx_b is not None
+    assert ctx_b.github.token == "ghp_org_b"
 
 
 def test_mode_b_multiple_owners_with_default_flag() -> None:
@@ -392,7 +412,7 @@ def test_validation_same_app_installation_id() -> None:
         "OWNER_ORG_B_GITHUB_APP_PRIVATE_KEY": key,
     }
 
-    with pytest.raises(OwnerConfigError, match="Same.*app_id.*installation_id"):
+    with pytest.raises(OwnerConfigError, match="installation_id.*claimed by both"):
         OwnerRegistry.build(settings, config, env=env)
 
 

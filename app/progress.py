@@ -9,10 +9,17 @@ logger = logging.getLogger("autoreview_bot.review")
 
 
 class ReviewProgress:
-    def __init__(self, run_id: uuid.UUID, repository: str = "", number: int | None = None) -> None:
+    def __init__(
+        self,
+        run_id: uuid.UUID,
+        repository: str = "",
+        number: int | None = None,
+        owner_id: str = "default",
+    ) -> None:
         self.run_id = str(run_id)
         self.repository = repository
         self.number = number
+        self.owner_id = owner_id
 
     def bind(self, repository: str, number: int) -> None:
         self.repository = repository
@@ -23,7 +30,7 @@ class ReviewProgress:
         return f"[{self.run_id[:8]} {loc}]"
 
     def event(self, message: str) -> None:
-        extra: dict[str, object] = {"review_run_id": self.run_id}
+        extra: dict[str, object] = {"review_run_id": self.run_id, "owner": self.owner_id}
         if self.repository:
             extra["repository"] = self.repository
         if self.number is not None:
