@@ -33,7 +33,9 @@ def _validate_startup_config() -> None:
             logger.warning("Owner config: %s", warning)
 
         owner_ids = list(registry.owners.keys())
-        if len(owner_ids) == 1 and owner_ids[0] == "default":
+        if not owner_ids:
+            logger.info("Owner registry: legacy mode, no GitHub credentials")
+        elif len(owner_ids) == 1 and owner_ids[0] == "default":
             logger.info("Owner registry: legacy single-owner mode (owner=default)")
         else:
             logger.info(

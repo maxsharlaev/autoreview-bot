@@ -1,8 +1,12 @@
-"""Add owner_id columns and migrate comment_authors format.
+"""Add owner_id columns.
 
 Multi-owner M1: owner_id columns with server_default='default' on repositories,
-review_runs, and digest_runs. Data migration for comment_authors from list of
-strings to list of objects with tolerant reader support.
+review_runs, and digest_runs.
+
+Note: M1 does NOT convert comment_authors to object format. The application writes
+plain strings in M1 for backward compatibility, and the tolerant reader handles both
+formats. The data conversion will be added in M2 when the old image is no longer
+in use.
 
 Revision ID: 005_owner_id
 Revises: 004_finding_details_visibility
@@ -55,39 +59,8 @@ def upgrade() -> None:
         ),
     )
 
-    # Data migration: convert comment_authors from list of strings to list of objects
-    # Old format: ["login1", "login2"]
-    # New format: [{"login": "login1", "owner_id": "default", "kind": null}, ...]
-    #
-    # This migration normalizes every element (no first-element heuristic).
-    # Mixed lists (strings + objects) are fully converted.
-    conn = op.get_bind()
-    result = conn.execute(sa.text("SELECT id, comment_authors FROM repositories WHERE comment_authors IS NOT NULL"))
-    rows = list(result)
-
-    for row in rows:
-        repo_id = row[0]
-        authors = row[1]
-
-        if not authors or not isinstance(authors, list):
-            continue
-
-        # Normalize every element: strings -> objects, objects pass through
-        new_authors = []
-        needs_update = False
-        for author in authors:
-            if isinstance(author, str):
-                new_authors.append({"login": author, "owner_id": "default", "kind": None})
-                needs_update = True
-            elif isinstance(author, dict):
-                new_authors.append(author)
-            # Skip invalid entries
-
-        if needs_update:
-            conn.execute(
-                sa.text("UPDATE repositories SET comment_authors = CAST(:authors AS jsonb) WHERE id = :id"),
-                {"authors": json.dumps(new_authors), "id": repo_id},
-            )
+    # Note: comment_authors data conversion is deferred to M2.
+    # M1 writes plain strings for backward compatibility during rollout.
 
 
 def downgrade() -> None:

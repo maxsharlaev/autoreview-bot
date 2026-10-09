@@ -642,12 +642,16 @@ def test_legacy_config_with_example_yaml() -> None:
 
 
 def test_legacy_config_with_real_settings_and_example_yaml(monkeypatch) -> None:
-    """Test equivalence using real Settings and config.example.yaml."""
+    """Test equivalence: legacy owner's config matches actual get_app_config() including env overrides."""
     from app.config import Settings, get_app_config, repo_allowed
 
-    # Set up environment for real Settings
+    # Set up environment for real Settings - include env overrides to test priority
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token")
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret1234567890abcdef")
+    monkeypatch.setenv("GITHUB_APP_ID", "999")  # Override YAML
+    monkeypatch.setenv("GITHUB_INSTALLATION_ID", "888")  # Override YAML
+    monkeypatch.setenv("JIRA_BASE_URL", "https://env-override.atlassian.net")  # Override YAML
+    monkeypatch.setenv("JIRA_EMAIL", "env-override@example.com")  # Override YAML
     monkeypatch.setenv("CONFIG_PATH", "config.example.yaml")
 
     # Clear cached settings
@@ -658,15 +662,26 @@ def test_legacy_config_with_real_settings_and_example_yaml(monkeypatch) -> None:
 
     try:
         real_settings = Settings()
-        real_config = load_yaml_config(Path("config.example.yaml"))
+        # Use get_app_config() - this applies env overrides
+        actual_app_config = get_app_config()
 
-        registry = OwnerRegistry.build(real_settings, real_config, env=dict(os.environ))
+        registry = OwnerRegistry.build(real_settings, actual_app_config, env=dict(os.environ))
 
         assert "default" in registry.owners
         ctx = registry.get_default()
 
-        # Verify allowed_repos parity
-        assert ctx.config.github.allowed_repos == ["example-org/example-repo"]
+        # Verify config matches get_app_config() result including env overrides
+        assert ctx.config.github.allowed_repos == actual_app_config.github.allowed_repos
+        assert ctx.config.github.app_id == actual_app_config.github.app_id
+        assert ctx.config.github.installation_id == actual_app_config.github.installation_id
+        assert ctx.config.jira.base_url == actual_app_config.jira.base_url
+        assert ctx.config.jira.email == actual_app_config.jira.email
+
+        # Verify env overrides were applied
+        assert ctx.config.github.app_id == 999
+        assert ctx.config.github.installation_id == 888
+        assert ctx.config.jira.base_url == "https://env-override.atlassian.net"
+        assert ctx.config.jira.email == "env-override@example.com"
 
         # Verify repo_allowed behavior matches
         assert repo_allowed("example-org/example-repo", ctx.config) is True

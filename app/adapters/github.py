@@ -162,6 +162,7 @@ class GitHubAppClient:
         json: dict | None = None,
         params: dict | None = None,
         accept: str = "application/vnd.github+json",
+        _evict_on_401: bool = False,
     ) -> httpx.Response:
         headers = {
             "Accept": accept,
@@ -173,12 +174,27 @@ class GitHubAppClient:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.request(method, url, headers=headers, json=json, params=params)
         if response.status_code >= 400:
+            # On 401, evict the token that was used (if requested)
+            if response.status_code == 401 and _evict_on_401 and token:
+                app_id = self._app_id()
+                if self._installation_id:
+                    _INSTALLATION_TOKEN_CACHE.pop((app_id, self._installation_id), None)
+                self._token = None
+                self._token_expires = 0.0
             raise GitHubError(
                 f"{method} {url} -> {response.status_code}: {response.text[:500]}", status_code=response.status_code
             )
         return response
 
-    async def resolve_installation_id(self, owner: str, repo: str, *, _retry: bool = True) -> int:
+    def _is_installation_id_static(self) -> bool:
+        """Return True if installation_id is statically configured (no retry needed)."""
+        if self._credentials is not None and self._credentials.installation_id:
+            return True
+        if self.settings.github_installation_id:
+            return True
+        return False
+
+    async def resolve_installation_id(self, owner: str, repo: str) -> int:
         if self._installation_id:
             return self._installation_id
 
@@ -206,25 +222,18 @@ class GitHubAppClient:
             _INSTALLATION_ID_CACHE.pop(cache_key, None)
 
         # Fetch from GitHub API
-        try:
-            response = await self._request(
-                "GET",
-                f"{API}/repos/{owner}/{repo}/installation",
-                token=self._jwt(),
-            )
-        except GitHubError as e:
-            if e.status_code in (401, 404) and _retry:
-                # Evict any stale cache entries and retry once
-                _evict_caches_for_installation(app_id, self._installation_id)
-                self._installation_id = 0
-                return await self.resolve_installation_id(owner, repo, _retry=False)
-            raise
+        # Note: Don't retry on 404 - there's nothing to evict when the installation doesn't exist
+        response = await self._request(
+            "GET",
+            f"{API}/repos/{owner}/{repo}/installation",
+            token=self._jwt(),
+        )
         installation_id = int(response.json()["id"])
         self._installation_id = installation_id
         _INSTALLATION_ID_CACHE[cache_key] = (installation_id, time.time())
         return self._installation_id
 
-    async def installation_token(self, owner: str, repo: str, *, _retry: bool = True) -> str:
+    async def installation_token(self, owner: str, repo: str) -> str:
         pat = self._personal_token()
         if pat:
             return pat
@@ -247,21 +256,11 @@ class GitHubAppClient:
         if self._token and time.time() < self._token_expires - 60:
             return self._token
 
-        try:
-            response = await self._request(
-                "POST",
-                f"{API}/app/installations/{installation_id}/access_tokens",
-                token=self._jwt(),
-            )
-        except GitHubError as e:
-            if e.status_code in (401, 404) and _retry:
-                # Evict caches and retry once with fresh installation_id lookup
-                _evict_caches_for_installation(app_id, installation_id)
-                self._installation_id = 0
-                self._token = None
-                self._token_expires = 0.0
-                return await self.installation_token(owner, repo, _retry=False)
-            raise
+        response = await self._request(
+            "POST",
+            f"{API}/app/installations/{installation_id}/access_tokens",
+            token=self._jwt(),
+        )
         data = response.json()
         token = data["token"]
         expires_at = time.time() + 3500
@@ -275,7 +274,9 @@ class GitHubAppClient:
 
     async def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestInfo:
         token = await self.installation_token(owner, repo)
-        data = (await self._request("GET", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token)).json()
+        data = (
+            await self._request("GET", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, _evict_on_401=True)
+        ).json()
         head_repo = data.get("head", {}).get("repo") or {}
         base_repo = data.get("base", {}).get("repo") or {}
         is_fork = bool(head_repo.get("fork")) or head_repo.get("full_name") != base_repo.get("full_name")
@@ -319,6 +320,7 @@ class GitHubAppClient:
                 f"{API}/repos/{owner}/{repo}/pulls/{number}/files",
                 token=token,
                 params={"per_page": 100, "page": page},
+                _evict_on_401=True,
             )
             batch = response.json()
             if not batch:
@@ -348,6 +350,7 @@ class GitHubAppClient:
                 f"{API}/repos/{owner}/{repo}/pulls/{number}/commits",
                 token=token,
                 params={"per_page": 100, "page": page},
+                _evict_on_401=True,
             )
             batch = response.json()
             messages.extend(
@@ -369,6 +372,7 @@ class GitHubAppClient:
                         f"{API}/repos/{owner}/{repo}/contents/{path}",
                         token=token,
                         params={"ref": base_ref},
+                        _evict_on_401=True,
                     )
                 except GitHubError as exc:
                     if exc.status_code == 404:
@@ -392,6 +396,7 @@ class GitHubAppClient:
                     f"{API}/repos/{owner}/{repo}/contents/{directory}",
                     token=token,
                     params={"ref": base_ref},
+                    _evict_on_401=True,
                 )
             except GitHubError as exc:
                 if exc.status_code == 404:
@@ -408,6 +413,7 @@ class GitHubAppClient:
                     f"{API}/repos/{owner}/{repo}/contents/{entry['path']}",
                     token=token,
                     params={"ref": base_ref},
+                    _evict_on_401=True,
                 )
                 data = file_response.json()
                 if data.get("encoding") != "base64":
@@ -419,11 +425,19 @@ class GitHubAppClient:
 
     async def update_pull_request_body(self, owner: str, repo: str, number: int, body: str) -> None:
         token = await self.installation_token(owner, repo)
-        await self._request("PATCH", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, json={"body": body})
+        await self._request(
+            "PATCH", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, json={"body": body}, _evict_on_401=True
+        )
 
     async def update_pull_request_title(self, owner: str, repo: str, number: int, title: str) -> None:
         token = await self.installation_token(owner, repo)
-        await self._request("PATCH", f"{API}/repos/{owner}/{repo}/pulls/{number}", token=token, json={"title": title})
+        await self._request(
+            "PATCH",
+            f"{API}/repos/{owner}/{repo}/pulls/{number}",
+            token=token,
+            json={"title": title},
+            _evict_on_401=True,
+        )
 
     async def collaborator_permission(self, owner: str, repo: str, username: str) -> str:
         token = await self.installation_token(owner, repo)
@@ -432,6 +446,7 @@ class GitHubAppClient:
                 "GET",
                 f"{API}/repos/{owner}/{repo}/collaborators/{username}/permission",
                 token=token,
+                _evict_on_401=True,
             )
         except GitHubError:
             return "none"
@@ -488,6 +503,7 @@ class GitHubAppClient:
                 f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
                 token=token,
                 params={"per_page": 100, "page": page},
+                _evict_on_401=True,
             )
             batch = response.json()
             if not batch:
@@ -512,6 +528,7 @@ class GitHubAppClient:
                 f"{API}/repos/{owner}/{repo}/issues/comments/{comment_id}",
                 token=token,
                 json=payload,
+                _evict_on_401=True,
             )
             return
         await self._request(
@@ -519,6 +536,7 @@ class GitHubAppClient:
             f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
             token=token,
             json=payload,
+            _evict_on_401=True,
         )
 
     async def list_open_pulls(self, owner: str, repo: str) -> list[dict[str, Any]]:
@@ -528,5 +546,6 @@ class GitHubAppClient:
             f"{API}/repos/{owner}/{repo}/pulls",
             token=token,
             params={"state": "open", "per_page": 100},
+            _evict_on_401=True,
         )
         return response.json()

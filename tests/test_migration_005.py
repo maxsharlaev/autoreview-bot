@@ -1,283 +1,269 @@
-"""Migration 005 tests: owner_id columns and comment_authors data migration.
+"""Migration 005 tests: owner_id columns.
 
-These tests run against a real Postgres database and are skipped if DATABASE_URL is not set.
+These tests run against a real Postgres database and are skipped if TEST_DATABASE_URL is not set.
+The database name must end with '_test' to prevent accidental runs against production databases.
+
+Note: In M1, upgrade only adds owner_id columns; comment_authors data conversion is deferred to M2.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 
 import pytest
-from alembic import command
-from alembic.config import Config
-from sqlalchemy import create_engine, text
 
-requires_postgres = pytest.mark.skipif(
-    not os.environ.get("DATABASE_URL"),
-    reason="DATABASE_URL not set; skipping migration tests",
-)
+TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "")
 
 
-def get_alembic_config() -> Config:
+def _validate_test_database_url() -> str | None:
+    """Validate TEST_DATABASE_URL and return a reason if invalid."""
+    if not TEST_DB_URL:
+        return "TEST_DATABASE_URL not set"
+    # Extract database name from URL (handles both postgresql:// and postgresql+asyncpg://)
+    match = re.search(r"/([^/?]+)(?:\?|$)", TEST_DB_URL)
+    if not match:
+        return "Could not parse database name from TEST_DATABASE_URL"
+    db_name = match.group(1)
+    if not db_name.endswith("_test"):
+        return f"Database name must end with '_test' (got: {db_name})"
+    return None
+
+
+_skip_reason = _validate_test_database_url()
+requires_test_postgres = pytest.mark.skipif(bool(_skip_reason), reason=_skip_reason or "")
+
+
+def _get_asyncpg_url() -> str:
+    """Convert TEST_DATABASE_URL to asyncpg format."""
+    url = TEST_DB_URL
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
+def _get_alembic_config():
     """Get Alembic config pointing to the test database."""
+    from alembic.config import Config
+
     config = Config("alembic.ini")
-    db_url = os.environ.get("DATABASE_URL", "")
-    if db_url.startswith("postgresql+asyncpg://"):
-        db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
-    config.set_main_option("sqlalchemy.url", db_url)
+    config.set_main_option("sqlalchemy.url", _get_asyncpg_url())
+    # Disable logger configuration to avoid breaking other tests
+    config.attributes["configure_logger"] = False
     return config
 
 
-def get_sync_engine():
-    """Get a synchronous SQLAlchemy engine for testing."""
-    db_url = os.environ.get("DATABASE_URL", "")
-    if db_url.startswith("postgresql+asyncpg://"):
-        db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
-    return create_engine(db_url)
+async def _run_migrations(config, target: str) -> None:
+    """Run alembic migrations using async engine."""
+    from alembic import command
+
+    command.upgrade(config, target)
 
 
-@requires_postgres
+async def _downgrade_migrations(config, target: str) -> None:
+    """Run alembic downgrade using async engine."""
+    from alembic import command
+
+    command.downgrade(config, target)
+
+
+@requires_test_postgres
 class TestMigration005:
-    """Test migration 005: owner_id columns and comment_authors data migration."""
+    """Test migration 005: owner_id columns."""
 
     @pytest.fixture(autouse=True)
-    def setup_and_teardown(self):
+    async def setup_and_teardown(self):
         """Set up test database at revision 004, run tests, then clean up."""
-        config = get_alembic_config()
-        engine = get_sync_engine()
+        import asyncpg
 
-        command.downgrade(config, "base")
-        command.upgrade(config, "004_finding_details_visibility")
+        config = _get_alembic_config()
 
-        yield engine
+        # Downgrade to base and upgrade to 004
+        await _downgrade_migrations(config, "base")
+        await _run_migrations(config, "004_finding_details_visibility")
 
-        command.downgrade(config, "base")
+        # Parse connection params from URL
+        url = _get_asyncpg_url()
+        # Convert asyncpg URL to connection params
+        dsn = url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(dsn)
 
-    def test_upgrade_adds_owner_id_columns_and_indexes(self, setup_and_teardown):
+        yield conn
+
+        await conn.close()
+        await _downgrade_migrations(config, "base")
+
+    @pytest.mark.asyncio
+    async def test_upgrade_adds_owner_id_columns_and_indexes(self, setup_and_teardown):
         """Upgrade should add owner_id columns with default='default' and indexes."""
-        engine = setup_and_teardown
-        config = get_alembic_config()
+        conn = setup_and_teardown
+        config = _get_alembic_config()
 
-        command.upgrade(config, "005_owner_id")
+        await _run_migrations(config, "005_owner_id")
 
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                SELECT column_name, column_default
-                FROM information_schema.columns
-                WHERE table_name = 'repositories' AND column_name = 'owner_id'
-            """)
-            )
-            row = result.fetchone()
-            assert row is not None
-            assert row[0] == "owner_id"
-            assert "'default'" in row[1]
+        # Check repositories.owner_id
+        row = await conn.fetchrow("""
+            SELECT column_name, column_default
+            FROM information_schema.columns
+            WHERE table_name = 'repositories' AND column_name = 'owner_id'
+        """)
+        assert row is not None
+        assert row["column_name"] == "owner_id"
+        assert "'default'" in row["column_default"]
 
-            result = conn.execute(
-                text("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'review_runs' AND column_name = 'owner_id'
-            """)
-            )
-            assert result.fetchone() is not None
+        # Check review_runs.owner_id
+        row = await conn.fetchrow("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'review_runs' AND column_name = 'owner_id'
+        """)
+        assert row is not None
 
-            result = conn.execute(
-                text("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'digest_runs' AND column_name = 'owner_id'
-            """)
-            )
-            assert result.fetchone() is not None
+        # Check digest_runs.owner_id
+        row = await conn.fetchrow("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'digest_runs' AND column_name = 'owner_id'
+        """)
+        assert row is not None
 
-            result = conn.execute(
-                text("""
-                SELECT indexname FROM pg_indexes
-                WHERE tablename = 'repositories' AND indexname = 'ix_repositories_owner_id'
-            """)
-            )
-            assert result.fetchone() is not None
+        # Check indexes
+        row = await conn.fetchrow("""
+            SELECT indexname FROM pg_indexes
+            WHERE tablename = 'repositories' AND indexname = 'ix_repositories_owner_id'
+        """)
+        assert row is not None
 
-            result = conn.execute(
-                text("""
-                SELECT indexname FROM pg_indexes
-                WHERE tablename = 'review_runs' AND indexname = 'ix_review_runs_owner_id'
-            """)
-            )
-            assert result.fetchone() is not None
+        row = await conn.fetchrow("""
+            SELECT indexname FROM pg_indexes
+            WHERE tablename = 'review_runs' AND indexname = 'ix_review_runs_owner_id'
+        """)
+        assert row is not None
 
-    def test_upgrade_migrates_comment_authors_strings_to_objects(self, setup_and_teardown):
-        """Upgrade should convert string-format comment_authors to object format."""
-        engine = setup_and_teardown
-        config = get_alembic_config()
+    @pytest.mark.asyncio
+    async def test_upgrade_preserves_comment_authors_as_strings(self, setup_and_teardown):
+        """Upgrade should NOT convert comment_authors in M1 (preserves plain strings)."""
+        conn = setup_and_teardown
+        config = _get_alembic_config()
 
         repo_id = uuid.uuid4()
         old_authors = ["user1", "bot[bot]", "user2"]
 
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors)
-                VALUES (:id, :name, true, 'default', CAST(:authors AS jsonb))
-            """),
-                {"id": repo_id, "name": "org/repo-strings", "authors": json.dumps(old_authors)},
-            )
-            conn.commit()
+        await conn.execute(
+            """
+            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors)
+            VALUES ($1, $2, true, 'default', $3::jsonb)
+        """,
+            repo_id,
+            "org/repo-strings",
+            json.dumps(old_authors),
+        )
 
-        command.upgrade(config, "005_owner_id")
+        await _run_migrations(config, "005_owner_id")
 
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("SELECT comment_authors, owner_id FROM repositories WHERE id = :id"), {"id": repo_id}
-            )
-            row = result.fetchone()
-            assert row is not None
-            authors = row[0]
-            owner_id = row[1]
+        row = await conn.fetchrow("SELECT comment_authors, owner_id FROM repositories WHERE id = $1", repo_id)
+        assert row is not None
+        authors = json.loads(row["comment_authors"])
+        owner_id = row["owner_id"]
 
-            assert owner_id == "default"
-            assert isinstance(authors, list)
-            assert len(authors) == 3
-            for i, author in enumerate(authors):
-                assert isinstance(author, dict)
-                assert author["login"] == old_authors[i]
-                assert author["owner_id"] == "default"
-                assert author["kind"] is None
+        # owner_id should be 'default'
+        assert owner_id == "default"
+        # comment_authors should be unchanged (still plain strings in M1)
+        assert authors == old_authors
 
-    def test_upgrade_handles_empty_list(self, setup_and_teardown):
+    @pytest.mark.asyncio
+    async def test_upgrade_handles_empty_list(self, setup_and_teardown):
         """Upgrade should handle empty comment_authors list."""
-        engine = setup_and_teardown
-        config = get_alembic_config()
+        conn = setup_and_teardown
+        config = _get_alembic_config()
 
         repo_id = uuid.uuid4()
 
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors)
-                VALUES (:id, :name, true, 'default', CAST(:authors AS jsonb))
-            """),
-                {"id": repo_id, "name": "org/repo-empty", "authors": json.dumps([])},
-            )
-            conn.commit()
+        await conn.execute(
+            """
+            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors)
+            VALUES ($1, $2, true, 'default', $3::jsonb)
+        """,
+            repo_id,
+            "org/repo-empty",
+            json.dumps([]),
+        )
 
-        command.upgrade(config, "005_owner_id")
+        await _run_migrations(config, "005_owner_id")
 
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT comment_authors FROM repositories WHERE id = :id"), {"id": repo_id})
-            row = result.fetchone()
-            assert row is not None
-            assert row[0] == []
+        row = await conn.fetchrow("SELECT comment_authors FROM repositories WHERE id = $1", repo_id)
+        assert row is not None
+        assert json.loads(row["comment_authors"]) == []
 
-    def test_upgrade_handles_mixed_list(self, setup_and_teardown):
-        """Upgrade should normalize mixed lists (strings + objects)."""
-        engine = setup_and_teardown
-        config = get_alembic_config()
-
-        repo_id = uuid.uuid4()
-        mixed_authors = [
-            "string-user",
-            {"login": "object-user", "owner_id": "custom", "kind": "app"},
-            "another-string",
-        ]
-
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors)
-                VALUES (:id, :name, true, 'default', CAST(:authors AS jsonb))
-            """),
-                {"id": repo_id, "name": "org/repo-mixed", "authors": json.dumps(mixed_authors)},
-            )
-            conn.commit()
-
-        command.upgrade(config, "005_owner_id")
-
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT comment_authors FROM repositories WHERE id = :id"), {"id": repo_id})
-            row = result.fetchone()
-            assert row is not None
-            authors = row[0]
-
-            assert len(authors) == 3
-            assert authors[0] == {"login": "string-user", "owner_id": "default", "kind": None}
-            assert authors[1] == {"login": "object-user", "owner_id": "custom", "kind": "app"}
-            assert authors[2] == {"login": "another-string", "owner_id": "default", "kind": None}
-
-    def test_downgrade_converts_objects_to_strings(self, setup_and_teardown):
-        """Downgrade should convert object-format comment_authors back to strings."""
-        engine = setup_and_teardown
-        config = get_alembic_config()
+    @pytest.mark.asyncio
+    async def test_downgrade_removes_owner_id_columns(self, setup_and_teardown):
+        """Downgrade should remove owner_id columns and indexes."""
+        conn = setup_and_teardown
+        config = _get_alembic_config()
 
         repo_id = uuid.uuid4()
 
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors)
-                VALUES (:id, :name, true, 'default', CAST(:authors AS jsonb))
-            """),
-                {"id": repo_id, "name": "org/repo-downgrade", "authors": json.dumps(["user1", "user2"])},
-            )
-            conn.commit()
+        await conn.execute(
+            """
+            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors)
+            VALUES ($1, $2, true, 'default', $3::jsonb)
+        """,
+            repo_id,
+            "org/repo-downgrade",
+            json.dumps(["user1", "user2"]),
+        )
 
-        command.upgrade(config, "005_owner_id")
+        await _run_migrations(config, "005_owner_id")
 
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT comment_authors FROM repositories WHERE id = :id"), {"id": repo_id})
-            row = result.fetchone()
-            authors_after_upgrade = row[0]
-            assert all(isinstance(a, dict) for a in authors_after_upgrade)
+        # Verify owner_id exists
+        row = await conn.fetchrow("SELECT owner_id FROM repositories WHERE id = $1", repo_id)
+        assert row is not None
+        assert row["owner_id"] == "default"
 
-        command.downgrade(config, "004_finding_details_visibility")
+        await _downgrade_migrations(config, "004_finding_details_visibility")
 
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT comment_authors FROM repositories WHERE id = :id"), {"id": repo_id})
-            row = result.fetchone()
-            assert row is not None
-            authors = row[0]
+        # Verify owner_id column is removed
+        row = await conn.fetchrow("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'repositories' AND column_name = 'owner_id'
+        """)
+        assert row is None
 
-            assert authors == ["user1", "user2"]
+        # Verify comment_authors is unchanged (still strings)
+        row = await conn.fetchrow("SELECT comment_authors FROM repositories WHERE id = $1", repo_id)
+        assert row is not None
+        assert json.loads(row["comment_authors"]) == ["user1", "user2"]
 
-            result = conn.execute(
-                text("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'repositories' AND column_name = 'owner_id'
-            """)
-            )
-            assert result.fetchone() is None
+    @pytest.mark.asyncio
+    async def test_downgrade_converts_object_authors_to_strings(self, setup_and_teardown):
+        """Downgrade should convert object-format comment_authors to plain strings (safety net)."""
+        conn = setup_and_teardown
+        config = _get_alembic_config()
 
-    def test_downgrade_handles_mixed_list(self, setup_and_teardown):
-        """Downgrade should normalize mixed lists (objects + strings) to plain strings."""
-        engine = setup_and_teardown
-        config = get_alembic_config()
-
-        command.upgrade(config, "005_owner_id")
+        await _run_migrations(config, "005_owner_id")
 
         repo_id = uuid.uuid4()
-        mixed_authors = [
+        object_authors = [
             {"login": "object-user", "owner_id": "custom", "kind": "app"},
             "string-user",
             {"login": "another-object", "owner_id": "default", "kind": None},
         ]
 
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors, owner_id)
-                VALUES (:id, :name, true, 'default', CAST(:authors AS jsonb), 'default')
-            """),
-                {"id": repo_id, "name": "org/repo-mixed-down", "authors": json.dumps(mixed_authors)},
-            )
-            conn.commit()
+        await conn.execute(
+            """
+            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors, owner_id)
+            VALUES ($1, $2, true, 'default', $3::jsonb, 'default')
+        """,
+            repo_id,
+            "org/repo-objects",
+            json.dumps(object_authors),
+        )
 
-        command.downgrade(config, "004_finding_details_visibility")
+        await _downgrade_migrations(config, "004_finding_details_visibility")
 
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT comment_authors FROM repositories WHERE id = :id"), {"id": repo_id})
-            row = result.fetchone()
-            assert row is not None
-            authors = row[0]
+        row = await conn.fetchrow("SELECT comment_authors FROM repositories WHERE id = $1", repo_id)
+        assert row is not None
+        authors = json.loads(row["comment_authors"])
 
-            assert authors == ["object-user", "string-user", "another-object"]
+        # Should be converted to plain strings
+        assert authors == ["object-user", "string-user", "another-object"]

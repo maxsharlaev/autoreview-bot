@@ -136,60 +136,8 @@ class TestCacheEviction:
     """Tests for cache eviction on 401/404."""
 
     @pytest.mark.asyncio
-    async def test_eviction_on_401_during_token_fetch(self):
-        """401 during token fetch should evict cache and retry."""
-        client = _make_client(installation_id=67890)
-
-        call_count = 0
-
-        async def mock_request(method, url, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise GitHubError("401 Unauthorized", status_code=401)
-            mock = MagicMock()
-            mock.json.return_value = {"token": "ghs_new_token"}
-            return mock
-
-        with (
-            patch.object(client, "_jwt", return_value="mock_jwt"),
-            patch.object(client, "_request", side_effect=mock_request),
-        ):
-            # Pre-populate cache with stale data
-            _INSTALLATION_TOKEN_CACHE[(12345, 67890)] = ("ghs_stale", time.time() - 100)
-
-            token = await client.installation_token("org", "repo")
-            assert token == "ghs_new_token"
-            assert call_count == 2  # First failed, second succeeded
-
-    @pytest.mark.asyncio
-    async def test_eviction_on_404_during_installation_id_lookup(self):
-        """404 during installation ID lookup should evict cache and retry."""
-        client = _make_client()
-
-        call_count = 0
-
-        async def mock_request(method, url, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise GitHubError("404 Not Found", status_code=404)
-            mock = MagicMock()
-            mock.json.return_value = {"id": 99999}
-            return mock
-
-        with (
-            patch.object(client, "_jwt", return_value="mock_jwt"),
-            patch.object(client, "_request", side_effect=mock_request),
-        ):
-            # Do NOT pre-populate cache - test fresh lookup with first 404
-            result = await client.resolve_installation_id("org", "repo")
-            assert result == 99999
-            assert call_count == 2  # First failed (404), second succeeded
-
-    @pytest.mark.asyncio
-    async def test_no_infinite_retry_on_persistent_error(self):
-        """Persistent 401/404 should not cause infinite retries."""
+    async def test_401_during_token_fetch_raises_error(self):
+        """401 during token fetch should raise error (no retry per spec)."""
         client = _make_client(installation_id=67890)
 
         async def mock_request(method, url, **kwargs):
@@ -201,6 +149,30 @@ class TestCacheEviction:
         ):
             with pytest.raises(GitHubError, match="401"):
                 await client.installation_token("org", "repo")
+
+    @pytest.mark.asyncio
+    async def test_404_during_installation_id_lookup_raises_error(self):
+        """404 during installation ID lookup should raise error (no retry per spec)."""
+        client = _make_client()
+
+        async def mock_request(method, url, **kwargs):
+            raise GitHubError("404 Not Found", status_code=404)
+
+        with (
+            patch.object(client, "_jwt", return_value="mock_jwt"),
+            patch.object(client, "_request", side_effect=mock_request),
+        ):
+            with pytest.raises(GitHubError, match="404"):
+                await client.resolve_installation_id("org", "repo")
+
+    @pytest.mark.asyncio
+    async def test_static_installation_id_skips_lookup(self):
+        """When installation_id is statically configured, skip lookup entirely."""
+        client = _make_client(installation_id=67890)
+
+        # No mock_request needed - should not make any API call
+        result = await client.resolve_installation_id("org", "repo")
+        assert result == 67890
 
 
 class TestEvictCachesForInstallation:
