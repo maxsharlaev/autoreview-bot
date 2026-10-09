@@ -43,57 +43,7 @@ def _make_signature(secret: str, body: bytes) -> str:
     return f"sha256={digest}"
 
 
-# --- Item 3: Digest isolation tests ---
-
-
-class TestDigestIsolation:
-    """Tests for digest isolation per owner."""
-
-    @pytest.mark.asyncio
-    async def test_non_default_owner_skips_global_slack(self):
-        """Non-default owner should not use global Slack fallback."""
-        from app.services.digest import run_digest
-
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.unique.return_value = []
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.add = MagicMock()
-        mock_session.commit = AsyncMock()
-
-        # No slack client provided, non-default owner
-        result = await run_digest(
-            mock_session,
-            config=AppConfig(),
-            owner_id="org-a",  # Non-default owner
-        )
-
-        # Should complete without Slack (slack_sent=False)
-        assert result.slack_sent is False
-        assert result.owner_id == "org-a"
-
-    @pytest.mark.asyncio
-    async def test_default_owner_uses_global_slack(self):
-        """Default owner should use global Slack config."""
-        from app.services.digest import run_digest
-
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.unique.return_value = []
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.add = MagicMock()
-        mock_session.commit = AsyncMock()
-
-        # Default owner without explicit Slack client
-        result = await run_digest(
-            mock_session,
-            config=AppConfig(),
-            owner_id="default",
-        )
-
-        # Slack not configured in AppConfig, so slack_sent=False
-        assert result.slack_sent is False
-        assert result.owner_id == "default"
+# --- Item 3: Digest isolation tests (removed trivially passing tests) ---
 
 
 # --- Item 5: comment_authors trust tests ---
@@ -649,28 +599,6 @@ class TestTwoOwnerDigest:
         # Verify owner_id was NOT changed (should still be org-a)
         assert existing_repo.owner_id == "org-a"
 
-    @pytest.mark.asyncio
-    async def test_slack_only_for_default_owner(self):
-        """Non-default owner should not post to Slack without explicit binding."""
-        from app.services.digest import run_digest
-
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.unique.return_value = []
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.add = MagicMock()
-        mock_session.commit = AsyncMock()
-
-        # Non-default owner without Slack client
-        result_non_default = await run_digest(
-            mock_session,
-            config=AppConfig(),
-            owner_id="org-a",  # Not default
-        )
-
-        assert result_non_default.slack_sent is False
-        assert result_non_default.owner_id == "org-a"
-
 
 class TestDigestWorkerOwnerRepos:
     """Tests for digest_open_prs passing owner-specific repos."""
@@ -825,3 +753,115 @@ class TestRealRegistryRunReview:
         assert ctx is not None
         assert ctx.github.kind == "pat"
         assert ctx.github.token == "ghp_test_token"
+
+    def test_disabled_owner_resolve_with_alias(self):
+        """Resolving via alias of disabled owner should return owner_disabled."""
+        from app.owners.registry import REJECT_OWNER_DISABLED
+
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "enabled-owner": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+                "disabled-owner": {
+                    "enabled": False,
+                    "aliases": ["disabled-alias"],
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        # Resolve via alias of disabled owner
+        result = registry.resolve("any/repo", explicit_owner="disabled-alias")
+        assert result.rejected()
+        assert result.reason == REJECT_OWNER_DISABLED
+
+        # Also verify via is_disabled
+        assert registry.is_disabled("disabled-alias")
+        assert registry.is_disabled("disabled-owner")
+        assert not registry.is_disabled("enabled-owner")
+
+
+class TestWebhookDisabledOwnerPath:
+    """Tests for /pull-request/{owner_id} with disabled owner."""
+
+    def _create_test_app(self):
+        from app.api.v1.pull_request import router
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.session_factory = MagicMock()
+        app.state.redis = MagicMock()
+        return app, TestClient(app)
+
+    def test_disabled_owner_path_returns_owner_disabled(self):
+        """POST /pull-request/{disabled_owner} should return owner_disabled."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "enabled-owner": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+                "disabled-owner": {
+                    "enabled": False,
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+        app, client = self._create_test_app()
+
+        with patch("app.api.v1.pull_request.get_owner_registry", return_value=registry):
+            response = client.post(
+                "/pull-request/disabled-owner",
+                content=b"{}",
+                headers={
+                    "X-Hub-Signature-256": "sha256=invalid",
+                    "X-GitHub-Event": "ping",
+                },
+            )
+            assert response.status_code == 202
+            assert response.json()["reason"] == "owner_disabled"
+
+    def test_disabled_owner_via_alias_returns_owner_disabled(self):
+        """POST /pull-request/{alias_of_disabled} should return owner_disabled."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "enabled-owner": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+                "disabled-owner": {
+                    "enabled": False,
+                    "aliases": ["disabled-alias"],
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+        app, client = self._create_test_app()
+
+        with patch("app.api.v1.pull_request.get_owner_registry", return_value=registry):
+            response = client.post(
+                "/pull-request/disabled-alias",
+                content=b"{}",
+                headers={
+                    "X-Hub-Signature-256": "sha256=invalid",
+                    "X-GitHub-Event": "ping",
+                },
+            )
+            assert response.status_code == 202
+            assert response.json()["reason"] == "owner_disabled"
