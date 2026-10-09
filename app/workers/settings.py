@@ -114,7 +114,7 @@ async def digest_open_prs(ctx: dict) -> str:
                 github=github,
                 owner_id=owner_id,
                 allowed_repos=owner_allowed_repos,
-                default_owner_id=registry.default_owner_id,
+                legacy_default_owner=registry.legacy_default_alias(),
             )
             digest_ids.append(str(digest.id))
 

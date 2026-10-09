@@ -27,6 +27,7 @@ from app.models import (
     ReviewRun,
     TaskSnapshot,
     build_comment_author_entry,
+    effective_owner_id,
     extract_comment_author_logins_for_owner,
 )
 from app.owners.registry import DEFAULT_OWNER_ID, OwnerRegistry, get_owner_registry
@@ -72,27 +73,18 @@ from app.services.visibility import Visibility, confirmed_visibility
 logger = logging.getLogger(__name__)
 
 
-def _filter_findings_for_owner(findings: list, owner_id: str, default_owner_id: str | None = None) -> list:
+def _filter_findings_for_owner(findings: list, owner_id: str, legacy_default_owner: str | None = None) -> list:
     """Filter findings to only include those belonging to the specified owner.
 
     This prevents cross-owner data mixing when a repository changes ownership.
     Findings have owner_id set directly; legacy findings with owner_id='default'
-    are mapped to the registry's default owner at read time.
-
-    Args:
-        findings: List of Finding objects
-        owner_id: The owner ID to filter for
-        default_owner_id: The registry's actual default owner ID (for legacy 'default' mapping)
+    belong to OwnerRegistry.legacy_default_alias() when it is set.
     """
-    result = []
-    for finding in findings:
-        finding_owner = getattr(finding, "owner_id", "default")
-        # Map legacy 'default' to actual default owner when switching from Mode A to C/D
-        if finding_owner == "default" and default_owner_id is not None:
-            finding_owner = default_owner_id
-        if finding_owner == owner_id:
-            result.append(finding)
-    return result
+    return [
+        finding
+        for finding in findings
+        if effective_owner_id(getattr(finding, "owner_id", None), legacy_default_owner) == owner_id
+    ]
 
 
 async def _remember_comment_author(
@@ -102,6 +94,7 @@ async def _remember_comment_author(
     owner: str,
     repo: str,
     owner_id: str = "default",
+    legacy_default_owner: str | None = None,
 ) -> None:
     try:
         token = await github.installation_token(owner, repo)
@@ -120,7 +113,7 @@ async def _remember_comment_author(
     ).scalar_one()
 
     # M2: Deduplicate by (login, owner_id) pair - check if this login is already recorded for this owner
-    existing_for_owner = extract_comment_author_logins_for_owner(locked.comment_authors, owner_id)
+    existing_for_owner = extract_comment_author_logins_for_owner(locked.comment_authors, owner_id, legacy_default_owner)
     if login.casefold() not in {author.casefold() for author in existing_for_owner}:
         # M2: Write object format with owner_id and kind for multi-owner identity tracking
         cred_kind = github._credentials.kind if github._credentials else None
@@ -128,7 +121,9 @@ async def _remember_comment_author(
         locked.comment_authors = list(locked.comment_authors or []) + [entry]
 
     # For the current run, only trust logins from this owner
-    github.previous_comment_authors = tuple(extract_comment_author_logins_for_owner(locked.comment_authors, owner_id))
+    github.previous_comment_authors = tuple(
+        extract_comment_author_logins_for_owner(locked.comment_authors, owner_id, legacy_default_owner)
+    )
     await session.commit()
 
 
@@ -233,11 +228,16 @@ async def run_review(
         progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
         return await _skip(session, run, started, SKIP_OWNER_CHANGED)
 
+    # Owner that inherits rows stored with the legacy owner_id 'default' (None in modes A/B)
+    legacy_default_owner = registry.legacy_default_alias()
+
     # Build clients from owner context (unless overridden for testing)
     config = config or ctx.config
     if github is None:
         # M2: Only trust comment authors recorded for this owner
-        previous_authors = tuple(extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id))
+        previous_authors = tuple(
+            extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id, legacy_default_owner)
+        )
         github = GitHubAppClient.from_credentials(
             ctx.github, owner_id=owner_id, previous_comment_authors=previous_authors
         )
@@ -285,9 +285,17 @@ async def run_review(
     if isinstance(github, GitHubAppClient):
         # M2: Only trust comment authors recorded for this owner
         github.previous_comment_authors = tuple(
-            extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id)
+            extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id, legacy_default_owner)
         )
-        await _remember_comment_author(session, github, pr.repository, owner, repo, owner_id=owner_id)
+        await _remember_comment_author(
+            session,
+            github,
+            pr.repository,
+            owner,
+            repo,
+            owner_id=owner_id,
+            legacy_default_owner=legacy_default_owner,
+        )
 
     webhook_metrics = (run.summary or {}).get("size_metrics") if run.head_sha == info.head_sha else None
     size_info = info
@@ -357,8 +365,7 @@ async def run_review(
         progress.event("no Jira key in branch/title/body")
 
     # Filter findings to only include those belonging to this owner (prevent cross-owner data mixing)
-    # Pass registry's default_owner_id to map legacy 'default' findings to actual default owner
-    owner_findings = _filter_findings_for_owner(pr.findings, owner_id, registry.default_owner_id)
+    owner_findings = _filter_findings_for_owner(pr.findings, owner_id, legacy_default_owner)
 
     previous = []
     for item in owner_findings:
@@ -376,7 +383,7 @@ async def run_review(
                 recommendation=item.recommendation if expose_details else "",
             )
         )
-    previous_head = await _previous_head(session, pr.id, run.id, owner_id, registry.default_owner_id)
+    previous_head = await _previous_head(session, pr.id, run.id, owner_id, legacy_default_owner)
 
     context = build_context(
         repository=pr.repository.full_name,
@@ -1065,17 +1072,17 @@ async def _previous_head(
     pull_request_id: uuid.UUID,
     current_run_id: uuid.UUID,
     owner_id: str,
-    default_owner_id: str | None = None,
+    legacy_default_owner: str | None = None,
 ) -> str | None:
     """Get the head SHA of the most recent completed run for this owner.
 
     Filters by owner_id to prevent cross-owner data mixing - a new owner
     should not see the previous head SHA from another owner's review.
-    Runs recorded before multi-owner support carry owner_id='default'; like
-    legacy findings, they belong to the registry's default owner.
+    Runs stored with the legacy owner_id='default' belong to legacy_default_owner
+    (OwnerRegistry.legacy_default_alias()) when it is set.
     """
     owner_ids = {owner_id}
-    if default_owner_id is not None and owner_id == default_owner_id:
+    if legacy_default_owner is not None and owner_id == legacy_default_owner:
         owner_ids.add(DEFAULT_OWNER_ID)
     result = await session.execute(
         select(ReviewRun)

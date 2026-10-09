@@ -132,6 +132,26 @@ class OwnerRegistry:
                 return True
         return False
 
+    def legacy_default_alias(self) -> str | None:
+        """Owner id that inherits rows stored with the legacy owner_id 'default'.
+
+        Rows written before multi-owner support (and by the legacy single-owner
+        setup) carry owner_id='default'. They belong to:
+        - nobody else, if an owner literally named 'default' exists (modes A/B):
+          returns None, rows stay with 'default';
+        - the alias target, if 'default' is configured as an alias of an owner;
+        - otherwise the registry default owner (modes C/D).
+        Returns None when no owner should inherit them.
+        """
+        if DEFAULT_OWNER_ID in self.owners:
+            return None
+        ctx = self.get(DEFAULT_OWNER_ID)
+        if ctx is not None:
+            return ctx.id
+        if self.is_disabled(DEFAULT_OWNER_ID):
+            return None
+        return self.default_owner_id or None
+
     def get_default(self) -> OwnerContext | None:
         """Get the default owner context, or None if no owners are configured."""
         if not self.default_owner_id:

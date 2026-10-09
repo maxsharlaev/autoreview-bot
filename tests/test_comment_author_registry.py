@@ -135,6 +135,7 @@ async def test_hard_limit_uses_persisted_author_after_credential_change() -> Non
     mock_registry = MagicMock()
     mock_registry.get.return_value = mock_ctx
     mock_registry.resolve.return_value = RouteResult("default", "exact")
+    mock_registry.legacy_default_alias.return_value = None  # owner 'default' exists
 
     result = await run_review(
         session,
@@ -152,4 +153,90 @@ async def test_hard_limit_uses_persisted_author_after_credential_change() -> Non
     logins = extract_comment_author_logins(repository.comment_authors)
     assert logins == ["old-bot", "new-bot"]
     assert github.previous_comment_authors == ("old-bot", "new-bot")
+    assert github.upsert_sticky_comment.await_args.kwargs["marker"] == SIZE_SKIP_MARKER
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("owner_id", "legacy_alias", "expected_trusted"),
+    [
+        # Modes C/D: no owner named 'default'; the default owner inherits legacy entries.
+        ("org-a", "org-a", ("old-bot", "older-bot", "new-bot")),
+        # Mode B: the legacy 'default' owner still exists; another owner must not inherit its entries.
+        ("org-b", None, ("new-bot",)),
+    ],
+)
+async def test_legacy_comment_authors_trusted_only_for_inheriting_owner(
+    owner_id, legacy_alias, expected_trusted
+) -> None:
+    info = PullRequestInfo(
+        number=7,
+        title="feat: validate",
+        body="",
+        html_url="",
+        author="author",
+        assignee=None,
+        state="open",
+        draft=False,
+        is_fork=False,
+        base_sha="b" * 40,
+        head_sha="a" * 40,
+        head_ref="feature/validation",
+        base_ref="main",
+        owner="org",
+        repo="repo",
+        full_name="org/repo",
+    )
+    repository = SimpleNamespace(
+        id=uuid.uuid4(),
+        full_name="org/repo",
+        comment_authors=["old-bot", {"login": "older-bot", "owner_id": "default", "kind": None}],
+        owner_id=owner_id,
+    )
+    pr = SimpleNamespace(repository=repository, number=7, findings=[], bot_title=None)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        pull_request=pr,
+        status="pending",
+        head_sha=info.head_sha,
+        summary={"size_metrics": {"commits": 151, "additions": 0, "deletions": 0, "changed_files": 1}},
+        trigger="webhook",
+        owner_id=owner_id,
+    )
+    session = SimpleNamespace(
+        execute=AsyncMock(
+            side_effect=[
+                SimpleNamespace(scalar_one=lambda: run),
+                SimpleNamespace(scalar_one=lambda: repository),
+            ]
+        ),
+        commit=AsyncMock(),
+    )
+    github = _github("new-bot")
+    github.get_pull_request = AsyncMock(return_value=info)
+    github.collaborator_permission = AsyncMock(return_value="write")
+    github.upsert_sticky_comment = AsyncMock()
+
+    mock_ctx = SimpleNamespace(id=owner_id, config=AppConfig(), openai_api_key="test-key", jira=None, slack=None)
+    mock_registry = MagicMock()
+    mock_registry.get.return_value = mock_ctx
+    mock_registry.resolve.return_value = RouteResult(owner_id, "exact")
+    mock_registry.default_owner_id = owner_id
+    mock_registry.legacy_default_alias.return_value = legacy_alias
+
+    result = await run_review(
+        session,
+        run.id,
+        settings=github.settings,
+        config=AppConfig(),
+        github=github,
+        publisher=SimpleNamespace(
+            jira=SimpleNamespace(enabled=lambda: False), slack=SimpleNamespace(enabled=lambda: False)
+        ),
+        registry=mock_registry,
+    )
+
+    assert result.status == "skipped"
+    assert github.previous_comment_authors == expected_trusted
+    # The sticky comment lookup trusts exactly these logins.
     assert github.upsert_sticky_comment.await_args.kwargs["marker"] == SIZE_SKIP_MARKER

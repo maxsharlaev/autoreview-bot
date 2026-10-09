@@ -32,11 +32,32 @@ def extract_comment_author_logins(comment_authors: list[Any] | None) -> list[str
     return logins
 
 
-def extract_comment_author_logins_for_owner(comment_authors: list[Any] | None, owner_id: str) -> list[str]:
+LEGACY_OWNER_ID = "default"
+
+
+def effective_owner_id(stored_owner_id: str | None, legacy_default_owner: str | None) -> str:
+    """Owner a stored row belongs to, mapping legacy 'default' rows to their inheritor.
+
+    legacy_default_owner comes from OwnerRegistry.legacy_default_alias(): None keeps
+    'default' rows with the literal 'default' owner.
+    """
+    owner_id = stored_owner_id or LEGACY_OWNER_ID
+    if owner_id == LEGACY_OWNER_ID and legacy_default_owner:
+        return legacy_default_owner
+    return owner_id
+
+
+def extract_comment_author_logins_for_owner(
+    comment_authors: list[Any] | None,
+    owner_id: str,
+    legacy_default_owner: str | None = None,
+) -> list[str]:
     """Extract login strings for a specific owner only.
 
     Only returns logins where:
-    - Old format: always included (backward compatibility, treated as "default")
+    - Old format (plain strings) and new-format entries with owner_id 'default':
+      they belong to the legacy 'default' owner, or to legacy_default_owner when
+      another owner inherits legacy rows (see OwnerRegistry.legacy_default_alias)
     - New format: owner_id matches the specified owner
 
     This ensures comment author deduplication is per-owner.
@@ -47,12 +68,10 @@ def extract_comment_author_logins_for_owner(comment_authors: list[Any] | None, o
     logins = []
     for item in comment_authors:
         if isinstance(item, str):
-            # Old format: include for "default" owner for backward compatibility
-            if owner_id == "default":
+            if effective_owner_id(LEGACY_OWNER_ID, legacy_default_owner) == owner_id:
                 logins.append(item)
         elif isinstance(item, dict) and "login" in item:
-            item_owner_id = item.get("owner_id", "default")
-            if item_owner_id == owner_id:
+            if effective_owner_id(item.get("owner_id"), legacy_default_owner) == owner_id:
                 logins.append(item["login"])
     return logins
 
