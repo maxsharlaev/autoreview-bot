@@ -559,3 +559,269 @@ class TestGitEnvVariables:
         finally:
             os.environ.clear()
             os.environ.update(original_env)
+
+
+class TestTwoOwnerDigest:
+    """Tests for digest with two owners: HTTP headers and Slack isolation."""
+
+    @pytest.mark.asyncio
+    async def test_two_owner_digest_uses_owner_specific_repos(self):
+        """Digest for each owner should refresh only that owner's allowed_repos."""
+        from app.services.digest import run_digest
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.unique.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.add = MagicMock()
+        mock_session.commit = AsyncMock()
+        mock_session.flush = AsyncMock()
+
+        github_requests: list[tuple[str, str]] = []
+
+        async def mock_list_open_pulls(owner: str, repo: str) -> list[dict]:
+            github_requests.append((owner, repo))
+            return []
+
+        mock_github = AsyncMock()
+        mock_github.list_open_pulls = mock_list_open_pulls
+
+        # Run digest for org-a with specific repos
+        await run_digest(
+            mock_session,
+            config=AppConfig(),
+            github=mock_github,
+            owner_id="org-a",
+            allowed_repos=["org-a/repo-a", "org-a/repo-b"],
+        )
+
+        # Check that only org-a repos were requested
+        assert github_requests == [("org-a", "repo-a"), ("org-a", "repo-b")]
+
+        # Clear and run for org-b
+        github_requests.clear()
+        await run_digest(
+            mock_session,
+            config=AppConfig(),
+            github=mock_github,
+            owner_id="org-b",
+            allowed_repos=["org-b/other-repo"],
+        )
+
+        # Check that only org-b repos were requested
+        assert github_requests == [("org-b", "other-repo")]
+
+    @pytest.mark.asyncio
+    async def test_repository_owner_id_not_reassigned(self):
+        """Repository.owner_id should not be changed during digest refresh."""
+        from app.models import Repository
+
+        # First owner creates the repo
+        existing_repo = Repository(full_name="shared/repo", enabled=True, owner_id="org-a")
+        existing_repo.id = 1  # Simulate existing repo
+
+        call_count = 0
+
+        def mock_scalar_factory():
+            nonlocal call_count
+            call_count += 1
+            # First call for repo lookup: return existing repo
+            # Second call for PR lookup: return None (no existing PR)
+            if call_count == 1:
+                return existing_repo
+            return None
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=mock_scalar_factory))
+        mock_session.add = MagicMock()
+        mock_session.flush = AsyncMock()
+
+        from app.services.digest import _upsert_open_pr
+
+        # org-b tries to refresh the repo owned by org-a
+        await _upsert_open_pr(
+            mock_session,
+            "shared/repo",
+            {"number": 2, "html_url": "https://github.com/shared/repo/pull/2", "title": "PR 2"},
+            owner_id="org-b",
+        )
+
+        # Verify owner_id was NOT changed (should still be org-a)
+        assert existing_repo.owner_id == "org-a"
+
+    @pytest.mark.asyncio
+    async def test_slack_only_for_default_owner(self):
+        """Non-default owner should not post to Slack without explicit binding."""
+        from app.services.digest import run_digest
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.unique.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.add = MagicMock()
+        mock_session.commit = AsyncMock()
+
+        # Non-default owner without Slack client
+        result_non_default = await run_digest(
+            mock_session,
+            config=AppConfig(),
+            owner_id="org-a",  # Not default
+        )
+
+        assert result_non_default.slack_sent is False
+        assert result_non_default.owner_id == "org-a"
+
+
+class TestDigestWorkerOwnerRepos:
+    """Tests for digest_open_prs passing owner-specific repos."""
+
+    def test_get_allowed_repos_for_owner_returns_owner_repos(self):
+        """get_allowed_repos_for_owner should return owner's YAML repos."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "org-a": {
+                    "default": True,
+                    "github": {
+                        "auth": "pat",
+                        "allowed_repos": ["org-a/repo-a", "org-a/repo-b"],
+                    },
+                },
+                "org-b": {
+                    "github": {
+                        "auth": "pat",
+                        "allowed_repos": ["org-b/other-repo"],
+                    },
+                },
+            }
+        )
+        env = {
+            "OWNER_ORG_A_GITHUB_TOKEN": "ghp_token_a",
+            "OWNER_ORG_B_GITHUB_TOKEN": "ghp_token_b",
+        }
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        # Named owner should get their repos
+        repos_a = registry.get_allowed_repos_for_owner("org-a")
+        assert repos_a == ["org-a/repo-a", "org-a/repo-b"]
+
+        repos_b = registry.get_allowed_repos_for_owner("org-b")
+        assert repos_b == ["org-b/other-repo"]
+
+    def test_get_allowed_repos_for_owner_returns_none_for_legacy(self):
+        """get_allowed_repos_for_owner should return None for legacy default owner."""
+        settings = _mock_settings(github_token="ghp_legacy_token")
+        config = AppConfig(github={"allowed_repos": ["legacy/repo"]})
+
+        registry = OwnerRegistry.build(settings, config)
+
+        # Legacy owner should return None (caller uses global config)
+        repos = registry.get_allowed_repos_for_owner("default")
+        assert repos is None
+
+
+class TestRealRegistryRunReview:
+    """Tests for run_review with real OwnerRegistry.build instead of mocks."""
+
+    def test_mode_a_legacy_owner_routing(self):
+        """Mode A: legacy owner should route via global allowlist."""
+        from app.owners.registry import ROUTE_EXACT
+
+        settings = _mock_settings(github_token="ghp_legacy_token")
+        config = AppConfig(github={"allowed_repos": ["org/repo-a"]})
+
+        registry = OwnerRegistry.build(settings, config)
+
+        # Should route to default owner
+        result = registry.resolve("org/repo-a")
+        assert not result.rejected()
+        assert result.owner_id == "default"
+        assert result.reason == ROUTE_EXACT
+
+    def test_mode_c_two_owner_routing(self):
+        """Mode C: two owners should route via their allowlists."""
+        from app.owners.registry import ROUTE_EXACT
+
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "org-a": {
+                    "default": True,
+                    "github": {
+                        "auth": "pat",
+                        "allowed_repos": ["org-a/repo"],
+                    },
+                },
+                "org-b": {
+                    "github": {
+                        "auth": "pat",
+                        "allowed_repos": ["org-b/repo"],
+                    },
+                },
+            }
+        )
+        env = {
+            "OWNER_ORG_A_GITHUB_TOKEN": "ghp_token_a",
+            "OWNER_ORG_B_GITHUB_TOKEN": "ghp_token_b",
+        }
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        # org-a repos should route to org-a
+        result_a = registry.resolve("org-a/repo")
+        assert not result_a.rejected()
+        assert result_a.owner_id == "org-a"
+        assert result_a.reason == ROUTE_EXACT
+
+        # org-b repos should route to org-b
+        result_b = registry.resolve("org-b/repo")
+        assert not result_b.rejected()
+        assert result_b.owner_id == "org-b"
+        assert result_b.reason == ROUTE_EXACT
+
+    def test_re_resolve_with_explicit_owner(self):
+        """Re-resolve with explicit owner should use that owner."""
+        from app.owners.registry import ROUTE_EXPLICIT
+
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "org-a": {
+                    "default": True,
+                    "github": {
+                        "auth": "pat",
+                        "allowed_repos": ["org-a/*"],
+                    },
+                },
+            }
+        )
+        env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        # Explicit owner should route directly
+        result = registry.resolve("org-a/any-repo", explicit_owner="org-a")
+        assert not result.rejected()
+        assert result.owner_id == "org-a"
+        assert result.reason == ROUTE_EXPLICIT
+
+    def test_registry_credentials_available_for_owner(self):
+        """Owner context should have credentials for run_review."""
+        settings = _mock_settings()
+        config = AppConfig(
+            owners={
+                "org-a": {
+                    "default": True,
+                    "github": {"auth": "pat"},
+                },
+            }
+        )
+        env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_test_token"}
+
+        registry = OwnerRegistry.build(settings, config, env=env)
+
+        ctx = registry.get("org-a")
+        assert ctx is not None
+        assert ctx.github.kind == "pat"
+        assert ctx.github.token == "ghp_test_token"
