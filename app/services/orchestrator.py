@@ -72,20 +72,25 @@ from app.services.visibility import Visibility, confirmed_visibility
 logger = logging.getLogger(__name__)
 
 
-def _filter_findings_for_owner(findings: list, owner_id: str, session_runs_cache: dict) -> list:
-    """Filter findings to only include those from runs belonging to the specified owner.
+def _filter_findings_for_owner(findings: list, owner_id: str, default_owner_id: str | None = None) -> list:
+    """Filter findings to only include those belonging to the specified owner.
 
     This prevents cross-owner data mixing when a repository changes ownership.
-    Findings are associated with runs via first_seen_run_id; we check that run's owner_id.
+    Findings have owner_id set directly; legacy findings with owner_id='default'
+    are mapped to the registry's default owner at read time.
+
+    Args:
+        findings: List of Finding objects
+        owner_id: The owner ID to filter for
+        default_owner_id: The registry's actual default owner ID (for legacy 'default' mapping)
     """
     result = []
     for finding in findings:
-        run_id = finding.first_seen_run_id
-        if run_id in session_runs_cache:
-            run_owner = session_runs_cache[run_id]
-        else:
-            run_owner = None
-        if run_owner == owner_id:
+        finding_owner = getattr(finding, "owner_id", "default")
+        # Map legacy 'default' to actual default owner when switching from Mode A to C/D
+        if finding_owner == "default" and default_owner_id is not None:
+            finding_owner = default_owner_id
+        if finding_owner == owner_id:
             result.append(finding)
     return result
 
@@ -158,17 +163,6 @@ async def run_review(
         return run
 
     pr = run.pull_request
-
-    # Build cache of run_id -> owner_id for filtering findings by owner
-    # This prevents cross-owner data mixing when a repository changes ownership
-    finding_run_ids = {f.first_seen_run_id for f in pr.findings}
-    run_owner_cache: dict[uuid.UUID, str] = {}
-    if finding_run_ids:
-        runs_result = await session.execute(
-            select(ReviewRun.id, ReviewRun.owner_id).where(ReviewRun.id.in_(finding_run_ids))
-        )
-        for rid, oid in runs_result:
-            run_owner_cache[rid] = oid
     progress = ReviewProgress(run.id, pr.repository.full_name, pr.number, owner_id=run.owner_id)
     started = time.monotonic()
 
@@ -362,8 +356,9 @@ async def run_review(
         jira_warning = "ISSUE_KEY_MISSING"
         progress.event("no Jira key in branch/title/body")
 
-    # Filter findings to only include those from this owner's runs (prevent cross-owner data mixing)
-    owner_findings = _filter_findings_for_owner(pr.findings, owner_id, run_owner_cache)
+    # Filter findings to only include those belonging to this owner (prevent cross-owner data mixing)
+    # Pass registry's default_owner_id to map legacy 'default' findings to actual default owner
+    owner_findings = _filter_findings_for_owner(pr.findings, owner_id, registry.default_owner_id)
 
     previous = []
     for item in owner_findings:
@@ -381,7 +376,7 @@ async def run_review(
                 recommendation=item.recommendation if expose_details else "",
             )
         )
-    previous_head = await _previous_head(session, pr.id, run.id)
+    previous_head = await _previous_head(session, pr.id, run.id, owner_id)
 
     context = build_context(
         repository=pr.repository.full_name,
@@ -592,6 +587,7 @@ async def run_review(
         verified,
         fresh_ids=fresh_ids,
         details_visibility=context_visibility,
+        owner_id=owner_id,
         owner_findings=owner_findings,
     )
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
@@ -1064,12 +1060,20 @@ def _sync_pr(pr: PullRequest, info) -> None:
     pr.is_fork = info.is_fork
 
 
-async def _previous_head(session: AsyncSession, pull_request_id: uuid.UUID, current_run_id: uuid.UUID) -> str | None:
+async def _previous_head(
+    session: AsyncSession, pull_request_id: uuid.UUID, current_run_id: uuid.UUID, owner_id: str
+) -> str | None:
+    """Get the head SHA of the most recent completed run for this owner.
+
+    Filters by owner_id to prevent cross-owner data mixing - a new owner
+    should not see the previous head SHA from another owner's review.
+    """
     result = await session.execute(
         select(ReviewRun)
         .where(
             ReviewRun.pull_request_id == pull_request_id,
             ReviewRun.id != current_run_id,
+            ReviewRun.owner_id == owner_id,  # Filter by owner
             ReviewRun.status == "completed",
         )
         .order_by(ReviewRun.created_at.desc())
@@ -1170,6 +1174,7 @@ async def _store_findings(
     *,
     fresh_ids: set[str],
     details_visibility: Visibility,
+    owner_id: str,
     owner_findings: list | None = None,
 ) -> list[FindingTransitionView]:
     # Use owner_findings to prevent cross-owner data mixing when updating findings
@@ -1185,6 +1190,7 @@ async def _store_findings(
                 pull_request_id=pr.id,
                 first_seen_run_id=run.id,
                 last_seen_run_id=run.id,
+                owner_id=owner_id,
                 stable_id=view.stable_id,
                 severity=view.severity,
                 category=view.category,

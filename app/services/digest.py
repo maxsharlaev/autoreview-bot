@@ -11,9 +11,21 @@ from sqlalchemy.orm import selectinload
 from app.adapters.github import GitHubAppClient
 from app.adapters.slack import SlackClient, SlackError
 from app.config import AppConfig, get_app_config
-from app.models import DigestRun, PullRequest, Repository
+from app.models import DigestRun, Finding, PullRequest, Repository
 
 logger = logging.getLogger(__name__)
+
+
+def _finding_belongs_to_owner(finding: Finding, owner_id: str, default_owner_id: str | None) -> bool:
+    """Check if a finding belongs to the specified owner.
+
+    Maps legacy 'default' findings to the actual default owner when switching
+    from Mode A to C/D.
+    """
+    finding_owner = getattr(finding, "owner_id", "default")
+    if finding_owner == "default" and default_owner_id is not None:
+        finding_owner = default_owner_id
+    return finding_owner == owner_id
 
 
 def _age_hours(created_at: datetime | None) -> float:
@@ -50,7 +62,15 @@ def format_digest_text(payload: dict[str, Any]) -> str:
 async def build_digest_payload(
     session: AsyncSession,
     owner_id: str | None = None,
+    default_owner_id: str | None = None,
 ) -> dict[str, Any]:
+    """Build digest payload for the specified owner.
+
+    Args:
+        session: Database session
+        owner_id: Owner ID to filter PRs by (via repository.owner_id)
+        default_owner_id: Registry's default owner ID for legacy 'default' finding mapping
+    """
     query = (
         select(PullRequest)
         .options(selectinload(PullRequest.repository), selectinload(PullRequest.findings))
@@ -64,8 +84,13 @@ async def build_digest_payload(
     items = []
     blocker_count = 0
     for pr in result.scalars().unique():
+        # Only count blockers from this owner's findings
+        # Map legacy 'default' to actual default owner for consistent filtering
+        owner_findings = [
+            f for f in pr.findings if _finding_belongs_to_owner(f, owner_id or "default", default_owner_id)
+        ]
         has_blockers = any(
-            finding.current_status == "open" and finding.severity in {"P0", "P1"} for finding in pr.findings
+            finding.current_status == "open" and finding.severity in {"P0", "P1"} for finding in owner_findings
         )
         if has_blockers:
             blocker_count += 1
@@ -96,10 +121,18 @@ async def run_digest(
     github: GitHubAppClient | None = None,
     owner_id: str | None = None,
     allowed_repos: list[str] | None = None,
+    default_owner_id: str | None = None,
 ) -> DigestRun:
+    """Run digest for the specified owner.
+
+    Args:
+        default_owner_id: The registry's actual default owner ID, used to map
+            legacy 'default' findings to the actual default owner when switching
+            from Mode A to C/D. Should be passed from OwnerRegistry.default_owner_id.
+    """
     cfg = config or get_app_config()
     effective_owner_id = owner_id or "default"
-    payload = await build_digest_payload(session, owner_id=effective_owner_id)
+    payload = await build_digest_payload(session, owner_id=effective_owner_id, default_owner_id=default_owner_id)
 
     # Use owner's allowed_repos if provided; otherwise fall back to global config
     repos_to_refresh = allowed_repos if allowed_repos is not None else cfg.github.allowed_repos
@@ -119,7 +152,7 @@ async def run_digest(
                 continue
             for raw in pulls:
                 await _upsert_open_pr(session, full_name, raw, owner_id=effective_owner_id)
-        payload = await build_digest_payload(session, owner_id=effective_owner_id)
+        payload = await build_digest_payload(session, owner_id=effective_owner_id, default_owner_id=default_owner_id)
 
     slack_sent = False
     # Non-default owners must use their own Slack binding; no global fallback
