@@ -55,18 +55,46 @@ def _get_alembic_config():
     return config
 
 
-async def _run_migrations(config, target: str) -> None:
-    """Run alembic migrations using async engine."""
+def _run_migrations(config, target: str) -> None:
+    """Run alembic migrations. Called synchronously since alembic handles async internally."""
+    import asyncio
+
     from alembic import command
 
-    command.upgrade(config, target)
+    # Run in a new event loop since we may be called from within pytest's event loop
+    def run_sync():
+        command.upgrade(config, target)
+
+    # If there's a running loop, we need to run in a thread
+    try:
+        asyncio.get_running_loop()
+        # Running inside an event loop - use thread
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            executor.submit(run_sync).result()
+    except RuntimeError:
+        # No running loop - call directly
+        run_sync()
 
 
-async def _downgrade_migrations(config, target: str) -> None:
-    """Run alembic downgrade using async engine."""
+def _downgrade_migrations(config, target: str) -> None:
+    """Run alembic downgrade. Called synchronously since alembic handles async internally."""
+    import asyncio
+
     from alembic import command
 
-    command.downgrade(config, target)
+    def run_sync():
+        command.downgrade(config, target)
+
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            executor.submit(run_sync).result()
+    except RuntimeError:
+        run_sync()
 
 
 @requires_test_postgres
@@ -80,9 +108,9 @@ class TestMigration005:
 
         config = _get_alembic_config()
 
-        # Downgrade to base and upgrade to 004
-        await _downgrade_migrations(config, "base")
-        await _run_migrations(config, "004_finding_details_visibility")
+        # Downgrade to base and upgrade to 004 (sync calls, handle event loop internally)
+        _downgrade_migrations(config, "base")
+        _run_migrations(config, "004_finding_details_visibility")
 
         # Parse connection params from URL
         url = _get_asyncpg_url()
@@ -93,7 +121,7 @@ class TestMigration005:
         yield conn
 
         await conn.close()
-        await _downgrade_migrations(config, "base")
+        _downgrade_migrations(config, "base")
 
     @pytest.mark.asyncio
     async def test_upgrade_adds_owner_id_columns_and_indexes(self, setup_and_teardown):
@@ -101,7 +129,7 @@ class TestMigration005:
         conn = setup_and_teardown
         config = _get_alembic_config()
 
-        await _run_migrations(config, "005_owner_id")
+        _run_migrations(config, "005_owner_id")
 
         # Check repositories.owner_id
         row = await conn.fetchrow("""
@@ -159,7 +187,7 @@ class TestMigration005:
             json.dumps(old_authors),
         )
 
-        await _run_migrations(config, "005_owner_id")
+        _run_migrations(config, "005_owner_id")
 
         row = await conn.fetchrow("SELECT comment_authors, owner_id FROM repositories WHERE id = $1", repo_id)
         assert row is not None
@@ -189,7 +217,7 @@ class TestMigration005:
             json.dumps([]),
         )
 
-        await _run_migrations(config, "005_owner_id")
+        _run_migrations(config, "005_owner_id")
 
         row = await conn.fetchrow("SELECT comment_authors FROM repositories WHERE id = $1", repo_id)
         assert row is not None
@@ -213,14 +241,14 @@ class TestMigration005:
             json.dumps(["user1", "user2"]),
         )
 
-        await _run_migrations(config, "005_owner_id")
+        _run_migrations(config, "005_owner_id")
 
         # Verify owner_id exists
         row = await conn.fetchrow("SELECT owner_id FROM repositories WHERE id = $1", repo_id)
         assert row is not None
         assert row["owner_id"] == "default"
 
-        await _downgrade_migrations(config, "004_finding_details_visibility")
+        _downgrade_migrations(config, "004_finding_details_visibility")
 
         # Verify owner_id column is removed
         row = await conn.fetchrow("""
@@ -240,7 +268,7 @@ class TestMigration005:
         conn = setup_and_teardown
         config = _get_alembic_config()
 
-        await _run_migrations(config, "005_owner_id")
+        _run_migrations(config, "005_owner_id")
 
         repo_id = uuid.uuid4()
         object_authors = [
@@ -259,7 +287,7 @@ class TestMigration005:
             json.dumps(object_authors),
         )
 
-        await _downgrade_migrations(config, "004_finding_details_visibility")
+        _downgrade_migrations(config, "004_finding_details_visibility")
 
         row = await conn.fetchrow("SELECT comment_authors FROM repositories WHERE id = $1", repo_id)
         assert row is not None
