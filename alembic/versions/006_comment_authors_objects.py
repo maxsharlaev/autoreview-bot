@@ -45,11 +45,13 @@ def upgrade() -> None:
         needs_update = False
         for author in authors:
             if isinstance(author, str):
-                new_authors.append({
-                    "login": author,
-                    "owner_id": repo_owner_id,
-                    "kind": None,
-                })
+                new_authors.append(
+                    {
+                        "login": author,
+                        "owner_id": repo_owner_id,
+                        "kind": None,
+                    }
+                )
                 needs_update = True
             elif isinstance(author, dict) and "login" in author:
                 new_authors.append(author)

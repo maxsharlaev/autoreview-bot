@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from app.api.deps import get_session, require_api_key
+from app.api.deps import Principal, get_session, require_principal
 from app.api.v1 import api_router
 from app.config import AppConfig, GitHubYaml, repo_allowed
 from app.services.constants import SKIP_REPO
@@ -58,7 +58,8 @@ def _client(*, with_api_key: bool) -> TestClient:
     application.dependency_overrides[get_session] = _fake_session
     application.state.redis = AsyncMock()
     if with_api_key:
-        application.dependency_overrides[require_api_key] = lambda: None
+        # For /reviews endpoint, override require_principal to return an operator principal
+        application.dependency_overrides[require_principal] = lambda: Principal(kind="operator", owner_id=None)
     return TestClient(application)
 
 
@@ -71,7 +72,12 @@ def test_manual_review_requires_access_key() -> None:
 
 
 def test_manual_review_rejects_unknown_repo() -> None:
-    with patch("app.api.v1.reviews.repo_allowed", return_value=False):
+    from app.owners.registry import REJECT_REPO_NOT_ALLOWED, RouteResult
+
+    mock_registry = MagicMock()
+    mock_registry.resolve.return_value = RouteResult("", REJECT_REPO_NOT_ALLOWED)
+
+    with patch("app.api.v1.reviews.get_owner_registry", return_value=mock_registry):
         response = _client(with_api_key=True).post(
             "/api/v1/reviews",
             json={"repository": "other/repo", "number": 1},

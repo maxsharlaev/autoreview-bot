@@ -1,7 +1,10 @@
-from unittest.mock import patch
+"""Tests for webhook event classification logic.
+
+classify_pull_request_event only handles event type / action filtering and
+PR eligibility (draft, fork). Repo allowlist checks happen after routing.
+"""
 
 from app.api.v1.pull_request import classify_pull_request_event
-from app.config import AppConfig
 from app.services.constants import SKIP_DRAFT, SKIP_FORK
 
 
@@ -36,8 +39,7 @@ def test_ignores_issue_comment() -> None:
 def test_skips_draft() -> None:
     payload = _payload()
     payload["pull_request"]["draft"] = True
-    with patch("app.api.v1.pull_request.repo_allowed", return_value=True):
-        result = classify_pull_request_event("pull_request", payload)
+    result = classify_pull_request_event("pull_request", payload)
     assert result["reason"] == SKIP_DRAFT
 
 
@@ -45,23 +47,20 @@ def test_skips_fork() -> None:
     payload = _payload()
     payload["pull_request"]["head"]["repo"]["fork"] = True
     payload["pull_request"]["head"]["repo"]["full_name"] = "outsider/example-repo"
-    with patch("app.api.v1.pull_request.repo_allowed", return_value=True):
-        result = classify_pull_request_event("pull_request", payload)
+    result = classify_pull_request_event("pull_request", payload)
     assert result["reason"] == SKIP_FORK
 
 
 def test_opened_is_accepted_when_allowlisted() -> None:
+    """Opened event on non-draft, non-fork PR returns None (accept)."""
     payload = _payload()
-    with patch("app.api.v1.pull_request.repo_allowed", return_value=True):
-        assert classify_pull_request_event("pull_request", payload) is None
+    assert classify_pull_request_event("pull_request", payload) is None
 
 
 def test_only_override_label_triggers_review() -> None:
+    """Labeled event must match override_label to trigger review."""
     payload = _payload(action="labeled", label={"name": "other"})
-    with (
-        patch("app.api.v1.pull_request.get_app_config", return_value=AppConfig()),
-        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
-    ):
-        assert classify_pull_request_event("pull_request", payload)["reason"] == "ignored_label"
-        payload["label"]["name"] = "autoreview:force"
-        assert classify_pull_request_event("pull_request", payload) is None
+    # Uses default override_label from AppConfig ("autoreview:force")
+    assert classify_pull_request_event("pull_request", payload)["reason"] == "ignored_label"
+    payload["label"]["name"] = "autoreview:force"
+    assert classify_pull_request_event("pull_request", payload) is None

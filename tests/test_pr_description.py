@@ -9,7 +9,7 @@ import jsonschema
 import pytest
 from app.adapters.github import ChangedFile, GitHubError, PullRequestInfo
 from app.adapters.jira import JiraIssue
-from app.config import AppConfig, LanguageYaml, PrDescriptionYaml, PrTextYaml, Settings, load_yaml_config
+from app.config import AppConfig, LanguageYaml, PrDescriptionYaml, PrTextYaml, load_yaml_config
 from app.services.orchestrator import _publish_pr_description
 from app.services.pr_description import (
     BLOCK_END,
@@ -394,7 +394,7 @@ async def test_orchestrator_updates_body_without_jira(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=config,
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     body = github.update_pull_request_body.await_args.args[3]
     assert body.startswith("Author text")
@@ -419,7 +419,7 @@ async def test_stale_head_never_publishes(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True)),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     codex.assert_not_awaited()
 
@@ -439,7 +439,7 @@ async def test_draft_and_fork_prs_do_not_generate_text(tmp_path, field: str, val
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True)),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     codex.assert_not_awaited()
 
@@ -460,7 +460,7 @@ async def test_author_edit_before_publish_is_preserved(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, mode="append")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     github.update_pull_request_body.assert_not_awaited()
 
@@ -482,7 +482,7 @@ async def test_comment_mode_uses_separate_sticky_comment(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, mode="comment")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     assert github.upsert_sticky_comment.await_args.kwargs["marker"] == COMMENT_MARKER
     github.update_pull_request_body.assert_not_awaited()
@@ -507,7 +507,7 @@ async def test_invalid_title_is_replaced_without_title_warning(tmp_path) -> None
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, title_mode="when_invalid_or_inconsistent")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         pr=pr,
     )
     assert github.update_pull_request_title.await_args.args[-1] == "feat: validate form inputs"
@@ -534,7 +534,7 @@ async def test_title_update_failure_still_posts_description(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, title_mode="until_human_edit")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         pr=pr,
     )
     assert "## Title check" in github.upsert_sticky_comment.await_args.args[-1]
@@ -569,7 +569,7 @@ async def test_bot_title_is_committed_before_description_update(tmp_path) -> Non
             config=AppConfig(
                 pr_description=PrDescriptionYaml(enabled=True, mode="append", title_mode="until_human_edit")
             ),
-            settings=Settings.model_construct(openai_api_key="test"),
+            openai_api_key="test",
             pr=pr,
         )
     assert pr.bot_title == "feat: validate form inputs ABC-1"
@@ -595,7 +595,7 @@ async def test_human_title_is_preserved_and_suggestion_is_visible(tmp_path) -> N
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, title_mode="when_invalid_or_inconsistent")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         pr=SimpleNamespace(bot_title=None, bot_title_source_hash=None, title="Dev"),
     )
     github.update_pull_request_title.assert_not_awaited()
@@ -629,7 +629,7 @@ async def test_wrong_language_retries_once_before_publication(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=AppConfig(pr_text=PrTextYaml(language="auto"), pr_description=PrDescriptionYaml(enabled=True)),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     assert codex.await_count == 2
     assert "## Кратко" in github.upsert_sticky_comment.await_args.args[-1]
@@ -653,7 +653,7 @@ async def test_two_wrong_language_outputs_do_not_publish(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=AppConfig(pr_text=PrTextYaml(language="auto"), pr_description=PrDescriptionYaml(enabled=True)),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     assert codex.await_count == 2
     github.upsert_sticky_comment.assert_not_awaited()
@@ -692,7 +692,7 @@ async def test_other_language_uses_independent_check_and_retries(tmp_path) -> No
         files=[],
         jira_issue=None,
         config=AppConfig(pr_text=PrTextYaml(language="fr"), pr_description=PrDescriptionYaml(enabled=True)),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     assert codex.await_count == 4
     assert "language code fr" in codex.await_args_list[0].kwargs["prompt"]
