@@ -76,6 +76,8 @@ class OwnerRegistry:
     installation_claims: dict[int, str] = field(default_factory=dict)  # installation_id -> owner_id
     # Store owner YAMLs for allowlist lookups
     _owner_yamls: dict[str, OwnerYaml] = field(default_factory=dict, repr=False)
+    # Track disabled owners (for owner_disabled vs owner_not_configured distinction)
+    disabled_owners: set[str] = field(default_factory=set)
 
     def get(self, owner_id: str) -> OwnerContext | None:
         """Get owner by id or alias (case-insensitive)."""
@@ -94,17 +96,41 @@ class OwnerRegistry:
         """Resolve alias and case to the canonical owner_id.
 
         Returns the canonical owner_id or None if the owner doesn't exist.
+        Also returns None for disabled owners (caller must check is_disabled).
         """
         owner_lower = owner_id.lower()
         # Try case-insensitive alias match
         for alias, target in self.aliases.items():
             if alias.lower() == owner_lower:
+                # Disabled owners return None from canonicalize
+                if target in self.disabled_owners:
+                    return None
                 return target
         # Try case-insensitive owner_id match
         for oid in self.owners:
             if oid.lower() == owner_lower:
                 return oid
+        # Check disabled owners (return None - caller must use is_disabled)
+        for oid in self.disabled_owners:
+            if oid.lower() == owner_lower:
+                return None
         return None
+
+    def is_disabled(self, owner_id: str) -> bool:
+        """Check if owner exists but is disabled (case-insensitive, alias-aware).
+
+        Returns True if the owner (or its alias target) is disabled.
+        """
+        owner_lower = owner_id.lower()
+        # Try alias match
+        for alias, target in self.aliases.items():
+            if alias.lower() == owner_lower:
+                return target in self.disabled_owners
+        # Try direct owner_id match
+        for oid in self.disabled_owners:
+            if oid.lower() == owner_lower:
+                return True
+        return False
 
     def get_default(self) -> OwnerContext | None:
         """Get the default owner context, or None if no owners are configured."""
@@ -154,6 +180,11 @@ class OwnerRegistry:
                     if oid.lower() == explicit_lower:
                         resolved_id = oid
                         break
+            # Check if the owner is disabled (return owner_disabled, not unknown_owner)
+            if resolved_id is None:
+                for oid in self.disabled_owners:
+                    if oid.lower() == explicit_lower:
+                        return RouteResult("", REJECT_OWNER_DISABLED)
             if resolved_id is None:
                 return RouteResult("", REJECT_UNKNOWN_OWNER)
             ctx = self.owners.get(resolved_id)
@@ -348,6 +379,7 @@ class OwnerRegistry:
         owners: dict[str, OwnerContext] = {}
         aliases: dict[str, str] = {}
         warnings: list[str] = []
+        disabled_owners_set: set[str] = set()
         default_owner_id: str | None = None
 
         if has_legacy_github:
@@ -393,6 +425,7 @@ class OwnerRegistry:
                     aliases[alias] = owner_id
 
                 if not owner_yaml.enabled:
+                    disabled_owners_set.add(owner_id)
                     continue
 
                 ctx = _build_owner_context(
@@ -459,6 +492,7 @@ class OwnerRegistry:
                 default_owner_id="",
                 routing=routing,
                 warnings=warnings,
+                disabled_owners=set(),
             )
 
         if default_owner_id is None and owners:
@@ -473,6 +507,7 @@ class OwnerRegistry:
                 default_owner_id="",
                 routing=routing,
                 warnings=warnings,
+                disabled_owners=disabled_owners_set,
             )
 
         # Build allowed_repos map for validation
@@ -500,6 +535,7 @@ class OwnerRegistry:
             wildcard_claims=wildcard_claims,
             installation_claims=installation_claims,
             _owner_yamls=owners_yaml,
+            disabled_owners=disabled_owners_set,
         )
 
 
