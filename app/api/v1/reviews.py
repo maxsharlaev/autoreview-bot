@@ -12,6 +12,7 @@ from app.api.deps import OwnerSelectorDep, PrincipalDep, SessionDep, get_redis
 from app.metrics import record_routing
 from app.models import PullRequest, ReviewRun
 from app.owners.registry import (
+    REJECT_OWNER_DISABLED,
     REJECT_OWNER_REPO_CONFLICT,
     REJECT_REPO_NOT_ALLOWED,
     REJECT_UNKNOWN_OWNER,
@@ -43,12 +44,24 @@ async def start_review(
 
     if principal.kind == "owner":
         # Owner-scoped key: can only use their own owner
-        if owner_selector and owner_selector != principal.owner_id:
-            raise HTTPException(status_code=403, detail="owner_forbidden")
+        # Compare after canonicalizing selector (case-insensitive, alias-aware)
+        if owner_selector:
+            canonical_selector = registry.canonicalize(owner_selector)
+            # If selector is unknown/disabled, it will fail in routing below
+            if canonical_selector is not None and canonical_selector != principal.owner_id:
+                raise HTTPException(status_code=403, detail="owner_forbidden")
         effective_owner = principal.owner_id
     else:
         # Operator key: can specify any owner or use routing
-        effective_owner = owner_selector
+        # Canonicalize the selector if provided
+        if owner_selector:
+            canonical = registry.canonicalize(owner_selector)
+            # If disabled owner, check is_disabled to give proper error
+            if canonical is None and registry.is_disabled(owner_selector):
+                raise HTTPException(status_code=403, detail="owner_disabled")
+            effective_owner = canonical if canonical else owner_selector
+        else:
+            effective_owner = None
 
     # Route to determine owner if not explicitly set
     if effective_owner:
@@ -58,6 +71,8 @@ async def start_review(
             record_routing(owner="", reason=route.reason, rejected=True)
             if route.reason == REJECT_UNKNOWN_OWNER:
                 raise HTTPException(status_code=404, detail="unknown_owner")
+            if route.reason == REJECT_OWNER_DISABLED:
+                raise HTTPException(status_code=403, detail="owner_disabled")
             if route.reason == REJECT_OWNER_REPO_CONFLICT:
                 raise HTTPException(status_code=409, detail="owner_repo_conflict")
             if route.reason == REJECT_REPO_NOT_ALLOWED:
@@ -69,6 +84,8 @@ async def start_review(
             record_routing(owner="", reason=route.reason, rejected=True)
             if route.reason == REJECT_UNKNOWN_OWNER:
                 raise HTTPException(status_code=403, detail="unknown_owner")
+            if route.reason == REJECT_OWNER_DISABLED:
+                raise HTTPException(status_code=403, detail="owner_disabled")
             if route.reason == REJECT_REPO_NOT_ALLOWED:
                 raise HTTPException(status_code=403, detail=SKIP_REPO)
             raise HTTPException(status_code=403, detail=route.reason)
@@ -121,6 +138,7 @@ async def start_review(
         trigger="manual",
         force=body.force,
         owner_id=owner_id,
+        route_reason=route.reason,
     )
     return {
         "status": run.status,
