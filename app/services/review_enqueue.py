@@ -78,6 +78,7 @@ async def queue_review(
     pr.issue_key = extract_issue_key(human_title, pr.head_ref, without_managed_block(pr_payload.get("body") or ""))
     await session.flush()
 
+    # Only reuse runs from the SAME owner to prevent cross-owner data mixing
     existing = (
         (
             await session.execute(
@@ -85,6 +86,7 @@ async def queue_review(
                 .where(
                     ReviewRun.pull_request_id == pr.id,
                     ReviewRun.head_sha == head_sha,
+                    ReviewRun.owner_id == owner_id,  # Must match owner
                     ReviewRun.status.in_(ACTIVE_RUN_STATUSES),
                 )
                 .order_by(ReviewRun.created_at.desc())
@@ -117,11 +119,13 @@ async def queue_review(
             existing.status = "cancelled"
             await session.flush()
 
+    # Only cancel in-flight runs from the SAME owner
     in_flight = (
         (
             await session.execute(
                 select(ReviewRun).where(
                     ReviewRun.pull_request_id == pr.id,
+                    ReviewRun.owner_id == owner_id,  # Must match owner
                     ReviewRun.status.in_(IN_FLIGHT_STATUSES),
                     ReviewRun.head_sha != head_sha,
                 )

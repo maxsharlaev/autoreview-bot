@@ -72,6 +72,24 @@ from app.services.visibility import Visibility, confirmed_visibility
 logger = logging.getLogger(__name__)
 
 
+def _filter_findings_for_owner(findings: list, owner_id: str, session_runs_cache: dict) -> list:
+    """Filter findings to only include those from runs belonging to the specified owner.
+
+    This prevents cross-owner data mixing when a repository changes ownership.
+    Findings are associated with runs via first_seen_run_id; we check that run's owner_id.
+    """
+    result = []
+    for finding in findings:
+        run_id = finding.first_seen_run_id
+        if run_id in session_runs_cache:
+            run_owner = session_runs_cache[run_id]
+        else:
+            run_owner = None
+        if run_owner == owner_id:
+            result.append(finding)
+    return result
+
+
 async def _remember_comment_author(
     session: AsyncSession,
     github: GitHubAppClient,
@@ -140,6 +158,17 @@ async def run_review(
         return run
 
     pr = run.pull_request
+
+    # Build cache of run_id -> owner_id for filtering findings by owner
+    # This prevents cross-owner data mixing when a repository changes ownership
+    finding_run_ids = {f.first_seen_run_id for f in pr.findings}
+    run_owner_cache: dict[uuid.UUID, str] = {}
+    if finding_run_ids:
+        runs_result = await session.execute(
+            select(ReviewRun.id, ReviewRun.owner_id).where(ReviewRun.id.in_(finding_run_ids))
+        )
+        for rid, oid in runs_result:
+            run_owner_cache[rid] = oid
     progress = ReviewProgress(run.id, pr.repository.full_name, pr.number, owner_id=run.owner_id)
     started = time.monotonic()
 
@@ -333,8 +362,11 @@ async def run_review(
         jira_warning = "ISSUE_KEY_MISSING"
         progress.event("no Jira key in branch/title/body")
 
+    # Filter findings to only include those from this owner's runs (prevent cross-owner data mixing)
+    owner_findings = _filter_findings_for_owner(pr.findings, owner_id, run_owner_cache)
+
     previous = []
-    for item in pr.findings:
+    for item in owner_findings:
         expose_details = visibility == "private" or getattr(item, "details_visibility", None) == "public"
         previous.append(
             PreviousFinding(
@@ -527,10 +559,11 @@ async def run_review(
     verified.coverage["files_reviewed"] = context.files_reviewed
     verified.coverage["skipped_paths"] = context.skipped_paths
     fresh_ids = {item.stable_id for item in verified.findings}
-    _carry_open_previous(verified, pr.findings, config.language.details, visibility=visibility)
+    # Use owner_findings to prevent cross-owner data mixing
+    _carry_open_previous(verified, owner_findings, config.language.details, visibility=visibility)
     redacted_prior_ids = {
         item.stable_id
-        for item in pr.findings
+        for item in owner_findings
         if getattr(item, "details_visibility", None) != "public"
         and (
             item.stable_id not in fresh_ids
@@ -553,7 +586,13 @@ async def run_review(
         if publication == "public_fallback":
             visibility = "public"
     transitions = await _store_findings(
-        session, pr, run, verified, fresh_ids=fresh_ids, details_visibility=context_visibility
+        session,
+        pr,
+        run,
+        verified,
+        fresh_ids=fresh_ids,
+        details_visibility=context_visibility,
+        owner_findings=owner_findings,
     )
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
@@ -1131,8 +1170,11 @@ async def _store_findings(
     *,
     fresh_ids: set[str],
     details_visibility: Visibility,
+    owner_findings: list | None = None,
 ) -> list[FindingTransitionView]:
-    existing = {item.stable_id: item for item in pr.findings}
+    # Use owner_findings to prevent cross-owner data mixing when updating findings
+    findings_to_use = owner_findings if owner_findings is not None else pr.findings
+    existing = {item.stable_id: item for item in findings_to_use}
     previous_map = {item.stable_id: item for item in verified.previous_findings}
     transitions: list[FindingTransitionView] = []
 
