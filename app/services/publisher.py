@@ -48,14 +48,25 @@ class Publisher:
 
         This is a stub for M2. In M1, we only need backward compatibility.
         M2 will implement building adapters from context.github, context.jira, context.slack.
+
+        IMPORTANT: When the owner has no Jira/Slack binding, we create explicitly disabled
+        clients that never read global settings. This prevents cross-owner data leaks.
         """
         github = GitHubAppClient.from_credentials(
             context.github,
             owner_id=context.id,
             previous_comment_authors=previous_comment_authors,
         )
-        jira = JiraClient.from_binding(context.jira, context.config) if context.jira else JiraClient(context.config)
-        slack = SlackClient.from_binding(context.slack) if context.slack else SlackClient(context.config)
+        jira = (
+            JiraClient.from_binding(context.jira, context.config)
+            if context.jira
+            else JiraClient.disabled(context.config)
+        )
+        slack = (
+            SlackClient.from_binding(context.slack, context.config)
+            if context.slack
+            else SlackClient.disabled(context.config)
+        )
         return cls(github=github, jira=jira, slack=slack, config=context.config)
 
     async def publish(

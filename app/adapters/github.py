@@ -103,7 +103,7 @@ class GitHubAppClient:
     The module-level caches are keyed by (app_id, installation_id) to support multi-owner.
     """
 
-    settings: Settings = field(default_factory=get_settings)
+    settings: Settings | None = field(default=None)
     previous_comment_authors: tuple[str, ...] = ()
     owner_id: str = "default"
 
@@ -115,6 +115,11 @@ class GitHubAppClient:
     _token_expires: float = field(default=0.0, repr=False)
     _installation_id: int = field(default=0, repr=False)
 
+    def __post_init__(self) -> None:
+        # Legacy mode: load settings if not provided and no credentials
+        if self.settings is None and self._credentials is None:
+            self.settings = get_settings()
+
     @classmethod
     def from_credentials(
         cls,
@@ -122,9 +127,12 @@ class GitHubAppClient:
         owner_id: str = "default",
         previous_comment_authors: tuple[str, ...] = (),
     ) -> GitHubAppClient:
-        """Create a client from owner credentials."""
+        """Create a client from owner credentials.
+
+        Does NOT read global settings - uses only the credential values.
+        """
         return cls(
-            settings=get_settings(),
+            settings=None,  # Owner clients don't use settings
             previous_comment_authors=previous_comment_authors,
             owner_id=owner_id,
             _credentials=credentials,
@@ -136,16 +144,22 @@ class GitHubAppClient:
             if self._credentials.kind == "pat":
                 return self._credentials.token or ""
             return ""
+        if self.settings is None:
+            return ""
         return (self.settings.github_token or "").strip()
 
     def _app_id(self) -> int:
         if self._credentials is not None:
             return self._credentials.app_id or 0
+        if self.settings is None:
+            return 0
         return self.settings.github_app_id
 
     def _private_key_pem(self) -> str:
         if self._credentials is not None:
             return self._credentials.private_key_pem or ""
+        if self.settings is None:
+            return ""
         return self.settings.github_private_key_pem()
 
     def _jwt(self) -> str:
@@ -187,10 +201,15 @@ class GitHubAppClient:
         return response
 
     def _is_installation_id_static(self) -> bool:
-        """Return True if installation_id is statically configured (no retry needed)."""
+        """Return True if installation_id is statically configured (no lookup needed).
+
+        Only applies when the installation_id comes from credentials or (for legacy mode)
+        from global settings. Owner clients with installation_id=0 always need lookup.
+        """
         if self._credentials is not None and self._credentials.installation_id:
             return True
-        if self.settings.github_installation_id:
+        # Global settings only apply to legacy mode (no credentials, settings present)
+        if self._credentials is None and self.settings and self.settings.github_installation_id:
             return True
         return False
 
@@ -203,11 +222,14 @@ class GitHubAppClient:
             self._installation_id = self._credentials.installation_id
             return self._installation_id
 
-        # Check legacy settings
-        configured = self.settings.github_installation_id
-        if configured:
-            self._installation_id = configured
-            return configured
+        # Check legacy settings ONLY when not using owner credentials.
+        # Owner clients with installation_id=0 must always look up their own installation,
+        # never inherit the global setting (which belongs to the legacy/default owner).
+        if self._credentials is None and self.settings:
+            configured = self.settings.github_installation_id
+            if configured:
+                self._installation_id = configured
+                return configured
 
         # Check module-level cache by (app_id, full_name) with TTL
         app_id = self._app_id()

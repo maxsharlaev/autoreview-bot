@@ -66,15 +66,32 @@ class JiraClient:
         self._projects: dict[str, str] = {k: v.rework_status for k, v in self.config.jira.projects.items()}
 
     @classmethod
-    def from_binding(cls, binding: JiraBinding, config: AppConfig | None = None) -> JiraClient:
-        """Create a client from an owner's Jira binding."""
+    def from_binding(cls, binding: JiraBinding, config: AppConfig) -> JiraClient:
+        """Create a client from an owner's Jira binding.
+
+        Does NOT read global settings - uses only the binding values.
+        """
         instance = cls.__new__(cls)
-        instance.settings = get_settings()
-        instance.config = config or get_app_config()
+        instance.config = config
         instance.base_url = binding.base_url
         instance.email = binding.email
         instance.token = binding.api_token
         instance._projects = dict(binding.projects)
+        return instance
+
+    @classmethod
+    def disabled(cls, config: AppConfig) -> JiraClient:
+        """Create a disabled client that never reads settings or makes HTTP calls.
+
+        Used when an owner context has no Jira binding - ensures we never
+        accidentally inherit the global owner's Jira credentials.
+        """
+        instance = cls.__new__(cls)
+        instance.config = config
+        instance.base_url = ""
+        instance.email = ""
+        instance.token = ""
+        instance._projects = {}
         return instance
 
     def enabled(self) -> bool:

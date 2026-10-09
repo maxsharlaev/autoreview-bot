@@ -35,14 +35,30 @@ class SlackClient:
         self._token = self.settings.slack_bot_token
 
     @classmethod
-    def from_binding(cls, binding: SlackBinding) -> SlackClient:
-        """Create a client from an owner's Slack binding."""
+    def from_binding(cls, binding: SlackBinding, config: AppConfig) -> SlackClient:
+        """Create a client from an owner's Slack binding.
+
+        Does NOT read global settings - uses only the binding values.
+        """
         instance = cls.__new__(cls)
-        instance.settings = get_settings()
-        instance.config = get_app_config()
+        instance.config = config
         instance._enabled = binding.enabled
         instance._channel = binding.channel
         instance._token = binding.bot_token
+        return instance
+
+    @classmethod
+    def disabled(cls, config: AppConfig) -> SlackClient:
+        """Create a disabled client that never reads settings or makes HTTP calls.
+
+        Used when an owner context has no Slack binding - ensures we never
+        accidentally inherit the global owner's Slack credentials.
+        """
+        instance = cls.__new__(cls)
+        instance.config = config
+        instance._enabled = False
+        instance._channel = ""
+        instance._token = ""
         return instance
 
     def enabled(self) -> bool:
