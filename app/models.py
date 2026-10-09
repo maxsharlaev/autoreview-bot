@@ -137,7 +137,7 @@ class ReviewRun(TimestampMixin, Base):
 
 class Finding(TimestampMixin, Base):
     __tablename__ = "findings"
-    __table_args__ = (UniqueConstraint("pull_request_id", "stable_id", name="uq_findings_pr_stable"),)
+    __table_args__ = (UniqueConstraint("pull_request_id", "owner_id", "stable_id", name="uq_findings_pr_owner_stable"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pull_request_id: Mapped[uuid.UUID] = mapped_column(
@@ -149,6 +149,7 @@ class Finding(TimestampMixin, Base):
     last_seen_run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("review_runs.id", ondelete="CASCADE"), nullable=False
     )
+    owner_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False, index=True)
     stable_id: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(8), nullable=False)
     category: Mapped[str] = mapped_column(String(64), default="", nullable=False)
