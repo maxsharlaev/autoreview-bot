@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from app.adapters.github import GitHubAppClient, GitHubError, PullRequestInfo
 from app.config import AppConfig, Settings
+from app.models import extract_comment_author_logins
 from app.services.orchestrator import _remember_comment_author, run_review
 from app.services.size_guard import SIZE_SKIP_MARKER
 
@@ -29,6 +30,10 @@ async def test_comment_author_is_persisted_before_publication() -> None:
 
     await _remember_comment_author(session, github, repository, "org", "repo")
 
+    # M1 writes plain strings for backward compatibility; tolerant reader handles both formats
+    logins = extract_comment_author_logins(repository.comment_authors)
+    assert logins == ["old-bot", "new-bot"]
+    # Verify the raw format is plain strings in M1
     assert repository.comment_authors == ["old-bot", "new-bot"]
     assert github.previous_comment_authors == ("old-bot", "new-bot")
     session.commit.assert_awaited_once()
@@ -45,7 +50,9 @@ async def test_comment_author_registry_ignores_case_only_changes() -> None:
 
     await _remember_comment_author(session, github, repository, "org", "repo")
 
-    assert repository.comment_authors == ["Review-Bot"]
+    # No new entry added since same login (case-insensitive)
+    logins = extract_comment_author_logins(repository.comment_authors)
+    assert logins == ["Review-Bot"]
     assert github.previous_comment_authors == ("Review-Bot",)
     session.commit.assert_awaited_once()
 
@@ -120,6 +127,7 @@ async def test_hard_limit_uses_persisted_author_after_credential_change() -> Non
     )
 
     assert result.status == "skipped"
-    assert repository.comment_authors == ["old-bot", "new-bot"]
+    logins = extract_comment_author_logins(repository.comment_authors)
+    assert logins == ["old-bot", "new-bot"]
     assert github.previous_comment_authors == ("old-bot", "new-bot")
     assert github.upsert_sticky_comment.await_args.kwargs["marker"] == SIZE_SKIP_MARKER

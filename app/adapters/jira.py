@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 
 from app.config import AppConfig, get_app_config, get_settings
+
+if TYPE_CHECKING:
+    from app.owners.context import JiraBinding
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +50,55 @@ def adf_to_text(node: object) -> str:
 
 
 class JiraClient:
+    """Jira API client supporting both legacy config and owner bindings.
+
+    Can be constructed in two ways:
+    1. Legacy: JiraClient() or JiraClient(config) - uses global settings
+    2. Owner context: JiraClient.from_binding(binding, config) - uses owner-specific Jira binding
+    """
+
     def __init__(self, config: AppConfig | None = None) -> None:
         self.settings = get_settings()
         self.config = config or get_app_config()
         self.base_url = (self.config.jira.base_url or self.settings.jira_base_url).rstrip("/")
         self.email = self.config.jira.email or self.settings.jira_email
         self.token = self.settings.jira_api_token
+        self._projects: dict[str, str] = {k: v.rework_status for k, v in self.config.jira.projects.items()}
+
+    @classmethod
+    def from_binding(cls, binding: JiraBinding, config: AppConfig) -> JiraClient:
+        """Create a client from an owner's Jira binding.
+
+        Does NOT read global settings - uses only the binding values.
+        """
+        instance = cls.__new__(cls)
+        instance.config = config
+        instance.base_url = binding.base_url
+        instance.email = binding.email
+        instance.token = binding.api_token
+        instance._projects = dict(binding.projects)
+        return instance
+
+    @classmethod
+    def disabled(cls, config: AppConfig) -> JiraClient:
+        """Create a disabled client that never reads settings or makes HTTP calls.
+
+        Used when an owner context has no Jira binding - ensures we never
+        accidentally inherit the global owner's Jira credentials.
+        """
+        instance = cls.__new__(cls)
+        instance.config = config
+        instance.base_url = ""
+        instance.email = ""
+        instance.token = ""
+        instance._projects = {}
+        return instance
 
     def enabled(self) -> bool:
         return bool(self.base_url and self.email and self.token)
 
     def project_allowed(self, issue_key: str) -> bool:
-        projects = self.config.jira.projects
+        projects = self._projects
         if not projects:
             return True
         prefix = issue_key.split("-", 1)[0]
@@ -65,9 +106,8 @@ class JiraClient:
 
     def rework_status(self, issue_key: str) -> str:
         prefix = issue_key.split("-", 1)[0]
-        project = self.config.jira.projects.get(prefix)
-        if project:
-            return project.rework_status
+        if prefix in self._projects:
+            return self._projects[prefix]
         return "In Progress"
 
     def _auth(self) -> tuple[str, str]:

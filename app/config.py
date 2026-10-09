@@ -134,6 +134,12 @@ class CodexYaml(BaseModel):
     max_file_bytes: int = 524288
 
 
+class RoutingYaml(BaseModel, extra="forbid"):
+    """Routing configuration for unclaimed repos."""
+
+    unclaimed: Literal["default", "reject"] = "default"
+
+
 class AppConfig(BaseModel):
     github: GitHubYaml = Field(default_factory=GitHubYaml)
     jira: JiraYaml = Field(default_factory=JiraYaml)
@@ -146,6 +152,12 @@ class AppConfig(BaseModel):
     size_guard: SizeGuardYaml = Field(default_factory=SizeGuardYaml)
     public_repos: PublicReposYaml = Field(default_factory=PublicReposYaml)
     codex: CodexYaml = Field(default_factory=CodexYaml)
+
+    # Multi-owner support (M1): owners block and routing config
+    # Raw dicts are validated in app.owners.registry.OwnerRegistry.build()
+    # The YAML ignores unknown keys (model default), allowing old code to read new configs
+    owners: dict[str, dict] = Field(default_factory=dict)
+    routing: RoutingYaml = Field(default_factory=RoutingYaml)
 
 
 class Settings(BaseSettings):

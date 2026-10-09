@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from app.adapters.github import GitHubAppClient
 from app.adapters.jira import JiraClient, JiraError
@@ -9,10 +10,22 @@ from app.config import AppConfig, get_app_config
 from app.services.comment_render import RenderInput, render_jira_comment, render_slack_review, render_sticky_comment
 from app.services.verifier import VerifiedReview
 
+if TYPE_CHECKING:
+    from app.owners.context import OwnerContext
+
 logger = logging.getLogger(__name__)
 
 
 class Publisher:
+    """Publishes review results to GitHub, Jira, and Slack.
+
+    Can be constructed in two ways:
+    1. Legacy: Publisher(github, jira, slack, config) - uses provided or default adapters
+    2. Owner context: Publisher.from_context(context) - builds adapters from owner bindings
+
+    The from_context method is a stub for M2; in M1 we only ensure the interface is compatible.
+    """
+
     def __init__(
         self,
         github: GitHubAppClient,
@@ -24,6 +37,37 @@ class Publisher:
         self.jira = jira or JiraClient()
         self.slack = slack or SlackClient()
         self.config = config or get_app_config()
+
+    @classmethod
+    def from_context(
+        cls,
+        context: OwnerContext,
+        previous_comment_authors: tuple[str, ...] = (),
+    ) -> Publisher:
+        """Build a Publisher from an owner context.
+
+        This is a stub for M2. In M1, we only need backward compatibility.
+        M2 will implement building adapters from context.github, context.jira, context.slack.
+
+        IMPORTANT: When the owner has no Jira/Slack binding, we create explicitly disabled
+        clients that never read global settings. This prevents cross-owner data leaks.
+        """
+        github = GitHubAppClient.from_credentials(
+            context.github,
+            owner_id=context.id,
+            previous_comment_authors=previous_comment_authors,
+        )
+        jira = (
+            JiraClient.from_binding(context.jira, context.config)
+            if context.jira
+            else JiraClient.disabled(context.config)
+        )
+        slack = (
+            SlackClient.from_binding(context.slack, context.config)
+            if context.slack
+            else SlackClient.disabled(context.config)
+        )
+        return cls(github=github, jira=jira, slack=slack, config=context.config)
 
     async def publish(
         self,

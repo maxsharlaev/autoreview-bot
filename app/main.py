@@ -10,6 +10,7 @@ from app.api.v1 import api_router
 from app.config import get_app_config, get_settings
 from app.db import create_engine, create_session_factory
 from app.logging_setup import configure_logging
+from app.owners.registry import OwnerConfigError, OwnerRegistry
 from app.queue import create_redis_pool
 from app.security.webhook_config import (
     WEBHOOK_SECRET_MIN_LENGTH,
@@ -23,7 +24,30 @@ logger = logging.getLogger(__name__)
 def _validate_startup_config() -> None:
     """Validate configuration at startup. Logs warnings for missing optional config."""
     settings = get_settings()
+    app_config = get_app_config()
 
+    # Build and validate owner registry (M1: validates config, logs warnings)
+    try:
+        registry = OwnerRegistry.build(settings, app_config)
+        for warning in registry.warnings:
+            logger.warning("Owner config: %s", warning)
+
+        owner_ids = list(registry.owners.keys())
+        if not owner_ids:
+            logger.info("Owner registry: legacy mode, no GitHub credentials")
+        elif len(owner_ids) == 1 and owner_ids[0] == "default":
+            logger.info("Owner registry: legacy single-owner mode (owner=default)")
+        else:
+            logger.info(
+                "Owner registry: %d owner(s) configured, default=%s",
+                len(owner_ids),
+                registry.default_owner_id,
+            )
+    except OwnerConfigError as exc:
+        logger.error("Owner configuration error: %s", exc)
+        raise SystemExit(1) from exc
+
+    # Legacy webhook validation (use registry's default owner secret in M2)
     valid, reason = is_webhook_secret_valid(settings.github_webhook_secret)
     if not valid:
         set_webhook_config(enabled=False, secret="")
@@ -37,7 +61,6 @@ def _validate_startup_config() -> None:
     else:
         set_webhook_config(enabled=True, secret=settings.github_webhook_secret)
 
-    app_config = get_app_config()
     if valid and not app_config.github.allowed_repos:
         logger.warning(
             "github.allowed_repos is empty: webhook accepts requests from any repository. "
