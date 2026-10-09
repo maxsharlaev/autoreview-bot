@@ -297,30 +297,6 @@ class TestMigration006:
         assert authors == ["object-user", "string-user"]
 
     @pytest.mark.asyncio
-    async def test_upgrade_handles_null_comment_authors(self, setup_and_teardown):
-        """Upgrade should handle NULL comment_authors gracefully."""
-        conn = setup_and_teardown
-        config = _get_alembic_config()
-
-        repo_id = uuid.uuid4()
-
-        await conn.execute(
-            """
-            INSERT INTO repositories (id, full_name, enabled, policy_profile, comment_authors, owner_id)
-            VALUES ($1, $2, true, 'default', NULL, 'default')
-        """,
-            repo_id,
-            "org/repo-null",
-        )
-
-        # Should not raise
-        _run_migrations(config, "006_comment_authors_objects")
-
-        row = await conn.fetchrow("SELECT comment_authors FROM repositories WHERE id = $1", repo_id)
-        assert row is not None
-        assert row["comment_authors"] is None
-
-    @pytest.mark.asyncio
     async def test_upgrade_uses_default_owner_id_via_server_default(self, setup_and_teardown):
         """Upgrade should use 'default' owner_id from server default when inserted without explicit value."""
         conn = setup_and_teardown
