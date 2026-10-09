@@ -143,15 +143,23 @@ async def pull_request_webhook(
     if x_github_event != "pull_request":
         return {"status": "skipped", "reason": "ignored_event"}
 
-    full_name = _full_name(payload)
-    if not full_name:
-        return {"status": "skipped", "reason": SKIP_REPO}
-
-    # Mode A parity: check action eligibility before routing/allowlist
-    # This ensures ignored_action is returned for ignored actions on non-allowed repos
+    # Mode A parity: check action eligibility before full_name/routing
+    # This ensures ignored_action is returned even when repository is missing
     action = payload.get("action")
     if action not in HANDLED_ACTIONS:
         return {"status": "skipped", "reason": "ignored_action"}
+
+    # Mode A parity: check label before routing/allowlist
+    # For labeled events with non-override labels, return ignored_label before checking repo
+    if action == "labeled":
+        label = (payload.get("label") or {}).get("name") or ""
+        override_label = get_app_config().size_guard.override_label
+        if label.casefold() != override_label.casefold():
+            return {"status": "skipped", "reason": "ignored_label"}
+
+    full_name = _full_name(payload)
+    if not full_name:
+        return {"status": "skipped", "reason": SKIP_REPO}
 
     installation_id = _get_installation_id(payload)
 
@@ -282,14 +290,22 @@ async def pull_request_webhook_for_owner(
     if x_github_event != "pull_request":
         return {"status": "skipped", "reason": "ignored_event"}
 
-    full_name = _full_name(payload)
-    if not full_name:
-        return {"status": "skipped", "reason": SKIP_REPO}
-
-    # Mode A parity: check action eligibility before routing/allowlist
+    # Mode A parity: check action eligibility before full_name/routing
     action = payload.get("action")
     if action not in HANDLED_ACTIONS:
         return {"status": "skipped", "reason": "ignored_action"}
+
+    # Mode A parity: check label before routing/allowlist
+    # For labeled events with non-override labels, return ignored_label before checking repo
+    if action == "labeled":
+        label = (payload.get("label") or {}).get("name") or ""
+        override_label = ctx.config.size_guard.override_label
+        if label.casefold() != override_label.casefold():
+            return {"status": "skipped", "reason": "ignored_label"}
+
+    full_name = _full_name(payload)
+    if not full_name:
+        return {"status": "skipped", "reason": SKIP_REPO}
 
     installation_id = _get_installation_id(payload)
 
