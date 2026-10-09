@@ -68,12 +68,14 @@ def _run_migrations(config, target: str) -> None:
 
     try:
         asyncio.get_running_loop()
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            executor.submit(run_sync).result()
     except RuntimeError:
         run_sync()
+        return
+    import concurrent.futures
+
+    # Alembic's env.py calls asyncio.run(); run it off the test's event loop.
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor.submit(run_sync).result()
 
 
 def _downgrade_migrations(config, target: str) -> None:
@@ -87,12 +89,14 @@ def _downgrade_migrations(config, target: str) -> None:
 
     try:
         asyncio.get_running_loop()
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            executor.submit(run_sync).result()
     except RuntimeError:
         run_sync()
+        return
+    import concurrent.futures
+
+    # Alembic's env.py calls asyncio.run(); run it off the test's event loop.
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor.submit(run_sync).result()
 
 
 def _fake_codex_fn(finding_id: str, finding_title: str, sha: str):

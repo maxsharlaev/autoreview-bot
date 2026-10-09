@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from datetime import timedelta
 
 import pytest
 
@@ -30,6 +31,16 @@ def _validate_test_database_url() -> str | None:
 
 _skip_reason = _validate_test_database_url()
 requires_test_postgres = pytest.mark.skipif(bool(_skip_reason), reason=_skip_reason or "")
+
+
+_CLEAR_FINDINGS_SQL = """
+DO $$
+BEGIN
+    IF to_regclass('public.findings') IS NOT NULL THEN
+        TRUNCATE findings CASCADE;
+    END IF;
+END $$;
+"""
 
 
 def _get_asyncpg_url() -> str:
@@ -62,12 +73,14 @@ def _run_migrations(config, target: str) -> None:
 
     try:
         asyncio.get_running_loop()
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            executor.submit(run_sync).result()
     except RuntimeError:
         run_sync()
+        return
+    import concurrent.futures
+
+    # Alembic's env.py calls asyncio.run(); run it off the test's event loop.
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor.submit(run_sync).result()
 
 
 def _downgrade_migrations(config, target: str) -> None:
@@ -81,12 +94,14 @@ def _downgrade_migrations(config, target: str) -> None:
 
     try:
         asyncio.get_running_loop()
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            executor.submit(run_sync).result()
     except RuntimeError:
         run_sync()
+        return
+    import concurrent.futures
+
+    # Alembic's env.py calls asyncio.run(); run it off the test's event loop.
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor.submit(run_sync).result()
 
 
 @requires_test_postgres
@@ -100,15 +115,18 @@ class TestMigration007:
 
         config = _get_alembic_config()
 
-        _downgrade_migrations(config, "base")
-        _run_migrations(config, "006_comment_authors_objects")
-
         url = _get_asyncpg_url()
         dsn = url.replace("postgresql+asyncpg://", "postgresql://")
         conn = await asyncpg.connect(dsn)
+        # Findings shared by several owners block the 007 downgrade by design; clear them first.
+        await conn.execute(_CLEAR_FINDINGS_SQL)
+
+        _downgrade_migrations(config, "base")
+        _run_migrations(config, "006_comment_authors_objects")
 
         yield conn
 
+        await conn.execute(_CLEAR_FINDINGS_SQL)
         await conn.close()
         _downgrade_migrations(config, "base")
 
@@ -356,29 +374,17 @@ class TestMigration007:
         assert "uq_findings_pr_stable" in constraint_names
         assert "uq_findings_pr_owner_stable" not in constraint_names
 
-    @pytest.mark.asyncio
-    async def test_downgrade_handles_duplicate_stable_ids(self, setup_and_teardown):
-        """Downgrade should delete newer duplicate findings to satisfy old constraint."""
-        conn = setup_and_teardown
-        config = _get_alembic_config()
-
-        _run_migrations(config, "007_findings_owner_id")
-
-        # Create test data with same stable_id for different owners
-        repo_id = uuid.uuid4()
-        pr_id = uuid.uuid4()
-        run_a_id = uuid.uuid4()
-        run_b_id = uuid.uuid4()
-        finding_a_id = uuid.uuid4()
-        finding_b_id = uuid.uuid4()
-
+    async def _insert_conflicting_findings(self, conn, *, repo_owner: str) -> dict[str, uuid.UUID]:
+        """Create one PR with an org-a finding (older) and an org-b finding (newer), same stable_id."""
+        ids = {name: uuid.uuid4() for name in ("repo", "pr", "run_a", "run_b", "finding_a", "finding_b")}
         await conn.execute(
             """
             INSERT INTO repositories (
                 id, full_name, enabled, policy_profile, comment_authors, owner_id
-            ) VALUES ($1, 'org/downgrade-repo', true, 'default', '[]'::jsonb, 'org-a')
+            ) VALUES ($1, 'org/downgrade-repo', true, 'default', '[]'::jsonb, $2)
             """,
-            repo_id,
+            ids["repo"],
+            repo_owner,
         )
         await conn.execute(
             """
@@ -387,71 +393,100 @@ class TestMigration007:
                 base_sha, head_sha, head_ref, is_draft, is_fork
             ) VALUES ($1, $2, 1, '', '', '', 'open', 'base', 'head', 'main', false, false)
             """,
-            pr_id,
-            repo_id,
+            ids["pr"],
+            ids["repo"],
         )
-        await conn.execute(
-            """
-            INSERT INTO review_runs (
-                id, pull_request_id, trigger, base_sha, head_sha,
-                status, prompt_version, policy_version, owner_id
-            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-a')
-            """,
-            run_a_id,
-            pr_id,
-        )
-        await conn.execute(
-            """
-            INSERT INTO review_runs (
-                id, pull_request_id, trigger, base_sha, head_sha,
-                status, prompt_version, policy_version, owner_id
-            ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', 'org-b')
-            """,
-            run_b_id,
-            pr_id,
-        )
+        for run_key, owner in (("run_a", "org-a"), ("run_b", "org-b")):
+            await conn.execute(
+                """
+                INSERT INTO review_runs (
+                    id, pull_request_id, trigger, base_sha, head_sha,
+                    status, prompt_version, policy_version, owner_id
+                ) VALUES ($1, $2, 'webhook', 'base', 'head', 'completed', 'v1', 'v1', $3)
+                """,
+                ids[run_key],
+                ids["pr"],
+                owner,
+            )
+        for finding_key, run_key, owner, age in (
+            ("finding_a", "run_a", "org-a", timedelta(hours=1)),
+            ("finding_b", "run_b", "org-b", timedelta(0)),
+        ):
+            await conn.execute(
+                """
+                INSERT INTO findings (
+                    id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id,
+                    stable_id, severity, category, path, title, scenario,
+                    evidence, recommendation, current_status, created_at
+                ) VALUES ($1, $2, $3, $3, $4, 'conflict-stable-id', 'P2', 'security',
+                    'src/app.py', $4, '', '', '', 'open', NOW() - $5::interval)
+                """,
+                ids[finding_key],
+                ids["pr"],
+                ids[run_key],
+                owner,
+                age,
+            )
+            await conn.execute(
+                """
+                INSERT INTO finding_transitions (id, finding_id, review_run_id, status, evidence)
+                VALUES ($1, $2, $3, 'new', '')
+                """,
+                uuid.uuid4(),
+                ids[finding_key],
+                ids[run_key],
+            )
+        return ids
 
-        # Insert older finding for owner A
-        await conn.execute(
-            """
-            INSERT INTO findings (
-                id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id,
-                stable_id, severity, category, path, title, scenario,
-                evidence, recommendation, current_status, created_at
-            ) VALUES ($1, $2, $3, $3, 'org-a', 'conflict-stable-id', 'P2', 'security',
-                'src/app.py', 'Finding A', '', '', '', 'open', NOW() - INTERVAL '1 hour')
-            """,
-            finding_a_id,
-            pr_id,
-            run_a_id,
-        )
+    @pytest.mark.asyncio
+    async def test_downgrade_refuses_when_owners_share_stable_id(self, setup_and_teardown, monkeypatch):
+        """Without the opt-in flag the downgrade must fail and keep every finding."""
+        conn = setup_and_teardown
+        config = _get_alembic_config()
+        monkeypatch.delenv("MIGRATION_007_DOWNGRADE_DROP_DUPLICATES", raising=False)
 
-        # Insert newer finding for owner B with same stable_id
-        await conn.execute(
-            """
-            INSERT INTO findings (
-                id, pull_request_id, first_seen_run_id, last_seen_run_id, owner_id,
-                stable_id, severity, category, path, title, scenario,
-                evidence, recommendation, current_status, created_at
-            ) VALUES ($1, $2, $3, $3, 'org-b', 'conflict-stable-id', 'P2', 'security',
-                'src/app.py', 'Finding B', '', '', '', 'open', NOW())
-            """,
-            finding_b_id,
-            pr_id,
-            run_b_id,
-        )
+        _run_migrations(config, "007_findings_owner_id")
+        await self._insert_conflicting_findings(conn, repo_owner="org-a")
 
-        # Verify both exist before downgrade
-        findings = await conn.fetch("SELECT id FROM findings WHERE stable_id = 'conflict-stable-id'")
-        assert len(findings) == 2
+        with pytest.raises(RuntimeError, match=r"1 \(pull_request_id, stable_id\) group"):
+            _downgrade_migrations(config, "006_comment_authors_objects")
 
-        # Downgrade should delete the newer one to avoid conflict
+        version = await conn.fetchval("SELECT version_num FROM alembic_version")
+        assert version == "007_findings_owner_id"
+        assert await conn.fetchval("SELECT COUNT(*) FROM findings") == 2
+        assert await conn.fetchval("SELECT COUNT(*) FROM finding_transitions") == 2
+
+    @pytest.mark.asyncio
+    async def test_downgrade_opt_in_keeps_repository_owner_row(self, setup_and_teardown, monkeypatch):
+        """With the opt-in flag the row of the repository's current owner survives, even if newer."""
+        conn = setup_and_teardown
+        config = _get_alembic_config()
+        monkeypatch.setenv("MIGRATION_007_DOWNGRADE_DROP_DUPLICATES", "1")
+
+        _run_migrations(config, "007_findings_owner_id")
+        ids = await self._insert_conflicting_findings(conn, repo_owner="org-b")
+
         _downgrade_migrations(config, "006_comment_authors_objects")
 
-        # Only older finding should remain
-        findings = await conn.fetch("SELECT id FROM findings WHERE stable_id = 'conflict-stable-id'")
-        assert len(findings) == 1
-        assert findings[0]["id"] == finding_a_id
+        rows = await conn.fetch("SELECT id FROM findings WHERE stable_id = 'conflict-stable-id'")
+        assert [row["id"] for row in rows] == [ids["finding_b"]]
+        transitions = await conn.fetch("SELECT finding_id FROM finding_transitions")
+        assert [row["finding_id"] for row in transitions] == [ids["finding_b"]]
+
+    @pytest.mark.asyncio
+    async def test_downgrade_opt_in_falls_back_to_oldest_row(self, setup_and_teardown, monkeypatch):
+        """If no conflicting row belongs to the repository owner, the oldest row is kept."""
+        conn = setup_and_teardown
+        config = _get_alembic_config()
+        monkeypatch.setenv("MIGRATION_007_DOWNGRADE_DROP_DUPLICATES", "1")
+
+        _run_migrations(config, "007_findings_owner_id")
+        ids = await self._insert_conflicting_findings(conn, repo_owner="org-c")
+
+        _downgrade_migrations(config, "006_comment_authors_objects")
+
+        rows = await conn.fetch("SELECT id FROM findings WHERE stable_id = 'conflict-stable-id'")
+        assert [row["id"] for row in rows] == [ids["finding_a"]]
 
     @pytest.mark.asyncio
     async def test_legacy_default_findings_kept_on_upgrade(self, setup_and_teardown):
