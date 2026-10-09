@@ -101,12 +101,19 @@ async def digest_open_prs(ctx: dict) -> str:
             logger.exception("GitHub client unavailable for digest refresh, owner=%s", owner_id)
             continue
 
+        # Get owner's specific allowed_repos (None for legacy owner means use global config)
+        owner_allowed_repos = registry.get_allowed_repos_for_owner(owner_id)
+        if owner_allowed_repos is None:
+            # Legacy default owner: use global config's allowed_repos
+            owner_allowed_repos = list(config.github.allowed_repos)
+
         async with factory() as session:
             digest = await run_digest(
                 session,
                 config=owner_ctx.config,
                 github=github,
                 owner_id=owner_id,
+                allowed_repos=owner_allowed_repos,
             )
             digest_ids.append(str(digest.id))
 

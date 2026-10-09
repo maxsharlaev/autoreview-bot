@@ -159,9 +159,7 @@ async def _upsert_open_pr(
         repo = Repository(full_name=full_name, enabled=True, owner_id=owner_id)
         session.add(repo)
         await session.flush()
-    elif repo.owner_id != owner_id:
-        # Update repository owner if changed
-        repo.owner_id = owner_id
+    # Do NOT reassign owner_id if repo already exists - it belongs to its current owner
     number = int(raw["number"])
     pr = (
         await session.execute(

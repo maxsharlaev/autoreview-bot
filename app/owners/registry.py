@@ -232,6 +232,18 @@ class OwnerRegistry:
         # This is set during build() and stored in _owner_yamls
         return getattr(self, "_owner_yamls", {}).get(owner_id)
 
+    def get_allowed_repos_for_owner(self, owner_id: str) -> list[str] | None:
+        """Get the allowed_repos list for an owner.
+
+        Returns:
+            - owner's allowed_repos from YAML for named owners
+            - None for the legacy default owner (caller should use global config)
+        """
+        owner_yaml = self._get_owner_yaml(owner_id)
+        if owner_yaml is None:
+            return None
+        return list(owner_yaml.github.allowed_repos)
+
     def principal_for_key(self, key: str, operator_key: str | None = None) -> tuple[str, str | None]:
         """Identify the principal for an API key.
 
