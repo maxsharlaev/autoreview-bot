@@ -71,16 +71,49 @@ def test_manual_review_requires_access_key() -> None:
     assert response.status_code == 401
 
 
+def _mock_settings() -> MagicMock:
+    """Create mock settings for registry tests."""
+    mock = MagicMock()
+    mock.github_token = ""
+    mock.github_app_id = 0
+    mock.github_app_private_key = ""
+    mock.github_installation_id = 0
+    mock.github_webhook_secret = ""
+    mock.jira_base_url = ""
+    mock.jira_email = ""
+    mock.jira_api_token = ""
+    mock.slack_bot_token = ""
+    mock.openai_api_key = ""
+    mock.review_api_key = ""
+    mock.github_private_key_pem.return_value = ""
+    return mock
+
+
 def test_manual_review_rejects_unknown_repo() -> None:
-    from app.owners.registry import REJECT_REPO_NOT_ALLOWED, RouteResult
+    """Test that a repo not in the allowlist is rejected with real registry."""
+    from app.owners.registry import OwnerRegistry
 
-    mock_registry = MagicMock()
-    mock_registry.resolve.return_value = RouteResult("", REJECT_REPO_NOT_ALLOWED)
+    # Build a real registry with a specific allowlist
+    settings = _mock_settings()
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "default": True,
+                "github": {
+                    "auth": "pat",
+                    "allowed_repos": ["org-a/allowed-repo"],  # Only this repo is allowed
+                },
+            },
+        }
+    )
+    env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_test_token"}
 
-    with patch("app.api.v1.reviews.get_owner_registry", return_value=mock_registry):
+    registry = OwnerRegistry.build(settings, config, env=env)
+
+    with patch("app.api.v1.reviews.get_owner_registry", return_value=registry):
         response = _client(with_api_key=True).post(
             "/api/v1/reviews",
-            json={"repository": "other/repo", "number": 1},
+            json={"repository": "other/repo", "number": 1},  # Not in allowlist
         )
     assert response.status_code == 403
     assert response.json()["detail"] == SKIP_REPO
