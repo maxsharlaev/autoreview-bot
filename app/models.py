@@ -36,10 +36,11 @@ LEGACY_OWNER_ID = "default"
 
 
 def effective_owner_id(stored_owner_id: str | None, legacy_default_owner: str | None) -> str:
-    """Owner a stored row belongs to, mapping legacy 'default' rows to their inheritor.
+    """Owner a stored row belongs to; legacy 'default' rows go to their explicit owner.
 
-    legacy_default_owner comes from OwnerRegistry.legacy_default_alias(): None keeps
-    'default' rows with the literal 'default' owner.
+    legacy_default_owner comes from OwnerRegistry.legacy_default_alias(). When it is
+    None the row stays with the literal 'default' owner, which only exists in modes
+    A/B; with named owners only (modes C/D) such rows then belong to no owner.
     """
     owner_id = stored_owner_id or LEGACY_OWNER_ID
     if owner_id == LEGACY_OWNER_ID and legacy_default_owner:
@@ -56,8 +57,8 @@ def extract_comment_author_logins_for_owner(
 
     Only returns logins where:
     - Old format (plain strings) and new-format entries with owner_id 'default':
-      they belong to the legacy 'default' owner, or to legacy_default_owner when
-      another owner inherits legacy rows (see OwnerRegistry.legacy_default_alias)
+      they belong to legacy_default_owner (OwnerRegistry.legacy_default_alias());
+      when it is None, only to a literal 'default' owner (none exists in modes C/D)
     - New format: owner_id matches the specified owner
 
     This ensures comment author deduplication is per-owner.

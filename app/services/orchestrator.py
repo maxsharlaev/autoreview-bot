@@ -78,7 +78,7 @@ def _filter_findings_for_owner(findings: list, owner_id: str, legacy_default_own
 
     This prevents cross-owner data mixing when a repository changes ownership.
     Findings have owner_id set directly; legacy findings with owner_id='default'
-    belong to OwnerRegistry.legacy_default_alias() when it is set.
+    belong only to OwnerRegistry.legacy_default_alias() (nobody when it is None).
     """
     return [
         finding
@@ -228,7 +228,7 @@ async def run_review(
         progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
         return await _skip(session, run, started, SKIP_OWNER_CHANGED)
 
-    # Owner that inherits rows stored with the legacy owner_id 'default' (None in modes A/B)
+    # Owner of rows stored with the legacy owner_id 'default' (explicit binding; None = nobody)
     legacy_default_owner = registry.legacy_default_alias()
 
     # Build clients from owner context (unless overridden for testing)
@@ -1078,8 +1078,8 @@ async def _previous_head(
 
     Filters by owner_id to prevent cross-owner data mixing - a new owner
     should not see the previous head SHA from another owner's review.
-    Runs stored with the legacy owner_id='default' belong to legacy_default_owner
-    (OwnerRegistry.legacy_default_alias()) when it is set.
+    Runs stored with the legacy owner_id='default' belong only to legacy_default_owner
+    (OwnerRegistry.legacy_default_alias()); when it is None they belong to no owner.
     """
     owner_ids = {owner_id}
     if legacy_default_owner is not None and owner_id == legacy_default_owner:

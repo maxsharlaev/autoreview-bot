@@ -62,8 +62,8 @@ async def build_digest_payload(
     Args:
         session: Database session
         owner_id: Owner ID to filter PRs by (via repository.owner_id)
-        legacy_default_owner: OwnerRegistry.legacy_default_alias(); owner that
-            inherits findings stored with owner_id='default' (None keeps them with 'default')
+        legacy_default_owner: OwnerRegistry.legacy_default_alias(); owner of findings
+            stored with owner_id='default' (None: they count for no owner)
     """
     query = (
         select(PullRequest)
@@ -71,7 +71,11 @@ async def build_digest_payload(
         .where(PullRequest.state == "open")
     )
     if owner_id:
-        query = query.join(PullRequest.repository).where(Repository.owner_id == owner_id)
+        # Repositories last seen before multi-owner support still carry owner_id='default'.
+        repo_owner_ids = {owner_id}
+        if legacy_default_owner is not None and legacy_default_owner == owner_id:
+            repo_owner_ids.add("default")
+        query = query.join(PullRequest.repository).where(Repository.owner_id.in_(repo_owner_ids))
     query = query.order_by(PullRequest.updated_at.desc())
 
     result = await session.execute(query)
@@ -119,8 +123,8 @@ async def run_digest(
     """Run digest for the specified owner.
 
     Args:
-        legacy_default_owner: OwnerRegistry.legacy_default_alias(); owner that inherits
-            findings stored with owner_id='default'. None keeps them with 'default'.
+        legacy_default_owner: OwnerRegistry.legacy_default_alias(); owner of findings
+            stored with owner_id='default'. None: they count for no owner.
     """
     cfg = config or get_app_config()
     effective_owner_id = owner_id or "default"
