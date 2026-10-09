@@ -29,7 +29,7 @@ from app.models import (
     build_comment_author_entry,
     extract_comment_author_logins_for_owner,
 )
-from app.owners.registry import OwnerRegistry, get_owner_registry
+from app.owners.registry import DEFAULT_OWNER_ID, OwnerRegistry, get_owner_registry
 from app.paths import data_file
 from app.progress import ReviewProgress
 from app.services.codex_runner import CodexRunnerError, run_codex
@@ -376,7 +376,7 @@ async def run_review(
                 recommendation=item.recommendation if expose_details else "",
             )
         )
-    previous_head = await _previous_head(session, pr.id, run.id, owner_id)
+    previous_head = await _previous_head(session, pr.id, run.id, owner_id, registry.default_owner_id)
 
     context = build_context(
         repository=pr.repository.full_name,
@@ -1061,19 +1061,28 @@ def _sync_pr(pr: PullRequest, info) -> None:
 
 
 async def _previous_head(
-    session: AsyncSession, pull_request_id: uuid.UUID, current_run_id: uuid.UUID, owner_id: str
+    session: AsyncSession,
+    pull_request_id: uuid.UUID,
+    current_run_id: uuid.UUID,
+    owner_id: str,
+    default_owner_id: str | None = None,
 ) -> str | None:
     """Get the head SHA of the most recent completed run for this owner.
 
     Filters by owner_id to prevent cross-owner data mixing - a new owner
     should not see the previous head SHA from another owner's review.
+    Runs recorded before multi-owner support carry owner_id='default'; like
+    legacy findings, they belong to the registry's default owner.
     """
+    owner_ids = {owner_id}
+    if default_owner_id is not None and owner_id == default_owner_id:
+        owner_ids.add(DEFAULT_OWNER_ID)
     result = await session.execute(
         select(ReviewRun)
         .where(
             ReviewRun.pull_request_id == pull_request_id,
             ReviewRun.id != current_run_id,
-            ReviewRun.owner_id == owner_id,  # Filter by owner
+            ReviewRun.owner_id.in_(owner_ids),
             ReviewRun.status == "completed",
         )
         .order_by(ReviewRun.created_at.desc())
