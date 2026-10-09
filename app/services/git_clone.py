@@ -93,6 +93,16 @@ def _git_env(token: str, askpass: Path) -> dict[str, str]:
         if tmp_var in os.environ:
             env[tmp_var] = os.environ[tmp_var]
 
+    # Proxy variables (both cases for compatibility)
+    for proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        if proxy_var in os.environ:
+            env[proxy_var] = os.environ[proxy_var]
+
+    # SSL/CA certificate variables for git
+    for ssl_var in ("SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO"):
+        if ssl_var in os.environ:
+            env[ssl_var] = os.environ[ssl_var]
+
     # Git-specific variables
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ASKPASS"] = str(askpass)
