@@ -245,6 +245,9 @@ async def pull_request_webhook_for_owner(
     # Get owner context (case-insensitive, alias-aware lookup)
     ctx = registry.get(owner_id)
     if ctx is None:
+        # Check if owner exists but is disabled
+        if registry.is_disabled(owner_id):
+            return {"status": "skipped", "reason": "owner_disabled"}
         raise HTTPException(status_code=404, detail="unknown_owner")
 
     if not ctx.webhook_enabled():

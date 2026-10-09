@@ -169,10 +169,14 @@ class OwnerRegistry:
         if explicit_owner:
             explicit_lower = explicit_owner.lower()
             resolved_id: str | None = None
+            is_disabled_via_alias = False
             # Try case-insensitive alias match
             for alias, target in self.aliases.items():
                 if alias.lower() == explicit_lower:
                     resolved_id = target
+                    # Check if alias target is disabled
+                    if target in self.disabled_owners:
+                        is_disabled_via_alias = True
                     break
             # Try case-insensitive owner_id match
             if resolved_id is None:
@@ -185,6 +189,9 @@ class OwnerRegistry:
                 for oid in self.disabled_owners:
                     if oid.lower() == explicit_lower:
                         return RouteResult("", REJECT_OWNER_DISABLED)
+            # Alias resolved to a disabled owner
+            if is_disabled_via_alias:
+                return RouteResult("", REJECT_OWNER_DISABLED)
             if resolved_id is None:
                 return RouteResult("", REJECT_UNKNOWN_OWNER)
             ctx = self.owners.get(resolved_id)

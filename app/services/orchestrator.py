@@ -149,6 +149,16 @@ async def run_review(
 
     # Check if owner is configured and enabled
     if ctx is None:
+        # Check if owner exists but is disabled (skip with owner_disabled, not owner_not_configured)
+        if registry.is_disabled(owner_id):
+            logger.warning(
+                "owner_disabled owner=%s run=%s repo=%s",
+                owner_id,
+                run.id,
+                pr.repository.full_name,
+            )
+            progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
+            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
         logger.warning(
             "owner_not_configured owner=%s run=%s repo=%s",
             owner_id,
