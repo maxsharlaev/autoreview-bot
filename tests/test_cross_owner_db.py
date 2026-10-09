@@ -101,6 +101,7 @@ def _downgrade_migrations(config, target: str) -> None:
 
 
 HEAD_SHA = "c" * 40
+LEGACY_SHA = "e" * 40
 BASE_SHA = "b" * 40
 
 _CLEAR_FINDINGS_SQL = """
@@ -202,8 +203,20 @@ def _mock_github(full_name: str, number: int):
     return mock
 
 
-def _mock_registry(current_owner: dict[str, str], default_owner_id: str = "owner-a"):
-    """Registry double with owner-a and owner-b; routing follows current_owner['id']."""
+_INHERIT_DEFAULT = object()
+
+
+def _mock_registry(
+    current_owner: dict[str, str],
+    default_owner_id: str = "owner-a",
+    owners: tuple[str, ...] = ("owner-a", "owner-b"),
+    legacy_alias: object = _INHERIT_DEFAULT,
+):
+    """Registry double; routing follows current_owner['id'].
+
+    By default there is no owner named 'default', so the default owner inherits
+    legacy rows (modes C/D). Pass legacy_alias=None to model mode B.
+    """
     from types import SimpleNamespace
 
     from app.config import AppConfig
@@ -221,7 +234,8 @@ def _mock_registry(current_owner: dict[str, str], default_owner_id: str = "owner
 
     mock = MagicMock()
     mock.default_owner_id = default_owner_id
-    mock.get.side_effect = lambda owner_id: ctx(owner_id) if owner_id in {"owner-a", "owner-b"} else None
+    mock.legacy_default_alias.return_value = default_owner_id if legacy_alias is _INHERIT_DEFAULT else legacy_alias
+    mock.get.side_effect = lambda owner_id: ctx(owner_id) if owner_id in owners else None
     mock.is_disabled.return_value = False
     mock.resolve.side_effect = lambda *_args, **_kwargs: RouteResult(current_owner["id"], ROUTE_EXACT)
     return mock
@@ -573,15 +587,15 @@ class TestCrossOwnerReviewDB:
         session.add(finding)
         await session.commit()
 
-        # When filtering for 'owner-a' with default_owner_id='owner-a',
+        # When filtering for 'owner-a' with legacy_default_owner='owner-a',
         # the legacy 'default' finding should be included
         findings = [finding]
-        filtered = _filter_findings_for_owner(findings, "owner-a", default_owner_id="owner-a")
+        filtered = _filter_findings_for_owner(findings, "owner-a", legacy_default_owner="owner-a")
         assert len(filtered) == 1
         assert filtered[0].stable_id == "legacy-finding"
 
         # When filtering for 'owner-b', the legacy finding should NOT be included
-        filtered = _filter_findings_for_owner(findings, "owner-b", default_owner_id="owner-a")
+        filtered = _filter_findings_for_owner(findings, "owner-b", legacy_default_owner="owner-a")
         assert len(filtered) == 0
 
     async def _queue(self, owner_id: str, *, full_name: str, number: int):
@@ -611,7 +625,9 @@ class TestCrossOwnerReviewDB:
             )
             return run.id
 
-    async def _review(self, run_id, *, current_owner, full_name, number, prompts, stable_id, tag, tmp_path):
+    async def _review(
+        self, run_id, *, current_owner, full_name, number, prompts, stable_id, tag, tmp_path, registry=None
+    ):
         from unittest.mock import patch
 
         from app.config import AppConfig, Settings
@@ -643,7 +659,7 @@ class TestCrossOwnerReviewDB:
                     jira=jira,
                     publisher=publisher,
                     codex_fn=_recording_codex(prompts, stable_id=stable_id, tag=tag),
-                    registry=_mock_registry(current_owner),
+                    registry=registry or _mock_registry(current_owner),
                 )
             return run, github
 
@@ -798,30 +814,137 @@ class TestCrossOwnerReviewDB:
             assert await session.get(Repository, (await session.get(PullRequest, pr_b)).repository_id) is not None
 
             # owner-b's PR only carries owner-a's finding: not a blocker for owner-b.
-            payload_b = await build_digest_payload(session, owner_id="owner-b", default_owner_id="owner-a")
+            payload_b = await build_digest_payload(session, owner_id="owner-b", legacy_default_owner="owner-a")
             assert (payload_b["open_pr_count"], payload_b["blocker_pr_count"]) == (1, 0)
             # owner-a (registry default) inherits the legacy 'default' finding.
-            payload_a = await build_digest_payload(session, owner_id="owner-a", default_owner_id="owner-a")
+            payload_a = await build_digest_payload(session, owner_id="owner-a", legacy_default_owner="owner-a")
             assert (payload_a["open_pr_count"], payload_a["blocker_pr_count"]) == (1, 1)
 
+    async def _seed_legacy_history(self, *, full_name: str, number: int) -> None:
+        """Single-owner era history: a completed 'default' run at LEGACY_SHA with one open P1 finding."""
+        from app.models import Finding, PullRequest, Repository, ReviewRun
+
+        async with self.session_factory() as session:
+            repo = Repository(full_name=full_name, enabled=True, owner_id="default")
+            session.add(repo)
+            await session.flush()
+            pr = PullRequest(repository_id=repo.id, number=number, state="open", base_sha=BASE_SHA, head_sha=HEAD_SHA)
+            session.add(pr)
+            await session.flush()
+            run = ReviewRun(
+                pull_request_id=pr.id,
+                trigger="webhook",
+                base_sha=BASE_SHA,
+                head_sha=LEGACY_SHA,
+                status="completed",
+                owner_id="default",
+            )
+            session.add(run)
+            await session.flush()
+            session.add(
+                Finding(
+                    pull_request_id=pr.id,
+                    first_seen_run_id=run.id,
+                    last_seen_run_id=run.id,
+                    owner_id="default",
+                    stable_id="legacy-id",
+                    severity="P1",
+                    category="security",
+                    path="src/app.py",
+                    title="LEGACY-SECRET title",
+                    scenario="LEGACY-SECRET scenario",
+                    evidence="LEGACY-SECRET evidence",
+                    recommendation="LEGACY-SECRET recommendation",
+                    current_status="open",
+                )
+            )
+            await session.commit()
+
     @pytest.mark.asyncio
-    async def test_digest_open_prs_passes_registry_default_owner(self, setup_and_teardown):
-        from types import SimpleNamespace
-        from unittest.mock import patch
+    @pytest.mark.parametrize(
+        ("mode", "registry_kwargs", "reviewer", "inherits"),
+        [
+            # Mode B: legacy 'default' owner still configured, owner-b is default:true.
+            (
+                "B",
+                {"default_owner_id": "owner-b", "owners": ("default", "owner-b"), "legacy_alias": None},
+                "owner-b",
+                False,
+            ),
+            (
+                "B",
+                {"default_owner_id": "owner-b", "owners": ("default", "owner-b"), "legacy_alias": None},
+                "default",
+                True,
+            ),
+            # Modes C/D: no 'default' owner; the default owner inherits legacy rows, others do not.
+            ("C", {"default_owner_id": "owner-a", "owners": ("owner-a", "owner-b")}, "owner-a", True),
+            ("D", {"default_owner_id": "owner-a", "owners": ("owner-a", "owner-b")}, "owner-b", False),
+        ],
+    )
+    async def test_legacy_history_inherited_only_by_alias_owner(
+        self, setup_and_teardown, tmp_path, mode, registry_kwargs, reviewer, inherits
+    ):
+        """Legacy findings and previous head reach the model only for the owner that inherits 'default'."""
+        full_name, number = f"org/legacy-{mode.lower()}-{reviewer}", 3
+        await self._seed_legacy_history(full_name=full_name, number=number)
+        current_owner = {"id": reviewer}
+        prompts: list[str] = []
 
-        from app.config import AppConfig
-        from app.workers import settings as worker_settings
+        run_id = await self._queue(reviewer, full_name=full_name, number=number)
+        run, _ = await self._review(
+            run_id,
+            current_owner=current_owner,
+            full_name=full_name,
+            number=number,
+            prompts=prompts,
+            stable_id="legacy-id",
+            tag=f"{reviewer.upper()}-NOW",
+            tmp_path=tmp_path,
+            registry=_mock_registry(current_owner, **registry_kwargs),
+        )
 
-        registry = MagicMock()
-        registry.default_owner_id = "owner-a"
-        registry.owners = {"owner-a": SimpleNamespace(github=None, config=AppConfig())}
-        registry.get_allowed_repos_for_owner.return_value = ["org/repo"]
-        run_digest = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
-        with (
-            patch.object(worker_settings, "get_app_config", return_value=AppConfig()),
-            patch("app.owners.registry.get_owner_registry", return_value=registry),
-            patch("app.adapters.github.GitHubAppClient.from_credentials", return_value=MagicMock()),
-            patch.object(worker_settings, "run_digest", run_digest),
-        ):
-            await worker_settings.digest_open_prs({"session_factory": self.session_factory})
-        assert run_digest.await_args.kwargs["default_owner_id"] == "owner-a"
+        assert run.status == "completed", run.error_code
+        assert len(prompts) == 1
+        assert ("LEGACY-SECRET title" in prompts[0]) is inherits
+        assert (f"previous_head_sha: {LEGACY_SHA}" in prompts[0]) is inherits
+
+    @pytest.mark.asyncio
+    async def test_previous_head_mode_b_keeps_legacy_runs_with_default_owner(self, setup_and_teardown):
+        from app.services.orchestrator import _previous_head
+
+        pr_id, _ = await self._seed_pr_with_runs(repo_owner="default", runs=[("default", "e" * 40)])
+        async with self.session_factory() as session:
+            current = uuid.uuid4()
+            # Mode B: legacy_default_alias() is None.
+            assert await _previous_head(session, pr_id, current, "default", None) == "e" * 40
+            assert await _previous_head(session, pr_id, current, "owner-b", None) is None
+
+    @pytest.mark.asyncio
+    async def test_digest_blockers_mode_b_keep_legacy_findings_with_default_owner(self, setup_and_teardown):
+        from app.models import Finding
+        from app.services.digest import build_digest_payload
+
+        pr_id, run_ids = await self._seed_pr_with_runs(repo_owner="owner-b", runs=[("default", HEAD_SHA)])
+        async with self.session_factory() as session:
+            session.add(
+                Finding(
+                    pull_request_id=pr_id,
+                    first_seen_run_id=run_ids[0],
+                    last_seen_run_id=run_ids[0],
+                    owner_id="default",
+                    stable_id="legacy-blocker",
+                    severity="P1",
+                    category="security",
+                    path="src/app.py",
+                    title="legacy blocker",
+                    current_status="open",
+                )
+            )
+            await session.commit()
+            # Mode B (alias None): owner-b, although default:true, does not inherit the legacy blocker.
+            payload = await build_digest_payload(session, owner_id="owner-b", legacy_default_owner=None)
+            assert (payload["open_pr_count"], payload["blocker_pr_count"]) == (1, 0)
+            # Modes C/D (alias owner-b): it does.
+            payload = await build_digest_payload(session, owner_id="owner-b", legacy_default_owner="owner-b")
+            assert (payload["open_pr_count"], payload["blocker_pr_count"]) == (1, 1)
