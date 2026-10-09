@@ -293,6 +293,7 @@ def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
         patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
         patch("app.api.v1.pull_request.get_owner_webhook_secrets", return_value={"org-a": secret}),
         patch("app.api.v1.pull_request.get_owner_registry", return_value=registry),
+        patch("app.api.v1.pull_request.get_app_config", return_value=config),
         patch("app.api.v1.pull_request.queue_review", return_value=mock_run) as mock_queue,
     ):
         response = client.post(

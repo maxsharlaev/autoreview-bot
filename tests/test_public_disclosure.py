@@ -986,6 +986,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     info.title = SECRET
     info.body = plan_pr_body_update("Human notes", SECRET, mode="append") or ""
     repository = SimpleNamespace(full_name="org/repo", owner_id="default", comment_authors=[])
+    finding_run_id = uuid.uuid4()
     stored = SimpleNamespace(
         stable_id="prior-1",
         severity="P2",
@@ -996,6 +997,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         evidence="previous evidence",
         scenario="previous scenario",
         recommendation="previous recommendation",
+        first_seen_run_id=finding_run_id,
     )
     pr = SimpleNamespace(id=uuid.uuid4(), repository=repository, number=7, findings=[stored], bot_title=SECRET)
     run = SimpleNamespace(
@@ -1007,8 +1009,14 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         trigger="webhook",
         owner_id="default",
     )
+    # Mock execute to return run for first call, empty iterable for run_owner_cache query
+    execute_mock = AsyncMock()
+    run_result = SimpleNamespace(scalar_one=lambda: run)
+    # Second call for finding run_ids - return iterable with run's owner
+    cache_result = [(finding_run_id, "default")]
+    execute_mock.side_effect = [run_result, cache_result]
     session = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run)),
+        execute=execute_mock,
         commit=AsyncMock(),
     )
     github = SimpleNamespace(
