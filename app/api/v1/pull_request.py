@@ -147,6 +147,12 @@ async def pull_request_webhook(
     if not full_name:
         return {"status": "skipped", "reason": SKIP_REPO}
 
+    # Mode A parity: check action eligibility before routing/allowlist
+    # This ensures ignored_action is returned for ignored actions on non-allowed repos
+    action = payload.get("action")
+    if action not in HANDLED_ACTIONS:
+        return {"status": "skipped", "reason": "ignored_action"}
+
     installation_id = _get_installation_id(payload)
 
     # Route to owner
@@ -279,6 +285,11 @@ async def pull_request_webhook_for_owner(
     full_name = _full_name(payload)
     if not full_name:
         return {"status": "skipped", "reason": SKIP_REPO}
+
+    # Mode A parity: check action eligibility before routing/allowlist
+    action = payload.get("action")
+    if action not in HANDLED_ACTIONS:
+        return {"status": "skipped", "reason": "ignored_action"}
 
     installation_id = _get_installation_id(payload)
 

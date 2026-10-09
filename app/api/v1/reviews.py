@@ -47,8 +47,12 @@ async def start_review(
         # Compare after canonicalizing selector (case-insensitive, alias-aware)
         if owner_selector:
             canonical_selector = registry.canonicalize(owner_selector)
-            # If selector is unknown/disabled, it will fail in routing below
-            if canonical_selector is not None and canonical_selector != principal.owner_id:
+            # If selector is unknown, return 404 (not silently ignored)
+            if canonical_selector is None:
+                if registry.is_disabled(owner_selector):
+                    raise HTTPException(status_code=403, detail="owner_disabled")
+                raise HTTPException(status_code=404, detail="unknown_owner")
+            if canonical_selector != principal.owner_id:
                 raise HTTPException(status_code=403, detail="owner_forbidden")
         effective_owner = principal.owner_id
     else:
@@ -56,10 +60,12 @@ async def start_review(
         # Canonicalize the selector if provided
         if owner_selector:
             canonical = registry.canonicalize(owner_selector)
-            # If disabled owner, check is_disabled to give proper error
-            if canonical is None and registry.is_disabled(owner_selector):
-                raise HTTPException(status_code=403, detail="owner_disabled")
-            effective_owner = canonical if canonical else owner_selector
+            # If selector is unknown or disabled, return appropriate error
+            if canonical is None:
+                if registry.is_disabled(owner_selector):
+                    raise HTTPException(status_code=403, detail="owner_disabled")
+                raise HTTPException(status_code=404, detail="unknown_owner")
+            effective_owner = canonical
         else:
             effective_owner = None
 
