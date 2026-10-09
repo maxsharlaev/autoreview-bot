@@ -998,6 +998,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         scenario="previous scenario",
         recommendation="previous recommendation",
         first_seen_run_id=finding_run_id,
+        owner_id="default",
     )
     pr = SimpleNamespace(id=uuid.uuid4(), repository=repository, number=7, findings=[stored], bot_title=SECRET)
     run = SimpleNamespace(
@@ -1009,14 +1010,9 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         trigger="webhook",
         owner_id="default",
     )
-    # Mock execute to return run for first call, empty iterable for run_owner_cache query
-    execute_mock = AsyncMock()
-    run_result = SimpleNamespace(scalar_one=lambda: run)
-    # Second call for finding run_ids - return iterable with run's owner
-    cache_result = [(finding_run_id, "default")]
-    execute_mock.side_effect = [run_result, cache_result]
+    # Mock execute to return run (no longer need run_owner_cache since findings have owner_id)
     session = SimpleNamespace(
-        execute=execute_mock,
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run)),
         commit=AsyncMock(),
     )
     github = SimpleNamespace(
@@ -1054,6 +1050,8 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     mock_registry = MagicMock()
     mock_registry.get.return_value = mock_ctx
     mock_registry.resolve.return_value = RouteResult("default", "exact")
+    mock_registry.default_owner_id = "default"
+    mock_registry.is_disabled.return_value = False
 
     await run_review(
         session,
