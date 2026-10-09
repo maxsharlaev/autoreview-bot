@@ -102,18 +102,59 @@ async def queue_review(
             existing.error_code = INTERNAL_ERROR
             await session.flush()
         elif not force:
-            await session.commit()
-            logger.info(
-                "reuse review_run=%s status=%s %s#%s sha=%s owner=%s",
-                existing.id,
-                existing.status,
-                full_name,
-                number,
-                head_sha[:12],
-                owner_id,
-            )
-            record_enqueue("reused", owner=owner_id)
-            return existing
+            # Check for B->A case: if ownership changed back and another owner has a
+            # newer run for this PR, we should NOT reuse our old completed run.
+            # This ensures A gets fresh context after B reviewed the same SHA.
+            if existing.status == "completed":
+                newer_from_other = (
+                    await session.execute(
+                        select(ReviewRun)
+                        .where(
+                            ReviewRun.pull_request_id == pr.id,
+                            ReviewRun.owner_id != owner_id,
+                            ReviewRun.created_at > existing.created_at,
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if newer_from_other is not None:
+                    logger.info(
+                        "skip_reuse_after_owner_change run=%s owner=%s newer_owner=%s %s#%s sha=%s",
+                        existing.id,
+                        owner_id,
+                        newer_from_other.owner_id,
+                        full_name,
+                        number,
+                        head_sha[:12],
+                    )
+                    # Don't return - fall through to create new run
+                else:
+                    await session.commit()
+                    logger.info(
+                        "reuse review_run=%s status=%s %s#%s sha=%s owner=%s",
+                        existing.id,
+                        existing.status,
+                        full_name,
+                        number,
+                        head_sha[:12],
+                        owner_id,
+                    )
+                    record_enqueue("reused", owner=owner_id)
+                    return existing
+            else:
+                # For non-completed runs (pending, running), still reuse
+                await session.commit()
+                logger.info(
+                    "reuse review_run=%s status=%s %s#%s sha=%s owner=%s",
+                    existing.id,
+                    existing.status,
+                    full_name,
+                    number,
+                    head_sha[:12],
+                    owner_id,
+                )
+                record_enqueue("reused", owner=owner_id)
+                return existing
         elif existing.status in IN_FLIGHT_STATUSES:
             await abort_job(redis, existing.arq_job_id)
             existing.status = "cancelled"
