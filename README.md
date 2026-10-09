@@ -68,6 +68,25 @@ Copy `config.example.yaml` → `config.yaml`. Restart the API and worker after c
 
 To replace the review instructions without editing the repository's default, copy `prompts/review.md` to `prompts/local/review.md`, edit the copy, and set `codex.prompt_file: prompts/local/review.md` in `config.yaml`. The custom file replaces the entire instruction section; keep the JSON schema, trust-boundary and output-language rules you need. `{{summary_language}}` and `{{details_language}}` are substituted from `language` settings. `prompts/local/` is excluded from Git and Docker build context, then mounted read-only into the worker by Compose. A missing configured file fails the review rather than silently using the default. Completed runs record a hash of custom instructions as `prompt_version`. Restart the worker after changing the YAML; edits to the prompt file itself are read on the next review.
 
+### Multiple owners: keeping pre-multi-owner history
+
+Findings, review runs and comment-author records written before the `owners:` block existed are stored under the legacy owner id `default`. They are bound explicitly, never through the `default: true` flag:
+
+- legacy env credentials only, or legacy env plus an `owners:` block: the legacy `default` owner keeps them;
+- `owners:` block only: the owner that lists `default` in `aliases` owns them (only one owner may);
+- otherwise nobody sees them: previous findings, previous head SHA, digest blockers and trusted comment authors from that history are ignored, and the API/worker log a startup warning.
+
+When moving from legacy env credentials to named owners only, add the alias to the owner that should inherit that history:
+
+```yaml
+owners:
+  example-org:
+    default: true          # routing fallback only; moving it does not move history
+    aliases: [default]     # inherits rows recorded as owner 'default'
+    github:
+      auth: pat
+```
+
 ## Optional PR description draft
 
 Set `pr_description.enabled: true` in `config.yaml` to draft a description from the PR title, branch, commit messages, changed-file summary and an available Jira issue. The feature is off by default. `pr_description.mode` selects `comment` (a separate sticky suggestion), `fill_empty` (an empty body or unchanged default repository template), or `append` (a marked block below the author's text). Only an intact generated block is updated on later runs; edits by the author cause the update to be skipped. The model runs in the read-only sandbox and cannot write to GitHub directly. The review is published and saved before this optional step starts; `pr_description.timeout_seconds` sets its budget. Draft and fork PRs are skipped: they are not part of the bot's trusted review flow. Without Jira, the linked-task section is omitted. See [PR description configuration](docs/PR_DESCRIPTION.md).

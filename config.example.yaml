@@ -66,3 +66,13 @@ codex:
   max_diff_lines: 20000
   max_findings: 20
   max_file_bytes: 524288
+
+# Multiple owners (optional). When switching from legacy env credentials to an
+# owners block only, put `aliases: [default]` on the owner that should keep the
+# pre-multi-owner history; `default: true` alone does not carry it over.
+# owners:
+#   example-org:
+#     default: true
+#     aliases: [default]
+#     github:
+#       auth: pat
