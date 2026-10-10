@@ -69,6 +69,12 @@ Use the [example GitHub Actions trigger](../examples/github/ai-review-trigger.ym
 
 Open a non-draft PR in an allowed repository. Expect an API `202`, a run in `GET /api/v1/ops/status`, and the `<!-- open-pr-review -->` comment. If the API returns `202` but no comment appears, follow [operations](OPERATIONS.md).
 
+## Several owners
+
+To serve another GitHub organization from the same deployment, add an `owners:` block to `config.yaml` and its `OWNER_<ID>_*` variables to `.env`, then recreate API and worker. Nothing changes until you do: an upgraded deployment without `owners:` keeps the single owner `default` and logs `owner=default`. The [README](../README.md#multiple-owners) describes modes A-D, routing, secret names, per-owner Jira/Slack, policies and model keys, and the step-by-step upgrade and rollback; see [GitHub setup](GITHUB_SETUP.md#several-owners) for connecting the second organization.
+
+Rollback: removing an `owners.<id>` block and restarting stops that owner's work and keeps its rows. Going back to an image from before multi-owner support needs `alembic downgrade 004_finding_details_visibility` with the new image first. The `007_findings_owner_id` downgrade refuses while findings of several owners share a stable id on one pull request; `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` keeps the repository owner's row (or the oldest) and deletes the others with their transitions. Back up the Postgres volume before any downgrade.
+
 ## Ongoing operation
 
 Back up the Postgres volume, rotate keys, and review worker quota and queue metrics. See [operations](OPERATIONS.md) for symptoms and recovery. Reviews remain advisory; Jira comments and transitions follow the feature flags.

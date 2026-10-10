@@ -53,7 +53,7 @@ size_guard:
 
 public_repos:
   jira_disclosure: key_only # none | key_only | full
-  security_findings: redact # redact | full
+  security_findings: redact # redact | redact_all | full
 
 codex:
   model: gpt-5.6-sol
@@ -67,15 +67,29 @@ codex:
   max_findings: 20
   max_file_bytes: 524288
 
-# Multiple owners (optional). When switching from legacy env credentials to an
-# owners block only, put `aliases: [default]` on the owner that should keep the
-# pre-multi-owner history; `default: true` alone does not carry it over.
+# Multiple owners (optional). Without this block the service runs exactly as a
+# single owner ('default', built from the env and the sections above). See the
+# README section "Multiple owners" for modes A-D, routing and upgrade/rollback.
+#
+# routing:
+#   unclaimed: default # default | reject: repos no owner claims go to the default owner or are rejected
+#
 # owners:
 #   example-org:
-#     default: true
+#     default: true            # routing fallback in modes C/D (or over 'default' in mode B)
+#     # When switching from legacy env credentials to an owners block only, put
+#     # `aliases: [default]` on the owner that should keep the pre-multi-owner
+#     # history; `default: true` alone does not carry it over.
 #     aliases: [default]
 #     github:
-#       auth: pat
+#       auth: app              # app | pat
+#       app_id: 123456         # or app_id_env; default env OWNER_EXAMPLE_ORG_GITHUB_APP_ID
+#       private_key_env: OWNER_EXAMPLE_ORG_GITHUB_APP_PRIVATE_KEY # or private_key_file
+#       installation_id: 0     # 0: taken from the webhook payload / looked up
+#       webhook_secret_env: OWNER_EXAMPLE_ORG_GITHUB_WEBHOOK_SECRET
+#       allowed_repos: [example-org/*]   # exact org/repo or org/* wildcard
+#     api:
+#       key_env: OWNER_EXAMPLE_ORG_REVIEW_API_KEY # optional API key scoped to this owner
 #     # Integrations are per owner and never inherited; omit a block to disable it.
 #     jira:
 #       base_url: https://example-org.atlassian.net
@@ -87,3 +101,21 @@ codex:
 #       enabled: true
 #       channel: "#example-org-review"
 #       bot_token_env: OWNER_EXAMPLE_ORG_SLACK_BOT_TOKEN
+#     # Partial policy overrides, deep-merged over the sections above.
+#     public_repos: { security_findings: redact_all }
+#     language: { summary: en, details: en }
+#     features: { jira_transition: false }
+#     pr_description: { enabled: true, mode: fill_empty }
+#     size_guard: { hard: { commits: 100 }, override_label: "example:force-review" }
+#     # Model per owner; other codex fields stay global. Key: api_key_env (required
+#     # when set), else OWNER_<ID>_OPENAI_API_KEY, else the shared OPENAI_API_KEY.
+#     codex:
+#       model: gpt-5.6-sol
+#       reasoning_effort: high
+#       api_key_env: OWNER_EXAMPLE_ORG_MODEL_KEY
+#
+#   another-org:
+#     github:
+#       auth: pat              # token from OWNER_ANOTHER_ORG_GITHUB_TOKEN
+#       allowed_repos: [another-org/service-a, another-org/service-b]
+#     # no jira/slack blocks: Jira and Slack are off for this owner

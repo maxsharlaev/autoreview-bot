@@ -76,3 +76,12 @@ Raw diff в БД не хранится.
 ## Язык комментария
 
 По умолчанию summary и details на английском. `language.summary` задаёт язык summary и title; `language.details` — язык scenario, evidence, recommendation и подписей PR-комментария. Поддерживаются `en` и `ru`.
+
+## Несколько owner'ов
+
+Модель owner'ов живёт в `app/owners/`. `OwnerRegistry.build()` один раз при старте API и worker читает env и `config.yaml`, проверяет конфиг и строит для каждого активного owner'а неизменяемый `OwnerContext`: креды GitHub, webhook-секрет, API-ключ, привязки Jira и Slack, ключ модели и эффективный конфиг owner'а. Глобальные настройки для кредов читаются только там; адаптеры (`GitHubAppClient.from_credentials`, `JiraClient.from_binding`, `SlackClient.from_binding`, `Publisher.from_context`) получают привязки owner'а. Конфиг без `owners:` даёт одного owner'а `default`, его эффективный конфиг совпадает с глобальным (режимы A–D описаны в [README](../../README.md#multiple-owners)).
+
+- **Маршрутизация.** `resolve()` выбирает явно указанного owner'а, затем точный `org/repo`, затем `org/*`, затем installation id из вебхука и в конце `routing.unclaimed`; после этого применяется allowlist выбранного owner'а. Корневой вебхук проверяет подпись секретами всех owner'ов и отклоняет репозиторий другого owner'а с `owner_signature_mismatch`; `/api/v1/pull-request/<id>` проверяет только секрет этого owner'а.
+- **Эффективный конфиг.** Интеграции (`jira`, `slack`) берутся только из собственных блоков owner'а. Секции политик (`public_repos`, `language`, `features`, `pr_description`, `size_guard`, `codex.model`/`reasoning_effort`) глубоко сливаются поверх глобальных. Worker, публикация, size guard, описание PR, проверка метки в вебхуке и дайджест читают эффективный конфиг owner'а запуска.
+- **Данные.** В `repositories`, `review_runs`, `digest_runs` и `findings` есть `owner_id` (миграции `005`–`007`); авторы комментариев хранятся вместе с owner'ом. Worker строит контекст по `review_runs.owner_id` и пропускает запуски, чей owner удалён, отключён или сменился (`owner_not_configured`, `owner_disabled`, `owner_changed`). Записи, сделанные до поддержки нескольких owner'ов, принадлежат `default` или owner'у с `aliases: [default]`.
+- **Изоляция.** Codex получает только ключ модели owner'а запуска (`OPENAI_API_KEY`/`CODEX_API_KEY`) в окружении по белому списку; git получает только GitHub-токен owner'а. Дайджест строится по owner'ам: свои креды GitHub, свой `DigestRun` и свой канал Slack.
