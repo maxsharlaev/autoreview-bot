@@ -76,3 +76,14 @@ codex:
 #     aliases: [default]
 #     github:
 #       auth: pat
+#     # Integrations are per owner and never inherited; omit a block to disable it.
+#     jira:
+#       base_url: https://example-org.atlassian.net
+#       email: review-bot@example-org.example
+#       api_token_env: OWNER_EXAMPLE_ORG_JIRA_API_TOKEN
+#       projects:
+#         ABC: { rework_status: "In Progress" }
+#     slack:
+#       enabled: true
+#       channel: "#example-org-review"
+#       bot_token_env: OWNER_EXAMPLE_ORG_SLACK_BOT_TOKEN
