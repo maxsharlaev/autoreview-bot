@@ -87,6 +87,28 @@ owners:
       auth: pat
 ```
 
+### Multiple owners: Jira and Slack per owner
+
+A named owner uses only its own `jira` and `slack` blocks; nothing is inherited from the top-level sections or the legacy `default` owner. Without a `jira` block the owner makes no Jira requests; without a `slack` block it never posts, including the hourly digest. Jira reads, comments and transitions use the owner's site, account and `projects` (allowed project keys and their `rework_status`). Each owner with Slack gets its own digest in its own channel. Secrets are env var names: `api_token_env` / `bot_token_env`, or by default `OWNER_<ID>_JIRA_API_TOKEN` / `OWNER_<ID>_SLACK_BOT_TOKEN`. To share a Jira account or Slack bot between owners, point both at the same env var name.
+
+```yaml
+owners:
+  example-org:
+    github: { auth: pat, allowed_repos: [example-org/*] }
+    jira:
+      base_url: https://example-org.atlassian.net
+      email: review-bot@example-org.example
+      api_token_env: OWNER_EXAMPLE_ORG_JIRA_API_TOKEN
+      projects:
+        ABC: { rework_status: "In Progress" }
+    slack:
+      enabled: true
+      channel: "#example-org-review"
+      bot_token_env: OWNER_EXAMPLE_ORG_SLACK_BOT_TOKEN
+```
+
+A disabled owner's webhook URL `/api/v1/pull-request/<id>` answers `owner_disabled` only to requests signed with that owner's webhook secret; other requests get 401.
+
 ## Optional PR description draft
 
 Set `pr_description.enabled: true` in `config.yaml` to draft a description from the PR title, branch, commit messages, changed-file summary and an available Jira issue. The feature is off by default. `pr_description.mode` selects `comment` (a separate sticky suggestion), `fill_empty` (an empty body or unchanged default repository template), or `append` (a marked block below the author's text). Only an intact generated block is updated on later runs; edits by the author cause the update to be skipped. The model runs in the read-only sandbox and cannot write to GitHub directly. The review is published and saved before this optional step starts; `pr_description.timeout_seconds` sets its budget. Draft and fork PRs are skipped: they are not part of the bot's trusted review flow. Without Jira, the linked-task section is omitted. See [PR description configuration](docs/PR_DESCRIPTION.md).

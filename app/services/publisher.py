@@ -22,8 +22,6 @@ class Publisher:
     Can be constructed in two ways:
     1. Legacy: Publisher(github, jira, slack, config) - uses provided or default adapters
     2. Owner context: Publisher.from_context(context) - builds adapters from owner bindings
-
-    The from_context method is a stub for M2; in M1 we only ensure the interface is compatible.
     """
 
     def __init__(
@@ -44,13 +42,11 @@ class Publisher:
         context: OwnerContext,
         previous_comment_authors: tuple[str, ...] = (),
     ) -> Publisher:
-        """Build a Publisher from an owner context.
+        """Build a Publisher from an owner context: GitHub, Jira and Slack use only its bindings.
 
-        This is a stub for M2. In M1, we only need backward compatibility.
-        M2 will implement building adapters from context.github, context.jira, context.slack.
-
-        IMPORTANT: When the owner has no Jira/Slack binding, we create explicitly disabled
-        clients that never read global settings. This prevents cross-owner data leaks.
+        Jira site, credentials, allowed projects and rework statuses come from context.jira;
+        Slack token and channel from context.slack. An owner without a binding gets an
+        explicitly disabled client that never reads global settings or makes HTTP calls.
         """
         github = GitHubAppClient.from_credentials(
             context.github,

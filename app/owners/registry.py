@@ -78,6 +78,9 @@ class OwnerRegistry:
     _owner_yamls: dict[str, OwnerYaml] = field(default_factory=dict, repr=False)
     # Track disabled owners (for owner_disabled vs owner_not_configured distinction)
     disabled_owners: set[str] = field(default_factory=set)
+    # Webhook secrets of disabled owners: /pull-request/{owner_id} verifies the signature
+    # before answering owner_disabled, so the endpoint does not reveal owner state to anyone.
+    disabled_webhook_secrets: dict[str, str] = field(default_factory=dict, repr=False)
 
     def get(self, owner_id: str) -> OwnerContext | None:
         """Get owner by id or alias (case-insensitive)."""
@@ -154,6 +157,20 @@ class OwnerRegistry:
         if not self.default_owner_id:
             return None
         return self.owners.get(self.default_owner_id)
+
+    def disabled_owner_webhook_secret(self, owner_id: str) -> str | None:
+        """Webhook secret of a disabled owner (case-insensitive, alias-aware); None if unknown/unset."""
+        owner_lower = owner_id.lower()
+        target = None
+        for alias, alias_target in self.aliases.items():
+            if alias.lower() == owner_lower:
+                target = alias_target
+                break
+        if target is None:
+            target = next((oid for oid in self.disabled_owners if oid.lower() == owner_lower), None)
+        if target is None or target not in self.disabled_owners:
+            return None
+        return self.disabled_webhook_secrets.get(target) or None
 
     def webhook_secrets(self) -> dict[str, str]:
         """Return mapping of owner_id -> webhook_secret for owners with valid secrets."""
@@ -404,6 +421,7 @@ class OwnerRegistry:
         aliases: dict[str, str] = {}
         warnings: list[str] = []
         disabled_owners_set: set[str] = set()
+        disabled_webhook_secrets: dict[str, str] = {}
         default_owner_id: str | None = None
 
         if has_legacy_github:
@@ -450,6 +468,9 @@ class OwnerRegistry:
 
                 if not owner_yaml.enabled:
                     disabled_owners_set.add(owner_id)
+                    disabled_secret = _owner_webhook_secret(owner_id, owner_yaml, env, dotenv_fallback)
+                    if disabled_secret:
+                        disabled_webhook_secrets[owner_id] = disabled_secret
                     continue
 
                 ctx = _build_owner_context(
@@ -523,15 +544,18 @@ class OwnerRegistry:
             default_owner_id = next(iter(owners.keys()))
 
         if not owners:
-            # No owners configured - this can happen in mode A without credentials
-            # The warning was already added above
+            # No active owners: either mode A without credentials (warning added above) or an
+            # owners block where every owner is disabled. Keep the disabled owners' aliases and
+            # config so /pull-request/<alias> and API selectors still answer owner_disabled.
             return cls(
                 owners={},
-                aliases={},
+                aliases=aliases,
                 default_owner_id="",
                 routing=routing,
                 warnings=warnings,
+                _owner_yamls=owners_yaml,
                 disabled_owners=disabled_owners_set,
+                disabled_webhook_secrets=disabled_webhook_secrets,
             )
 
         # Build allowed_repos map for validation
@@ -560,6 +584,7 @@ class OwnerRegistry:
             installation_claims=installation_claims,
             _owner_yamls=owners_yaml,
             disabled_owners=disabled_owners_set,
+            disabled_webhook_secrets=disabled_webhook_secrets,
         )
 
 
@@ -586,6 +611,14 @@ def _get_env_value(
     if required and not value.strip():
         raise OwnerConfigError(f"Required environment variable {name} is not set{context}")
     return value.strip()
+
+
+def _owner_webhook_secret(
+    owner_id: str, owner_yaml: OwnerYaml, env: dict[str, str], dotenv_fallback: dict[str, str | None]
+) -> str:
+    """Webhook secret from github.webhook_secret_env or OWNER_<ID>_GITHUB_WEBHOOK_SECRET ('' if unset)."""
+    name = owner_yaml.github.webhook_secret_env or _env_name_for_owner(owner_id, "GITHUB_WEBHOOK_SECRET")
+    return _get_env_value(name, env, dotenv_fallback)
 
 
 def _env_name_for_owner(owner_id: str, secret_name: str) -> str:
@@ -714,12 +747,7 @@ def _build_owner_context(
             installation_id=github_yaml.installation_id,
         )
 
-    webhook_secret: str | None = None
-    if github_yaml.webhook_secret_env:
-        webhook_secret = _get_env_value(github_yaml.webhook_secret_env, env, dotenv_fallback)
-    else:
-        default_secret_env = _env_name_for_owner(owner_id, "GITHUB_WEBHOOK_SECRET")
-        webhook_secret = _get_env_value(default_secret_env, env, dotenv_fallback)
+    webhook_secret = _owner_webhook_secret(owner_id, owner_yaml, env, dotenv_fallback)
 
     if not webhook_secret or len(webhook_secret) < 16:
         warnings.append(f"Owner '{owner_id}' has no valid webhook secret; webhooks will be disabled for this owner.")
@@ -745,6 +773,8 @@ def _build_owner_context(
             )
             if not jira_token:
                 warnings.append(f"Owner '{owner_id}' has Jira configured but no API token; Jira will be disabled.")
+        else:
+            warnings.append(f"Owner '{owner_id}' has a jira block without base_url and email; Jira will be disabled.")
 
     slack_binding: SlackBinding | None = None
     if owner_yaml.slack is not None:
@@ -758,6 +788,8 @@ def _build_owner_context(
         )
         if slack_yaml.enabled and not slack_token:
             warnings.append(f"Owner '{owner_id}' has Slack enabled but no bot token; Slack will be disabled.")
+        if slack_yaml.enabled and not slack_yaml.channel:
+            warnings.append(f"Owner '{owner_id}' has Slack enabled but no channel; Slack will be disabled.")
 
     openai_key: str | None = None
     if owner_yaml.codex and owner_yaml.codex.api_key_env:
@@ -784,12 +816,31 @@ def _build_owner_context(
 
 
 def _merge_owner_config(app_config: AppConfig, owner_yaml: OwnerYaml) -> AppConfig:
-    """Create effective AppConfig for owner by deep-merging overrides.
+    """Effective AppConfig for a named owner.
 
-    For M1, we just return the base config (no per-owner overrides yet).
-    M3 will implement the actual deep merge of public_repos, language, features, etc.
+    Integrations are never inherited: `jira` and `slack` come only from the owner's own
+    blocks (empty/disabled when absent), so code reading config.jira/config.slack can't
+    reach the legacy owner's site or channel. Policy overrides (public_repos, language,
+    features, pr_description, size_guard, codex) are not merged yet.
     """
-    return app_config
+    from app.config import JiraProjectYaml, JiraYaml, SlackYaml
+
+    if owner_yaml.jira is not None:
+        jira = JiraYaml(
+            base_url=owner_yaml.jira.base_url.rstrip("/"),
+            email=owner_yaml.jira.email,
+            projects={
+                key: JiraProjectYaml(rework_status=project.rework_status)
+                for key, project in owner_yaml.jira.projects.items()
+            },
+        )
+    else:
+        jira = JiraYaml()
+    if owner_yaml.slack is not None:
+        slack = SlackYaml(enabled=owner_yaml.slack.enabled, channel=owner_yaml.slack.channel)
+    else:
+        slack = SlackYaml(enabled=False, channel="")
+    return app_config.model_copy(update={"jira": jira, "slack": slack})
 
 
 def _validate_claims(
