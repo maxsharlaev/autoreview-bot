@@ -801,8 +801,8 @@ class TestWebhookDisabledOwnerPath:
         app.state.redis = MagicMock()
         return app, TestClient(app)
 
-    def test_disabled_owner_path_returns_owner_disabled(self):
-        """POST /pull-request/{disabled_owner} should return owner_disabled."""
+    def test_disabled_owner_path_rejects_invalid_signature(self):
+        """POST /pull-request/{disabled_owner} with a bad signature is 401, not owner_disabled."""
         settings = _mock_settings()
         config = AppConfig(
             owners={
@@ -816,7 +816,10 @@ class TestWebhookDisabledOwnerPath:
                 },
             }
         )
-        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
+        env = {
+            "OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token",
+            "OWNER_DISABLED_OWNER_GITHUB_WEBHOOK_SECRET": "disabled-secret-0123456789",
+        }
 
         registry = OwnerRegistry.build(settings, config, env=env)
         app, client = self._create_test_app()
@@ -830,11 +833,13 @@ class TestWebhookDisabledOwnerPath:
                     "X-GitHub-Event": "ping",
                 },
             )
-            assert response.status_code == 202
-            assert response.json()["reason"] == "owner_disabled"
+            assert response.status_code == 401
 
     def test_disabled_owner_via_alias_returns_owner_disabled(self):
-        """POST /pull-request/{alias_of_disabled} should return owner_disabled."""
+        """POST /pull-request/{alias_of_disabled}, signed with its secret, returns owner_disabled."""
+        import hashlib
+        import hmac
+
         settings = _mock_settings()
         config = AppConfig(
             owners={
@@ -849,7 +854,12 @@ class TestWebhookDisabledOwnerPath:
                 },
             }
         )
-        env = {"OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token"}
+        secret = "disabled-secret-0123456789"
+        env = {
+            "OWNER_ENABLED_OWNER_GITHUB_TOKEN": "ghp_token",
+            "OWNER_DISABLED_OWNER_GITHUB_WEBHOOK_SECRET": secret,
+        }
+        signature = "sha256=" + hmac.new(secret.encode(), b"{}", hashlib.sha256).hexdigest()
 
         registry = OwnerRegistry.build(settings, config, env=env)
         app, client = self._create_test_app()
@@ -859,7 +869,7 @@ class TestWebhookDisabledOwnerPath:
                 "/pull-request/disabled-alias",
                 content=b"{}",
                 headers={
-                    "X-Hub-Signature-256": "sha256=invalid",
+                    "X-Hub-Signature-256": signature,
                     "X-GitHub-Event": "ping",
                 },
             )

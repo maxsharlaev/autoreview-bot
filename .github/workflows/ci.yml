@@ -53,6 +53,7 @@ jobs:
           tests/test_migration_006.py
           tests/test_migration_007.py
           tests/test_cross_owner_db.py
+          tests/test_owner_integrations_db.py
 
   docker:
     runs-on: ubuntu-latest
