@@ -6,7 +6,7 @@ Advisory MVP: GitHub webhook → очередь → Codex CLI → sticky-comment
 
 ```text
 GitHub PR event
-  -> POST /api/v1/pull-request (API key; HMAC проверяется при наличии заголовка)
+  -> POST /api/v1/pull-request (обязательная подпись HMAC, без API key)
   -> Redis / ARQ (до WORKER_MAX_JOBS параллельных job)
   -> Review worker
        -> GitHub App API (PR, diff, permissions)
@@ -49,7 +49,7 @@ Prometheus: API `:8000/metrics`, worker `:9100/metrics`. Стек Grafana/Promet
 
 ## Авторизация API
 
-`POST /api/v1/pull-request`, `POST /api/v1/reviews`, `GET /api/v1/reviews/{id}` и `GET /api/v1/ops/status` требуют `REVIEW_API_KEY`. `GET /metrics` открыт для внутреннего scrape (не публиковать наружу). Подпись `X-Hub-Signature-256` проверяется, когда заголовок присутствует; сейчас API-ключ без подписи тоже принимается. Ручной запуск без вебхука: `POST /api/v1/reviews`. Установка App и секретов: [GITHUB_SETUP.md](GITHUB_SETUP.md).
+`POST /api/v1/reviews`, `GET /api/v1/reviews/{id}` и `GET /api/v1/ops/status` требуют `REVIEW_API_KEY`. `GET /metrics` открыт для внутреннего scrape (не публиковать наружу). `POST /api/v1/pull-request` принимает только запросы с верной подписью `X-Hub-Signature-256` (API-ключ не нужен); без валидного webhook-секрета эндпойнт отвечает 503, а Actions и ручной API продолжают работать. Ручной запуск без вебхука: `POST /api/v1/reviews`. Установка App и секретов: [GITHUB_SETUP.md](GITHUB_SETUP.md).
 
 ## Модель данных
 

@@ -5,7 +5,7 @@ Open PR Review is an advisory service: GitHub PR event → queue → Codex CLI �
 ## Pipeline
 
 ```text
-GitHub Actions or PR webhook → API key (optional webhook HMAC) → Redis/ARQ
+GitHub Actions (API key) or PR webhook (HMAC signature) → Redis/ARQ
   → worker → GitHub PR and diff → optional Jira issue snapshot
   → bounded, untrusted-marked prompt → clone at head SHA
   → Codex CLI in read-only sandbox → JSON verifier
@@ -36,7 +36,7 @@ Postgres stores repositories, pull requests, review runs, findings, finding tran
 
 ## Security and failure handling
 
-The webhook, diff, PR fields and Jira text are untrusted. `REVIEW_API_KEY` protects review and operations endpoints. Webhook HMAC is checked when present, but is not currently mandatory; use the Actions workflow or manual API for public deployments. `/metrics` is intended for internal scraping. See [GitHub setup](GITHUB_SETUP.md).
+The webhook, diff, PR fields and Jira text are untrusted. `REVIEW_API_KEY` protects review and operations endpoints. The webhook endpoint requires a valid `X-Hub-Signature-256` HMAC signature and takes no API key; without a valid webhook secret it returns 503, and the Actions workflow and manual API remain available. `/metrics` is intended for internal scraping. See [GitHub setup](GITHUB_SETUP.md).
 
 Forks, drafts and unauthorized authors are skipped. An empty repository allowlist currently allows all repos. Large PRs produce `PR_TOO_LARGE_FOR_AI_REVIEW`; unavailable Jira context produces a warning; invalid model JSON gets one retry before `AI_OUTPUT_INVALID`.
 

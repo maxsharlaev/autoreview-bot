@@ -63,9 +63,9 @@ curl -fsS http://localhost:8000/health
 curl -fsS http://localhost:8000/is-ready
 ```
 
-Confirm that Postgres and Redis have no published host ports. Proxy only the API through HTTPS. Import the [Prometheus scrape configuration](../observability/prometheus-scrape.yml), [alerts](../observability/alerts.yml) and [Grafana dashboard](../observability/grafana/dashboards/open-pr-review.json) into your existing stack. The default jobs are `open-pr-review-api` and `open-pr-review-worker`.
+Confirm that Postgres and Redis have no published host ports. Proxy only the API through HTTPS. Import the [Prometheus scrape configuration](../observability/prometheus-scrape.yml), [alerts](../observability/alerts.yml) and [Grafana dashboard](../observability/grafana/dashboards/autoreview-bot.json) into your existing stack. The default jobs are `open-pr-review-api` and `open-pr-review-worker`.
 
-Use the [example GitHub Actions trigger](../examples/github/ai-review-trigger.yml) in each reviewed repository, with `AI_REVIEW_API_KEY` equal to server `REVIEW_API_KEY` and `AI_REVIEW_URL` set to the HTTPS base URL. Direct webhooks are not recommended yet: the handler currently accepts an API key without a mandatory signature. Never put a secret in the webhook URL.
+Use the [example GitHub Actions trigger](../examples/github/ai-review-trigger.yml) in each reviewed repository, with `AI_REVIEW_API_KEY` equal to server `REVIEW_API_KEY` and `AI_REVIEW_URL` set to the HTTPS base URL. Alternatively, send GitHub pull request webhooks directly to `/api/v1/pull-request`: every delivery must carry a valid `X-Hub-Signature-256` made with `GITHUB_WEBHOOK_SECRET` (see [GitHub setup](GITHUB_SETUP.md)). Never put a secret in the webhook URL.
 
 Open a non-draft PR in an allowed repository. Expect an API `202`, a run in `GET /api/v1/ops/status`, and the `<!-- open-pr-review -->` comment. If the API returns `202` but no comment appears, follow [operations](OPERATIONS.md).
 

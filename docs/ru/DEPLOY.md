@@ -142,7 +142,7 @@ curl -sS http://<worker>:9100/metrics | grep open_pr_review
 
 Полный чеклист: [GITHUB_SETUP.md](GITHUB_SETUP.md).
 
-App можно использовать для получения installation token без прямого webhook. Для текущего MVP запускайте ревью через Action или вручную. Прямую доставку webhook включать после обязательной проверки подписи; ключ доступа в URL не помещать.
+App можно использовать только для получения installation token и запускать ревью через Action или вручную. Можно и доставлять события напрямую на `/api/v1/pull-request`: каждый запрос должен быть подписан `GITHUB_WEBHOOK_SECRET` (`X-Hub-Signature-256`). Ключ доступа в URL не помещать.
 
 ### Вариант B — GitHub Actions в каждом репозитории с кодом
 
@@ -167,7 +167,7 @@ CI **этого** репозитория (`ci.yml`) ревью не запуск
 
 1. Prometheus: влить [observability/prometheus-scrape.yml](../../observability/prometheus-scrape.yml). Targets: `api:8000` и `worker:9100` (или host/IP, если scrape снаружи Docker-сети). Job names оставить `open-pr-review-api` / `open-pr-review-worker`.
 2. Rule file: [observability/alerts.yml](../../observability/alerts.yml) — `OpenPrReviewWorkerDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
-3. Grafana: Import [observability/grafana/dashboards/open-pr-review.json](../../observability/grafana/dashboards/open-pr-review.json). Datasource UID по умолчанию `prometheus` и `loki` — перенаправить на ваши.
+3. Grafana: Import [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json). Datasource UID по умолчанию `prometheus` и `loki` — перенаправить на ваши.
 4. Логи: ваш агент (Promtail/Alloy) читает stdout контейнеров `api` и `worker`. Метки: Compose уже ставит `OPEN_PR_REVIEW_SERVICE`. Loki-клиента в сервисе **нет**; панель логов в дашборде пустая, пока агент не пишет в ваш Loki.
 
 `GET /api/v1/ops/status` (Bearer `REVIEW_API_KEY`) — снимок очереди без Grafana.
