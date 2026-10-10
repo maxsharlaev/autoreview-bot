@@ -128,7 +128,7 @@ class OwnerFeaturesYaml(BaseModel, extra="forbid"):
 
 
 class OwnerCodexYaml(BaseModel, extra="forbid"):
-    """Override codex settings for an owner (M3: model, reasoning_effort, api_key_env)."""
+    """Per-owner model settings; other codex fields (sandbox, limits) stay global."""
 
     model: str | None = None
     reasoning_effort: str | None = None
@@ -146,11 +146,26 @@ class OwnerPrDescriptionYaml(BaseModel, extra="forbid"):
     enabled: bool | None = None
     mode: Literal["comment", "fill_empty", "append"] | None = None
     title_mode: Literal["off", "until_human_edit", "when_invalid_or_inconsistent"] | None = None
+    check_title_relevance: bool | None = None
+    timeout_seconds: int | None = None
+    max_commit_messages: int | None = None
+    max_commit_chars: int | None = None
+    language: str | None = None
+    prompt_file: str | None = None
+
+
+class OwnerSizeLimitYaml(BaseModel, extra="forbid"):
+    """Partial size limit: unset fields keep the global value."""
+
+    commits: int | None = None
+    changed_lines: int | None = None
 
 
 class OwnerSizeGuardYaml(BaseModel, extra="forbid"):
     """Override size_guard settings for an owner (partial)."""
 
+    soft: OwnerSizeLimitYaml | None = None
+    hard: OwnerSizeLimitYaml | None = None
     override_label: str | None = None
 
 
@@ -166,7 +181,7 @@ class OwnerYaml(BaseModel, extra="forbid"):
     jira: OwnerJiraYaml | None = None
     slack: OwnerSlackYaml | None = None
 
-    # Override fields (M3 will merge these over global config)
+    # Partial policy overrides, deep-merged over the global sections (see registry._merge_owner_config)
     public_repos: OwnerPublicReposYaml | None = None
     language: OwnerLanguageYaml | None = None
     features: OwnerFeaturesYaml | None = None
