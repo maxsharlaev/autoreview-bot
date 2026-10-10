@@ -37,23 +37,27 @@ def parse_cron(expr: str) -> dict[str, set[int]]:
 async def startup(ctx: dict) -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
+    _load_owner_config()
     start_worker_metrics_server(settings.metrics_port)
     engine = create_engine()
     ctx["engine"] = engine
     ctx["session_factory"] = create_session_factory(engine)
-    _warn_owner_config()
     logger.info("worker ready max_jobs=%s job_timeout=%ss", settings.worker_max_jobs, settings.worker_job_timeout)
 
 
-def _warn_owner_config() -> None:
-    """Emit the same legacy 'default' binding warning as API startup, once per worker start."""
+def _load_owner_config() -> None:
+    """Validate the owner config like API startup: a config error stops the worker (exit 1).
+
+    Missing legacy credentials are not an error (mode A without credentials builds an
+    empty registry). Also emits the legacy 'default' binding warning once per worker start.
+    """
     from app.owners.registry import OwnerConfigError, get_owner_registry, warn_if_legacy_default_unbound
 
     try:
         registry = get_owner_registry()
     except OwnerConfigError as exc:
         logger.error("Owner configuration error: %s", exc)
-        return
+        raise SystemExit(1) from exc
     warn_if_legacy_default_unbound(registry, logger)
 
 
@@ -157,10 +161,9 @@ def _digest_enabled_for_any_owner(config) -> bool:
     """True if some active owner has features.digest_enabled in its effective config."""
     from app.owners.registry import get_owner_registry
 
-    try:
-        registry = get_owner_registry()
-    except Exception:  # invalid owner config is reported by worker startup; keep the import safe
-        return config.features.digest_enabled
+    # No fallback on errors: an invalid owner config must fail the worker, not silently
+    # decide whether the digest cron is registered.
+    registry = get_owner_registry()
     if not registry.owners:
         return config.features.digest_enabled
     return any(owner_ctx.config.features.digest_enabled for owner_ctx in registry.owners.values())
