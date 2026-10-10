@@ -845,8 +845,8 @@ def test_owner_without_slack_has_none_slack() -> None:
     assert ctx.slack is None
 
 
-def test_owner_overrides_warn_in_m1() -> None:
-    """Override fields should trigger a warning in M1 (not implemented yet)."""
+def test_owner_overrides_are_applied_without_warning() -> None:
+    """M3: policy overrides are merged into the owner's effective config, no 'ignored' warning."""
     settings = _mock_settings(github_token="ghp_legacy")
     config = AppConfig(
         owners={
@@ -862,11 +862,13 @@ def test_owner_overrides_warn_in_m1() -> None:
 
     registry = OwnerRegistry.build(settings, config, env=env)
 
-    # Should have warning about ignored overrides
-    assert any("override fields" in w and "ignored in M1" in w for w in registry.warnings)
-    assert any("public_repos" in w for w in registry.warnings)
-    assert any("language" in w for w in registry.warnings)
-    assert any("features" in w for w in registry.warnings)
+    assert not any("override" in w for w in registry.warnings)
+    effective = registry.get("org-a").config
+    assert effective.public_repos.jira_disclosure == "full"
+    assert effective.public_repos.security_findings == config.public_repos.security_findings
+    assert (effective.language.summary, effective.language.details) == ("ru", config.language.details)
+    assert (effective.features.jira_comment, effective.features.jira_transition) == (False, True)
+    assert registry.get("default").config == config
 
 
 # --- Context dataclass tests ---

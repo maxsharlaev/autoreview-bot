@@ -112,6 +112,26 @@ curl -H "Authorization: Bearer $AI_REVIEW_API_KEY" \
 
 Чтобы поднять параллелизм: увеличьте `WORKER_MAX_JOBS` и/или количество контейнеров `worker` в Compose. Упираетесь в лимиты OpenAI и клонирование репозиториев, не в FastAPI.
 
+## Несколько owner'ов
+
+У каждого owner'а в блоке `owners:` файла `config.yaml` свои креды GitHub и webhook-секрет; в YAML указываются только имена переменных (см. [README](../../README.md#multiple-owners)). Без явных `*_env` имена такие: `OWNER_<ID>_GITHUB_TOKEN` (PAT) или `OWNER_<ID>_GITHUB_APP_ID` и `OWNER_<ID>_GITHUB_APP_PRIVATE_KEY` (App), `OWNER_<ID>_GITHUB_WEBHOOK_SECRET` и `OWNER_<ID>_REVIEW_API_KEY`; `<ID>` в верхнем регистре, `-` заменяется на `_`.
+
+Два способа подключить ещё одну организацию:
+
+1. **Тот же GitHub App, другая установка.** Установите App в другую организацию. Укажите owner'у те же имена переменных App (и webhook-секрета) и закрепите его репозитории через `allowed_repos: [org-b/*]` или `installation_id`. События по-прежнему идут на `/api/v1/pull-request`; сервис маршрутизирует их по репозиторию и installation id. Общий секрет здесь допустим.
+2. **Свой App или PAT.** Создайте для owner'а отдельный App или PAT и направьте вебхук на `https://review.example.com/api/v1/pull-request/<owner-id>`. Этот адрес проверяет только секрет этого owner'а.
+
+Для запуска из Actions используйте операторский `REVIEW_API_KEY` с `X-Review-Owner: <owner-id>` (или `?owner=`) либо ключ owner'а из `api.key_env`. Дополнительные ответы:
+
+| Ответ | Что значит |
+| --- | --- |
+| `403 owner_signature_mismatch` | Вебхук подписан секретом не того owner'а, к которому относится репозиторий |
+| `202 skipped unknown_owner` / API `403` | Репозиторий никем не закреплён и `routing.unclaimed: reject` |
+| `404 unknown_owner` | Неизвестный owner в URL, `X-Review-Owner` или `?owner=` |
+| `409 owner_repo_conflict` | Явно указан owner для репозитория, закреплённого за другим owner'ом |
+| `403 owner_forbidden` | Ключ owner'а использован для другого owner'а |
+| `401` на `/pull-request/<id>` отключённого owner'а | Нет подписи или она неверна; с верной подписью ответ `202 owner_disabled` |
+
 ## Частые ошибки
 
 | Симптом | Что проверить |

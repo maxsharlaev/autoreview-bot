@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can
+  serve several organizations or accounts through an optional `owners:` block. Each owner has its own GitHub
+  App or PAT, webhook secret (`/api/v1/pull-request` checks all, `/api/v1/pull-request/<id>` one), scoped API
+  key, Jira site and projects, Slack channel and digest, policy overrides (`public_repos`, `language`,
+  `features`, `pr_description`, `size_guard`) and model settings (`codex.model`, `reasoning_effort`,
+  `api_key_env`). Repositories are routed by explicit owner, `allowed_repos` (exact or `org/*`), installation
+  id and `routing.unclaimed`. Integrations are never inherited between owners. API responses gain `owner`.
+- Migrations `005_owner_id`, `006_comment_authors_objects` and `007_findings_owner_id` add `owner_id` to
+  repositories, review runs, digest runs and findings, and store comment authors per owner. Downgrading `007`
+  with findings of several owners on one PR requires `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1`.
+- A config without `owners:` behaves as before (owner `default`). See the README section "Multiple owners".
+
 ### Changed
 
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a

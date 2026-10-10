@@ -152,6 +152,10 @@ class OwnerRegistry:
                 return target
         return None
 
+    def override_labels(self) -> set[str]:
+        """Case-folded size-guard override labels of all active owners (their effective config)."""
+        return {ctx.config.size_guard.override_label.casefold() for ctx in self.owners.values()}
+
     def get_default(self) -> OwnerContext | None:
         """Get the default owner context, or None if no owners are configured."""
         if not self.default_owner_id:
@@ -484,26 +488,6 @@ class OwnerRegistry:
                 )
                 owners[owner_id] = ctx
 
-                # M1: Warn if override fields are set (they're ignored until M3)
-                if owner_yaml.has_overrides():
-                    override_fields = []
-                    if owner_yaml.public_repos is not None:
-                        override_fields.append("public_repos")
-                    if owner_yaml.language is not None:
-                        override_fields.append("language")
-                    if owner_yaml.features is not None:
-                        override_fields.append("features")
-                    if owner_yaml.codex is not None:
-                        override_fields.append("codex")
-                    if owner_yaml.pr_description is not None:
-                        override_fields.append("pr_description")
-                    if owner_yaml.size_guard is not None:
-                        override_fields.append("size_guard")
-                    warnings.append(
-                        f"Owner '{owner_id}' has override fields ({', '.join(override_fields)}) "
-                        "that are ignored in M1. Per-owner overrides will be implemented in M3."
-                    )
-
                 if owner_yaml.default:
                     if has_legacy_github:
                         default_owner_id = owner_id
@@ -791,13 +775,9 @@ def _build_owner_context(
         if slack_yaml.enabled and not slack_yaml.channel:
             warnings.append(f"Owner '{owner_id}' has Slack enabled but no channel; Slack will be disabled.")
 
-    openai_key: str | None = None
-    if owner_yaml.codex and owner_yaml.codex.api_key_env:
-        openai_key = _get_env_value(owner_yaml.codex.api_key_env, env, dotenv_fallback)
-    if not openai_key:
-        openai_key = settings.openai_api_key
+    openai_key = _owner_model_key(owner_id, owner_yaml, env, dotenv_fallback, settings)
 
-    effective_config = _merge_owner_config(app_config, owner_yaml)
+    effective_config = _merge_owner_config(owner_id, app_config, owner_yaml)
 
     if not github_yaml.allowed_repos:
         warnings.append(f"Owner '{owner_id}' has empty allowed_repos: accepts any repository routed to it.")
@@ -815,14 +795,51 @@ def _build_owner_context(
     )
 
 
-def _merge_owner_config(app_config: AppConfig, owner_yaml: OwnerYaml) -> AppConfig:
+def _owner_model_key(
+    owner_id: str,
+    owner_yaml: OwnerYaml,
+    env: dict[str, str],
+    dotenv_fallback: dict[str, str | None],
+    settings: Settings,
+) -> str:
+    """Model key for this owner's Codex runs.
+
+    codex.api_key_env set -> that variable, required (no silent fallback to the shared key);
+    else OWNER_<ID>_OPENAI_API_KEY when set; else the shared OPENAI_API_KEY.
+    """
+    explicit = owner_yaml.codex.api_key_env if owner_yaml.codex else None
+    if explicit:
+        return _get_env_value(explicit, env, dotenv_fallback, required=True, context=f" for owner '{owner_id}'")
+    own = _get_env_value(_env_name_for_owner(owner_id, "OPENAI_API_KEY"), env, dotenv_fallback)
+    return own or settings.openai_api_key
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+_POLICY_SECTIONS = ("public_repos", "language", "features", "pr_description", "size_guard", "codex")
+
+
+def _merge_owner_config(owner_id: str, app_config: AppConfig, owner_yaml: OwnerYaml) -> AppConfig:
     """Effective AppConfig for a named owner.
 
     Integrations are never inherited: `jira` and `slack` come only from the owner's own
     blocks (empty/disabled when absent), so code reading config.jira/config.slack can't
-    reach the legacy owner's site or channel. Policy overrides (public_repos, language,
-    features, pr_description, size_guard, codex) are not merged yet.
+    reach the legacy owner's site or channel.
+
+    Policy sections (public_repos, language, features, pr_description, size_guard and
+    codex.model/reasoning_effort) are deep-merged over the global sections: only the fields
+    the owner sets change, and the merged section is validated like the global one.
     """
+    from pydantic import ValidationError
+
     from app.config import JiraProjectYaml, JiraYaml, SlackYaml
 
     if owner_yaml.jira is not None:
@@ -840,7 +857,25 @@ def _merge_owner_config(app_config: AppConfig, owner_yaml: OwnerYaml) -> AppConf
         slack = SlackYaml(enabled=owner_yaml.slack.enabled, channel=owner_yaml.slack.channel)
     else:
         slack = SlackYaml(enabled=False, channel="")
-    return app_config.model_copy(update={"jira": jira, "slack": slack})
+    update: dict[str, object] = {"jira": jira, "slack": slack}
+
+    for section in _POLICY_SECTIONS:
+        override = getattr(owner_yaml, section)
+        if override is None:
+            continue
+        exclude = {"api_key_env"} if section == "codex" else None
+        changes = override.model_dump(exclude_none=True, exclude=exclude)
+        if not changes:
+            continue
+        current = getattr(app_config, section)
+        try:
+            update[section] = type(current).model_validate(_deep_merge(current.model_dump(), changes))
+        except ValidationError as exc:
+            details = "; ".join(
+                f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}" for err in exc.errors(include_input=False)
+            )
+            raise OwnerConfigError(f"Invalid {section} override for owner '{owner_id}': {details}") from None
+    return app_config.model_copy(update=update)
 
 
 def _validate_claims(

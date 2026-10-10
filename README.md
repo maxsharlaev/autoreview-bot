@@ -68,6 +68,23 @@ Copy `config.example.yaml` → `config.yaml`. Restart the API and worker after c
 
 To replace the review instructions without editing the repository's default, copy `prompts/review.md` to `prompts/local/review.md`, edit the copy, and set `codex.prompt_file: prompts/local/review.md` in `config.yaml`. The custom file replaces the entire instruction section; keep the JSON schema, trust-boundary and output-language rules you need. `{{summary_language}}` and `{{details_language}}` are substituted from `language` settings. `prompts/local/` is excluded from Git and Docker build context, then mounted read-only into the worker by Compose. A missing configured file fails the review rather than silently using the default. Completed runs record a hash of custom instructions as `prompt_version`. Restart the worker after changing the YAML; edits to the prompt file itself are read on the next review.
 
+### Multiple owners
+
+One deployment can serve several GitHub owners (organizations or accounts), each with its own GitHub credentials, webhook secret, API key, Jira, Slack, policies and model key. A config without `owners:` keeps working exactly as before.
+
+| Mode | Detected by | Owners | Default owner |
+| --- | --- | --- | --- |
+| A. Legacy | no `owners:` block | `default`, built from today's env and top-level `github`/`jira`/`slack` | `default` |
+| B. Legacy + extra owners | legacy GitHub credentials in env **and** an `owners:` block | `default` plus the listed owners | `default`, unless an owner has `default: true` |
+| C. Single owner block | no legacy GitHub credentials, one owner | that owner | that owner |
+| D. Several owners | no legacy GitHub credentials, two or more owners | the listed owners | the one with `default: true`, else the first one (startup warning) |
+
+Two `default: true` owners, an owner named `default` in mode B, the same repo or `org/*` claimed by two owners, the same App installation or API key on two owners, or a missing required secret stop startup with an error that names the variable, never its value.
+
+**Routing.** A request goes to: the explicit owner (`/api/v1/pull-request/<id>`, `X-Review-Owner` header, `?owner=` or an owner-scoped API key); else the owner listing the exact `org/repo` in `github.allowed_repos`; else the owner with `org/*`; else the owner whose non-zero `installation_id` matches the webhook; else `routing.unclaimed: default` (default owner) or `reject` (`unknown_owner`). The chosen owner's allowlist then applies. An explicit owner on a repo claimed by another owner gets 409 `owner_repo_conflict`; a webhook signed with one owner's secret for another owner's repo gets 403 `owner_signature_mismatch`. `REVIEW_API_KEY` is the operator key for all owners; `owners.<id>.api.key_env` is a key scoped to one owner, which sees only its own runs.
+
+**Secrets.** YAML holds only env var names (`*_env`) or key file paths; a literal secret is rejected. Without an explicit `*_env` the name is `OWNER_<ID>_<NAME>` (`<ID>` upper-cased, `-` → `_`): `GITHUB_TOKEN`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `REVIEW_API_KEY`, `JIRA_API_TOKEN`, `SLACK_BOT_TOKEN`, `OPENAI_API_KEY`; for example `OWNER_EXAMPLE_ORG_GITHUB_TOKEN`. `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY` (shared default model key) and worker/log/metrics settings stay shared. An invalid webhook secret disables webhooks only for that owner.
+
 ### Multiple owners: keeping pre-multi-owner history
 
 Findings, review runs and comment-author records written before the `owners:` block existed are stored under the legacy owner id `default`. They are bound explicitly, never through the `default: true` flag:
@@ -108,6 +125,38 @@ owners:
 ```
 
 A disabled owner's webhook URL `/api/v1/pull-request/<id>` answers `owner_disabled` only to requests signed with that owner's webhook secret; other requests get 401.
+
+### Multiple owners: policies and model per owner
+
+`public_repos`, `language`, `features` (`jira_comment`, `jira_transition`, `digest_enabled`), `pr_description` and `size_guard` can be overridden per owner. Overrides are partial and deep-merged over the top-level sections: unset fields keep the global value, and the merged section is validated like the global one (for example, `size_guard.hard` must stay at least `size_guard.soft`). They apply to everything that reads them for that owner's runs: the review prompt and comment, public-repository redaction, the size guard and its `override_label` (also in the webhook label check), PR description drafts, Jira comments/transitions and the digest. The digest schedule stays global; `features.digest_enabled` decides per owner.
+
+`codex.model` and `codex.reasoning_effort` can be set per owner; other `codex` fields (sandbox, approval policy, limits, prompt file) stay global. The model key for an owner's runs is `codex.api_key_env` (required when set), else `OWNER_<ID>_OPENAI_API_KEY` if present, else the shared `OPENAI_API_KEY`. Only that key reaches the Codex sandbox, and only for that owner's runs; other owners' keys and owner secrets never enter the Codex or git environment.
+
+```yaml
+owners:
+  example-org:
+    github: { auth: pat, allowed_repos: [example-org/*] }
+    public_repos: { security_findings: redact_all }
+    language: { summary: ru, details: ru }
+    features: { jira_transition: false, digest_enabled: false }
+    size_guard:
+      hard: { commits: 100 }
+      override_label: example:force-review
+    codex:
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      api_key_env: OWNER_EXAMPLE_ORG_MODEL_KEY
+```
+
+### Multiple owners: upgrade and rollback
+
+1. Deploy the new image and run `alembic upgrade head` (Compose does this in `migrate`) with the config untouched: behaviour is unchanged and logs/metrics show `owner=default`.
+2. Add `owners.<id>` and its `OWNER_<ID>_*` env, then restart API and worker; the API startup log shows the number of owners, the default owner and any owner config warnings.
+3. Connect the new owner's events: install the same GitHub App in the other organization (same env names, `allowed_repos: [org-b/*]` or `installation_id`), or give the owner its own App/PAT with a webhook to `/api/v1/pull-request/<id>`.
+4. Check a manual `POST /api/v1/reviews` with and without `X-Review-Owner`, a test PR in each organization, and `owner` in `GET /api/v1/reviews/{id}`.
+5. Optional: move the legacy setup into a named owner with `default: true`, `aliases: [default]` and `*_env` pointing at the existing variable names (see above).
+6. Rollback within multi-owner versions: remove or disable the `owners.<id>` block and restart; runs queued for that owner are skipped with `owner_not_configured` / `owner_disabled`, and its rows stay in the database.
+7. Rollback to an image from before multi-owner support: with the new image, run `alembic downgrade 004_finding_details_visibility` first, then deploy the old image. The old image cannot use the upgraded schema as is: after `007_findings_owner_id`, `findings.owner_id` is required without a default, and after `006_comment_authors_objects` comment authors are stored as objects. If findings of several owners share a stable id on one pull request, the `007` downgrade refuses and reports the count; set `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` to keep the repository owner's row (or the oldest) and delete the others together with their transitions.
 
 ## Optional PR description draft
 
