@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from app.api.deps import get_session, require_api_key
+from app.api.deps import Principal, get_session, require_principal
 from app.api.v1 import api_router
 from app.config import AppConfig, GitHubYaml, repo_allowed
 from app.services.constants import SKIP_REPO
@@ -58,7 +58,8 @@ def _client(*, with_api_key: bool) -> TestClient:
     application.dependency_overrides[get_session] = _fake_session
     application.state.redis = AsyncMock()
     if with_api_key:
-        application.dependency_overrides[require_api_key] = lambda: None
+        # For /reviews endpoint, override require_principal to return an operator principal
+        application.dependency_overrides[require_principal] = lambda: Principal(kind="operator", owner_id=None)
     return TestClient(application)
 
 
@@ -70,11 +71,49 @@ def test_manual_review_requires_access_key() -> None:
     assert response.status_code == 401
 
 
+def _mock_settings() -> MagicMock:
+    """Create mock settings for registry tests."""
+    mock = MagicMock()
+    mock.github_token = ""
+    mock.github_app_id = 0
+    mock.github_app_private_key = ""
+    mock.github_installation_id = 0
+    mock.github_webhook_secret = ""
+    mock.jira_base_url = ""
+    mock.jira_email = ""
+    mock.jira_api_token = ""
+    mock.slack_bot_token = ""
+    mock.openai_api_key = ""
+    mock.review_api_key = ""
+    mock.github_private_key_pem.return_value = ""
+    return mock
+
+
 def test_manual_review_rejects_unknown_repo() -> None:
-    with patch("app.api.v1.reviews.repo_allowed", return_value=False):
+    """Test that a repo not in the allowlist is rejected with real registry."""
+    from app.owners.registry import OwnerRegistry
+
+    # Build a real registry with a specific allowlist
+    settings = _mock_settings()
+    config = AppConfig(
+        owners={
+            "org-a": {
+                "default": True,
+                "github": {
+                    "auth": "pat",
+                    "allowed_repos": ["org-a/allowed-repo"],  # Only this repo is allowed
+                },
+            },
+        }
+    )
+    env = {"OWNER_ORG_A_GITHUB_TOKEN": "ghp_test_token"}
+
+    registry = OwnerRegistry.build(settings, config, env=env)
+
+    with patch("app.api.v1.reviews.get_owner_registry", return_value=registry):
         response = _client(with_api_key=True).post(
             "/api/v1/reviews",
-            json={"repository": "other/repo", "number": 1},
+            json={"repository": "other/repo", "number": 1},  # Not in allowlist
         )
     assert response.status_code == 403
     assert response.json()["detail"] == SKIP_REPO

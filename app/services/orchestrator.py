@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from app.adapters.github import ChangedFile, GitHubAppClient, GitHubError, PullRequestInfo
 from app.adapters.jira import JiraClient, JiraError, JiraIssue
-from app.config import AppConfig, Settings, get_app_config, get_settings
+from app.config import AppConfig, Settings, get_settings
 from app.metrics import record_review_finished
 from app.models import (
     Finding,
@@ -26,8 +26,11 @@ from app.models import (
     Repository,
     ReviewRun,
     TaskSnapshot,
-    extract_comment_author_logins,
+    build_comment_author_entry,
+    effective_owner_id,
+    extract_comment_author_logins_for_owner,
 )
+from app.owners.registry import DEFAULT_OWNER_ID, OwnerRegistry, get_owner_registry
 from app.paths import data_file
 from app.progress import ReviewProgress
 from app.services.codex_runner import CodexRunnerError, run_codex
@@ -70,12 +73,28 @@ from app.services.visibility import Visibility, confirmed_visibility
 logger = logging.getLogger(__name__)
 
 
+def _filter_findings_for_owner(findings: list, owner_id: str, legacy_default_owner: str | None = None) -> list:
+    """Filter findings to only include those belonging to the specified owner.
+
+    This prevents cross-owner data mixing when a repository changes ownership.
+    Findings have owner_id set directly; legacy findings with owner_id='default'
+    belong only to OwnerRegistry.legacy_default_alias() (nobody when it is None).
+    """
+    return [
+        finding
+        for finding in findings
+        if effective_owner_id(getattr(finding, "owner_id", None), legacy_default_owner) == owner_id
+    ]
+
+
 async def _remember_comment_author(
     session: AsyncSession,
     github: GitHubAppClient,
     repository: Repository,
     owner: str,
     repo: str,
+    owner_id: str = "default",
+    legacy_default_owner: str | None = None,
 ) -> None:
     try:
         token = await github.installation_token(owner, repo)
@@ -92,14 +111,19 @@ async def _remember_comment_author(
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
-    existing_logins = extract_comment_author_logins(locked.comment_authors)
-    if login.casefold() not in {author.casefold() for author in existing_logins}:
-        # M1: Write plain strings for backward compatibility with old images.
-        # The tolerant reader handles both formats during rollout.
-        # M2 will switch to writing the object format with owner_id.
-        locked.comment_authors = list(locked.comment_authors or []) + [login]
-        existing_logins.append(login)
-    github.previous_comment_authors = tuple(existing_logins)
+
+    # M2: Deduplicate by (login, owner_id) pair - check if this login is already recorded for this owner
+    existing_for_owner = extract_comment_author_logins_for_owner(locked.comment_authors, owner_id, legacy_default_owner)
+    if login.casefold() not in {author.casefold() for author in existing_for_owner}:
+        # M2: Write object format with owner_id and kind for multi-owner identity tracking
+        cred_kind = github._credentials.kind if github._credentials else None
+        entry = build_comment_author_entry(login, owner_id=owner_id, kind=cred_kind)
+        locked.comment_authors = list(locked.comment_authors or []) + [entry]
+
+    # For the current run, only trust logins from this owner
+    github.previous_comment_authors = tuple(
+        extract_comment_author_logins_for_owner(locked.comment_authors, owner_id, legacy_default_owner)
+    )
     await session.commit()
 
 
@@ -113,12 +137,12 @@ async def run_review(
     jira: JiraClient | None = None,
     publisher: Publisher | None = None,
     codex_fn=run_codex,
+    registry: OwnerRegistry | None = None,
 ) -> ReviewRun:
+    from app.services.constants import SKIP_OWNER_CHANGED, SKIP_OWNER_DISABLED, SKIP_OWNER_NOT_CONFIGURED
+
     settings = settings or get_settings()
-    config = config or get_app_config()
-    github = github or GitHubAppClient(settings)
-    jira = jira or JiraClient(config)
-    publisher = publisher or Publisher(github, jira=jira, config=config)
+    registry = registry or get_owner_registry()
 
     run = (
         await session.execute(
@@ -134,11 +158,102 @@ async def run_review(
         return run
 
     pr = run.pull_request
-    progress = ReviewProgress(run.id, pr.repository.full_name, pr.number)
+    progress = ReviewProgress(run.id, pr.repository.full_name, pr.number, owner_id=run.owner_id)
     started = time.monotonic()
+
+    # Get owner context for this run
+    owner_id = run.owner_id
+    ctx = registry.get(owner_id)
+
+    # Check if owner is configured and enabled
+    if ctx is None:
+        # Check if owner exists but is disabled (skip with owner_disabled, not owner_not_configured)
+        if registry.is_disabled(owner_id):
+            logger.warning(
+                "owner_disabled owner=%s run=%s repo=%s",
+                owner_id,
+                run.id,
+                pr.repository.full_name,
+            )
+            progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
+            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
+        logger.warning(
+            "owner_not_configured owner=%s run=%s repo=%s",
+            owner_id,
+            run.id,
+            pr.repository.full_name,
+        )
+        progress.event(f"skipped: {SKIP_OWNER_NOT_CONFIGURED}")
+        return await _skip(session, run, started, SKIP_OWNER_NOT_CONFIGURED)
+
+    # Re-resolve routing to check if the route changed since enqueue
+    # Use the same explicit_owner if the original route was explicit
+    installation_id = (run.summary or {}).get("installation_id")
+    route_reason = (run.summary or {}).get("route_reason")
+    explicit_owner = owner_id if route_reason == "explicit" else None
+    route = registry.resolve(pr.repository.full_name, installation_id=installation_id, explicit_owner=explicit_owner)
+
+    # Handle rejected re-resolve
+    if route.rejected():
+        from app.owners.registry import REJECT_OWNER_DISABLED
+
+        if route.reason == REJECT_OWNER_DISABLED:
+            logger.warning(
+                "owner_disabled owner=%s run=%s repo=%s",
+                owner_id,
+                run.id,
+                pr.repository.full_name,
+            )
+            progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
+            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
+        # Other rejection reasons: treat as owner_changed (route no longer valid)
+        logger.warning(
+            "owner_changed owner=%s reason=%s run=%s repo=%s",
+            owner_id,
+            route.reason,
+            run.id,
+            pr.repository.full_name,
+        )
+        progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
+        return await _skip(session, run, started, SKIP_OWNER_CHANGED)
+
+    if route.owner_id != owner_id:
+        logger.warning(
+            "owner_changed owner=%s new_owner=%s run=%s repo=%s",
+            owner_id,
+            route.owner_id,
+            run.id,
+            pr.repository.full_name,
+        )
+        progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
+        return await _skip(session, run, started, SKIP_OWNER_CHANGED)
+
+    # Owner of rows stored with the legacy owner_id 'default' (explicit binding; None = nobody)
+    legacy_default_owner = registry.legacy_default_alias()
+
+    # Build clients from owner context (unless overridden for testing)
+    config = config or ctx.config
+    if github is None:
+        # M2: Only trust comment authors recorded for this owner
+        previous_authors = tuple(
+            extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id, legacy_default_owner)
+        )
+        github = GitHubAppClient.from_credentials(
+            ctx.github, owner_id=owner_id, previous_comment_authors=previous_authors
+        )
+
+    if jira is None:
+        jira = JiraClient.from_binding(ctx.jira, config) if ctx.jira else JiraClient.disabled(config)
+
+    if publisher is None:
+        publisher = Publisher.from_context(ctx, previous_comment_authors=github.previous_comment_authors)
+
+    # Use owner's OpenAI API key
+    openai_api_key = ctx.openai_api_key or settings.openai_api_key
+
     run.status = "running"
     await session.commit()
-    progress.event("running")
+    progress.event(f"running owner={owner_id}")
 
     owner, repo = pr.repository.full_name.split("/", 1)
     progress.event(f"load PR #{pr.number} from GitHub")
@@ -168,8 +283,19 @@ async def run_review(
         return await _skip(session, run, started, SKIP_NO_WRITE)
 
     if isinstance(github, GitHubAppClient):
-        github.previous_comment_authors = tuple(extract_comment_author_logins(pr.repository.comment_authors))
-        await _remember_comment_author(session, github, pr.repository, owner, repo)
+        # M2: Only trust comment authors recorded for this owner
+        github.previous_comment_authors = tuple(
+            extract_comment_author_logins_for_owner(pr.repository.comment_authors, owner_id, legacy_default_owner)
+        )
+        await _remember_comment_author(
+            session,
+            github,
+            pr.repository,
+            owner,
+            repo,
+            owner_id=owner_id,
+            legacy_default_owner=legacy_default_owner,
+        )
 
     webhook_metrics = (run.summary or {}).get("size_metrics") if run.head_sha == info.head_sha else None
     size_info = info
@@ -238,8 +364,11 @@ async def run_review(
         jira_warning = "ISSUE_KEY_MISSING"
         progress.event("no Jira key in branch/title/body")
 
+    # Filter findings to only include those belonging to this owner (prevent cross-owner data mixing)
+    owner_findings = _filter_findings_for_owner(pr.findings, owner_id, legacy_default_owner)
+
     previous = []
-    for item in pr.findings:
+    for item in owner_findings:
         expose_details = visibility == "private" or getattr(item, "details_visibility", None) == "public"
         previous.append(
             PreviousFinding(
@@ -254,7 +383,7 @@ async def run_review(
                 recommendation=item.recommendation if expose_details else "",
             )
         )
-    previous_head = await _previous_head(session, pr.id, run.id)
+    previous_head = await _previous_head(session, pr.id, run.id, owner_id, legacy_default_owner)
 
     context = build_context(
         repository=pr.repository.full_name,
@@ -352,7 +481,7 @@ async def run_review(
                     output_path=output_path,
                     model=config.codex.model,
                     timeout_seconds=config.codex.timeout_seconds,
-                    openai_api_key=settings.openai_api_key,
+                    openai_api_key=openai_api_key,
                     reasoning_effort=config.codex.reasoning_effort,
                     sandbox=config.codex.sandbox,
                     approval_policy=config.codex.approval_policy,
@@ -422,7 +551,7 @@ async def run_review(
                 files=files,
                 jira_text=jira_text,
                 config=config,
-                settings=settings,
+                openai_api_key=openai_api_key,
             )
     finally:
         if checkout is not None:
@@ -432,10 +561,11 @@ async def run_review(
     verified.coverage["files_reviewed"] = context.files_reviewed
     verified.coverage["skipped_paths"] = context.skipped_paths
     fresh_ids = {item.stable_id for item in verified.findings}
-    _carry_open_previous(verified, pr.findings, config.language.details, visibility=visibility)
+    # Use owner_findings to prevent cross-owner data mixing
+    _carry_open_previous(verified, owner_findings, config.language.details, visibility=visibility)
     redacted_prior_ids = {
         item.stable_id
-        for item in pr.findings
+        for item in owner_findings
         if getattr(item, "details_visibility", None) != "public"
         and (
             item.stable_id not in fresh_ids
@@ -458,7 +588,14 @@ async def run_review(
         if publication == "public_fallback":
             visibility = "public"
     transitions = await _store_findings(
-        session, pr, run, verified, fresh_ids=fresh_ids, details_visibility=context_visibility
+        session,
+        pr,
+        run,
+        verified,
+        fresh_ids=fresh_ids,
+        details_visibility=context_visibility,
+        owner_id=owner_id,
+        owner_findings=owner_findings,
     )
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
@@ -501,7 +638,7 @@ async def run_review(
             files=files,
             jira_issue=jira_issue,
             config=config,
-            settings=settings,
+            openai_api_key=openai_api_key,
             pr=pr,
             visibility=visibility,
         ),
@@ -581,7 +718,7 @@ async def _check_public_alignment(
     files: list[ChangedFile],
     jira_text: str,
     config: AppConfig,
-    settings: Settings,
+    openai_api_key: str,
 ) -> str:
     schema_path = checkout / ".open-pr-review-public-alignment-schema.json"
     output_path = checkout / ".open-pr-review-public-alignment-out.json"
@@ -605,7 +742,7 @@ async def _check_public_alignment(
             output_path=output_path,
             model=config.codex.model,
             timeout_seconds=min(120, config.codex.timeout_seconds),
-            openai_api_key=settings.openai_api_key,
+            openai_api_key=openai_api_key,
             reasoning_effort=config.codex.reasoning_effort,
             sandbox="read-only",
             approval_policy="never",
@@ -629,7 +766,7 @@ async def _run_pr_description_after_review(
     files: list[ChangedFile],
     jira_issue: JiraIssue | None,
     config: AppConfig,
-    settings: Settings,
+    openai_api_key: str,
     pr: PullRequest,
     visibility: Visibility,
 ) -> None:
@@ -652,7 +789,7 @@ async def _run_pr_description_after_review(
             files=files,
             jira_issue=jira_issue,
             config=config,
-            settings=settings,
+            openai_api_key=openai_api_key,
             pr=pr,
             visibility=visibility,
         )
@@ -670,7 +807,7 @@ async def _publish_pr_description(
     files: list[ChangedFile],
     jira_issue: JiraIssue | None,
     config: AppConfig,
-    settings: Settings,
+    openai_api_key: str,
     pr: PullRequest | None = None,
     visibility: Visibility = "public",
 ) -> None:
@@ -719,7 +856,7 @@ async def _publish_pr_description(
             output_path=output_path,
             model=config.codex.model,
             timeout_seconds=config.codex.timeout_seconds,
-            openai_api_key=settings.openai_api_key,
+            openai_api_key=openai_api_key,
             reasoning_effort=config.codex.reasoning_effort,
             sandbox="read-only",
             approval_policy="never",
@@ -735,7 +872,7 @@ async def _publish_pr_description(
                 schema_path=language_schema_path,
                 output_path=language_output_path,
                 config=config,
-                settings=settings,
+                openai_api_key=openai_api_key,
             )
         if matches:
             payload = candidate
@@ -888,7 +1025,7 @@ async def _verify_generated_language(
     schema_path,
     output_path,
     config: AppConfig,
-    settings: Settings,
+    openai_api_key: str,
 ) -> bool:
     prose = {name: payload[name] for name in ("summary", "changes", "testing", "notes_risks", "suggested_title")}
     data = strip_boundary_tags(json.dumps(prose, ensure_ascii=False))
@@ -906,7 +1043,7 @@ async def _verify_generated_language(
         output_path=output_path,
         model=config.codex.model,
         timeout_seconds=config.codex.timeout_seconds,
-        openai_api_key=settings.openai_api_key,
+        openai_api_key=openai_api_key,
         reasoning_effort=config.codex.reasoning_effort,
         sandbox="read-only",
         approval_policy="never",
@@ -930,12 +1067,29 @@ def _sync_pr(pr: PullRequest, info) -> None:
     pr.is_fork = info.is_fork
 
 
-async def _previous_head(session: AsyncSession, pull_request_id: uuid.UUID, current_run_id: uuid.UUID) -> str | None:
+async def _previous_head(
+    session: AsyncSession,
+    pull_request_id: uuid.UUID,
+    current_run_id: uuid.UUID,
+    owner_id: str,
+    legacy_default_owner: str | None = None,
+) -> str | None:
+    """Get the head SHA of the most recent completed run for this owner.
+
+    Filters by owner_id to prevent cross-owner data mixing - a new owner
+    should not see the previous head SHA from another owner's review.
+    Runs stored with the legacy owner_id='default' belong only to legacy_default_owner
+    (OwnerRegistry.legacy_default_alias()); when it is None they belong to no owner.
+    """
+    owner_ids = {owner_id}
+    if legacy_default_owner is not None and owner_id == legacy_default_owner:
+        owner_ids.add(DEFAULT_OWNER_ID)
     result = await session.execute(
         select(ReviewRun)
         .where(
             ReviewRun.pull_request_id == pull_request_id,
             ReviewRun.id != current_run_id,
+            ReviewRun.owner_id.in_(owner_ids),
             ReviewRun.status == "completed",
         )
         .order_by(ReviewRun.created_at.desc())
@@ -1036,8 +1190,12 @@ async def _store_findings(
     *,
     fresh_ids: set[str],
     details_visibility: Visibility,
+    owner_id: str,
+    owner_findings: list | None = None,
 ) -> list[FindingTransitionView]:
-    existing = {item.stable_id: item for item in pr.findings}
+    # Use owner_findings to prevent cross-owner data mixing when updating findings
+    findings_to_use = owner_findings if owner_findings is not None else pr.findings
+    existing = {item.stable_id: item for item in findings_to_use}
     previous_map = {item.stable_id: item for item in verified.previous_findings}
     transitions: list[FindingTransitionView] = []
 
@@ -1048,6 +1206,7 @@ async def _store_findings(
                 pull_request_id=pr.id,
                 first_seen_run_id=run.id,
                 last_seen_run_id=run.id,
+                owner_id=owner_id,
                 stable_id=view.stable_id,
                 severity=view.severity,
                 category=view.category,
@@ -1236,11 +1395,17 @@ async def _complete(
         error_code=error_code,
         trigger=run.trigger,
         duration_ms=run.duration_ms,
+        owner=run.owner_id,
     )
     return run
 
 
-async def _skip(session: AsyncSession, run: ReviewRun, started: float, reason: str) -> ReviewRun:
+async def _skip(
+    session: AsyncSession,
+    run: ReviewRun,
+    started: float,
+    reason: str,
+) -> ReviewRun:
     run.status = "skipped"
     run.skip_reason = reason
     run.duration_ms = int((time.monotonic() - started) * 1000)
@@ -1250,11 +1415,17 @@ async def _skip(session: AsyncSession, run: ReviewRun, started: float, reason: s
         error_code=reason,
         trigger=run.trigger,
         duration_ms=run.duration_ms,
+        owner=run.owner_id,
     )
     return run
 
 
-async def _fail(session: AsyncSession, run: ReviewRun, started: float, code: str) -> ReviewRun:
+async def _fail(
+    session: AsyncSession,
+    run: ReviewRun,
+    started: float,
+    code: str,
+) -> ReviewRun:
     run.status = "failed"
     run.error_code = code
     run.duration_ms = int((time.monotonic() - started) * 1000)
@@ -1264,6 +1435,7 @@ async def _fail(session: AsyncSession, run: ReviewRun, started: float, code: str
         error_code=code,
         trigger=run.trigger,
         duration_ms=run.duration_ms,
+        owner=run.owner_id,
     )
     return run
 

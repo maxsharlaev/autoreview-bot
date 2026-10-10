@@ -11,9 +11,14 @@ from sqlalchemy.orm import selectinload
 from app.adapters.github import GitHubAppClient
 from app.adapters.slack import SlackClient, SlackError
 from app.config import AppConfig, get_app_config
-from app.models import DigestRun, PullRequest, Repository
+from app.models import DigestRun, Finding, PullRequest, Repository, effective_owner_id
 
 logger = logging.getLogger(__name__)
+
+
+def _finding_belongs_to_owner(finding: Finding, owner_id: str, legacy_default_owner: str | None) -> bool:
+    """Check if a finding belongs to the specified owner (legacy 'default' rows mapped)."""
+    return effective_owner_id(getattr(finding, "owner_id", None), legacy_default_owner) == owner_id
 
 
 def _age_hours(created_at: datetime | None) -> float:
@@ -47,18 +52,42 @@ def format_digest_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def build_digest_payload(session: AsyncSession) -> dict[str, Any]:
-    result = await session.execute(
+async def build_digest_payload(
+    session: AsyncSession,
+    owner_id: str | None = None,
+    legacy_default_owner: str | None = None,
+) -> dict[str, Any]:
+    """Build digest payload for the specified owner.
+
+    Args:
+        session: Database session
+        owner_id: Owner ID to filter PRs by (via repository.owner_id)
+        legacy_default_owner: OwnerRegistry.legacy_default_alias(); owner of findings
+            stored with owner_id='default' (None: they count for no owner)
+    """
+    query = (
         select(PullRequest)
         .options(selectinload(PullRequest.repository), selectinload(PullRequest.findings))
         .where(PullRequest.state == "open")
-        .order_by(PullRequest.updated_at.desc())
     )
+    if owner_id:
+        # Repositories last seen before multi-owner support still carry owner_id='default'.
+        repo_owner_ids = {owner_id}
+        if legacy_default_owner is not None and legacy_default_owner == owner_id:
+            repo_owner_ids.add("default")
+        query = query.join(PullRequest.repository).where(Repository.owner_id.in_(repo_owner_ids))
+    query = query.order_by(PullRequest.updated_at.desc())
+
+    result = await session.execute(query)
     items = []
     blocker_count = 0
     for pr in result.scalars().unique():
+        # Only count blockers from this owner's findings
+        owner_findings = [
+            f for f in pr.findings if _finding_belongs_to_owner(f, owner_id or "default", legacy_default_owner)
+        ]
         has_blockers = any(
-            finding.current_status == "open" and finding.severity in {"P0", "P1"} for finding in pr.findings
+            finding.current_status == "open" and finding.severity in {"P0", "P1"} for finding in owner_findings
         )
         if has_blockers:
             blocker_count += 1
@@ -87,13 +116,31 @@ async def run_digest(
     config: AppConfig | None = None,
     slack: SlackClient | None = None,
     github: GitHubAppClient | None = None,
+    owner_id: str | None = None,
+    allowed_repos: list[str] | None = None,
+    legacy_default_owner: str | None = None,
 ) -> DigestRun:
+    """Run digest for the specified owner.
+
+    Args:
+        legacy_default_owner: OwnerRegistry.legacy_default_alias(); owner of findings
+            stored with owner_id='default'. None: they count for no owner.
+    """
     cfg = config or get_app_config()
-    payload = await build_digest_payload(session)
-    if github and cfg.github.allowed_repos:
-        # Best-effort refresh of open PR metadata for registered repos.
-        for full_name in cfg.github.allowed_repos:
+    effective_owner_id = owner_id or "default"
+    payload = await build_digest_payload(
+        session, owner_id=effective_owner_id, legacy_default_owner=legacy_default_owner
+    )
+
+    # Use owner's allowed_repos if provided; otherwise fall back to global config
+    repos_to_refresh = allowed_repos if allowed_repos is not None else cfg.github.allowed_repos
+    if github and repos_to_refresh:
+        # Best-effort refresh of open PR metadata for owner's allowed repos.
+        for full_name in repos_to_refresh:
             if "/" not in full_name:
+                continue
+            # Skip wildcards like "org/*" for refresh
+            if full_name.endswith("/*"):
                 continue
             owner, repo = full_name.split("/", 1)
             try:
@@ -102,12 +149,22 @@ async def run_digest(
                 logger.exception("Failed to refresh open PRs for %s", full_name)
                 continue
             for raw in pulls:
-                await _upsert_open_pr(session, full_name, raw)
-        payload = await build_digest_payload(session)
+                await _upsert_open_pr(session, full_name, raw, owner_id=effective_owner_id)
+        payload = await build_digest_payload(
+            session, owner_id=effective_owner_id, legacy_default_owner=legacy_default_owner
+        )
 
     slack_sent = False
-    client = slack or SlackClient(cfg)
-    if client.enabled():
+    # Non-default owners must use their own Slack binding; no global fallback
+    if slack is not None:
+        client = slack
+    elif effective_owner_id == "default":
+        client = SlackClient(cfg)
+    else:
+        # Non-default owner without explicit slack client: skip Slack
+        client = None
+
+    if client is not None and client.enabled():
         try:
             slack_sent = await client.post_message(format_digest_text(payload))
         except SlackError:
@@ -118,6 +175,7 @@ async def run_digest(
         blocker_pr_count=payload["blocker_pr_count"],
         slack_sent=slack_sent,
         payload=payload,
+        owner_id=effective_owner_id,
     )
     session.add(digest)
     await session.commit()
@@ -126,12 +184,15 @@ async def run_digest(
     return digest
 
 
-async def _upsert_open_pr(session: AsyncSession, full_name: str, raw: dict[str, Any]) -> None:
+async def _upsert_open_pr(
+    session: AsyncSession, full_name: str, raw: dict[str, Any], *, owner_id: str = "default"
+) -> None:
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
-        repo = Repository(full_name=full_name, enabled=True)
+        repo = Repository(full_name=full_name, enabled=True, owner_id=owner_id)
         session.add(repo)
         await session.flush()
+    # Do NOT reassign owner_id if repo already exists - it belongs to its current owner
     number = int(raw["number"])
     pr = (
         await session.execute(

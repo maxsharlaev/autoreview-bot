@@ -32,6 +32,51 @@ def extract_comment_author_logins(comment_authors: list[Any] | None) -> list[str
     return logins
 
 
+LEGACY_OWNER_ID = "default"
+
+
+def effective_owner_id(stored_owner_id: str | None, legacy_default_owner: str | None) -> str:
+    """Owner a stored row belongs to; legacy 'default' rows go to their explicit owner.
+
+    legacy_default_owner comes from OwnerRegistry.legacy_default_alias(). When it is
+    None the row stays with the literal 'default' owner, which only exists in modes
+    A/B; with named owners only (modes C/D) such rows then belong to no owner.
+    """
+    owner_id = stored_owner_id or LEGACY_OWNER_ID
+    if owner_id == LEGACY_OWNER_ID and legacy_default_owner:
+        return legacy_default_owner
+    return owner_id
+
+
+def extract_comment_author_logins_for_owner(
+    comment_authors: list[Any] | None,
+    owner_id: str,
+    legacy_default_owner: str | None = None,
+) -> list[str]:
+    """Extract login strings for a specific owner only.
+
+    Only returns logins where:
+    - Old format (plain strings) and new-format entries with owner_id 'default':
+      they belong to legacy_default_owner (OwnerRegistry.legacy_default_alias());
+      when it is None, only to a literal 'default' owner (none exists in modes C/D)
+    - New format: owner_id matches the specified owner
+
+    This ensures comment author deduplication is per-owner.
+    """
+    if not comment_authors:
+        return []
+
+    logins = []
+    for item in comment_authors:
+        if isinstance(item, str):
+            if effective_owner_id(LEGACY_OWNER_ID, legacy_default_owner) == owner_id:
+                logins.append(item)
+        elif isinstance(item, dict) and "login" in item:
+            if effective_owner_id(item.get("owner_id"), legacy_default_owner) == owner_id:
+                logins.append(item["login"])
+    return logins
+
+
 def build_comment_author_entry(login: str, owner_id: str = "default", kind: str | None = None) -> dict[str, Any]:
     """Build a comment_authors entry in the new format."""
     return {"login": login, "owner_id": owner_id, "kind": kind}
@@ -112,7 +157,7 @@ class ReviewRun(TimestampMixin, Base):
 
 class Finding(TimestampMixin, Base):
     __tablename__ = "findings"
-    __table_args__ = (UniqueConstraint("pull_request_id", "stable_id", name="uq_findings_pr_stable"),)
+    __table_args__ = (UniqueConstraint("pull_request_id", "owner_id", "stable_id", name="uq_findings_pr_owner_stable"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pull_request_id: Mapped[uuid.UUID] = mapped_column(
@@ -124,6 +169,7 @@ class Finding(TimestampMixin, Base):
     last_seen_run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("review_runs.id", ondelete="CASCADE"), nullable=False
     )
+    owner_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False, index=True)
     stable_id: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(8), nullable=False)
     category: Mapped[str] = mapped_column(String(64), default="", nullable=False)

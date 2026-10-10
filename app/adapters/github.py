@@ -41,16 +41,6 @@ def _clear_caches() -> None:
     _COMMENT_AUTHOR_LOGINS.clear()
 
 
-def _evict_caches_for_installation(app_id: int, installation_id: int) -> None:
-    """Evict cached tokens and installation IDs for a given app/installation."""
-    cache_key = (app_id, installation_id)
-    _INSTALLATION_TOKEN_CACHE.pop(cache_key, None)
-    # Evict installation ID cache entries that map to this installation_id
-    to_remove = [k for k, (iid, _) in _INSTALLATION_ID_CACHE.items() if k[0] == app_id and iid == installation_id]
-    for k in to_remove:
-        _INSTALLATION_ID_CACHE.pop(k, None)
-
-
 class GitHubError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -199,19 +189,6 @@ class GitHubAppClient:
                 f"{method} {url} -> {response.status_code}: {response.text[:500]}", status_code=response.status_code
             )
         return response
-
-    def _is_installation_id_static(self) -> bool:
-        """Return True if installation_id is statically configured (no lookup needed).
-
-        Only applies when the installation_id comes from credentials or (for legacy mode)
-        from global settings. Owner clients with installation_id=0 always need lookup.
-        """
-        if self._credentials is not None and self._credentials.installation_id:
-            return True
-        # Global settings only apply to legacy mode (no credentials, settings present)
-        if self._credentials is None and self.settings and self.settings.github_installation_id:
-            return True
-        return False
 
     async def resolve_installation_id(self, owner: str, repo: str) -> int:
         if self._installation_id:

@@ -57,6 +57,8 @@ async def test_incomplete_public_repeat_keeps_private_database_details() -> None
     session = SimpleNamespace(add=lambda _: None, flush=AsyncMock())
     pr = SimpleNamespace(findings=[prior])
     run = SimpleNamespace(id=uuid.uuid4())
-    await _store_findings(session, pr, run, verified, fresh_ids={view.stable_id}, details_visibility="public")
+    await _store_findings(
+        session, pr, run, verified, fresh_ids={view.stable_id}, details_visibility="public", owner_id="default"
+    )
     assert prior.scenario == SECRET
     assert prior.details_visibility == "private"

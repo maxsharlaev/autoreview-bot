@@ -97,7 +97,7 @@ def test_webhook_accepts_valid_signature_without_api_key() -> None:
     with (
         patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
         patch("app.api.v1.pull_request.get_normalized_secret", return_value=secret),
-        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
+        patch("app.api.v1.pull_request.get_owner_webhook_secrets", return_value={}),
     ):
         response = client.post(
             "/pull-request",
@@ -107,7 +107,7 @@ def test_webhook_accepts_valid_signature_without_api_key() -> None:
                 "X-GitHub-Event": "ping",
             },
         )
-        assert response.status_code in (200, 202), f"Expected 2xx, got {response.status_code}"
+        assert response.status_code == 202  # Mode A byte-for-byte compatibility
         assert response.json()["status"] == "ok"
 
 
@@ -167,15 +167,113 @@ def test_webhook_rejects_malformed_signature() -> None:
         assert response.status_code == 401
 
 
-def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
-    """Labeled event with autoreview:force label queues review with force=True."""
+def test_webhook_multi_owner_secrets_verifies_against_owner_secrets() -> None:
+    """Webhook endpoint verifies against owner secrets (production path)."""
     import json
+
+    from app.owners.registry import RouteResult
+
+    app, client = _create_test_app()
+    owner_secret = "owner-a-secret-16ch"
+    payload = {
+        "action": "opened",
+        "repository": {"full_name": "org-a/repo"},
+        "pull_request": {
+            "number": 1,
+            "draft": False,
+            "head": {"sha": "abc123", "repo": {"full_name": "org-a/repo", "fork": False}},
+            "base": {"sha": "def456", "repo": {"full_name": "org-a/repo"}},
+        },
+    }
+    body = json.dumps(payload).encode()
+    sig = _make_signature(owner_secret, body)
+
+    mock_run = MagicMock()
+    mock_run.status = "pending"
+    mock_run.id = "run-456"
+
+    mock_ctx = MagicMock()
+    mock_ctx.config.size_guard.override_label = "autoreview:force"
+    mock_ctx.webhook_enabled.return_value = True
+    mock_ctx.webhook_secret = owner_secret
+
+    mock_registry = MagicMock()
+    mock_registry.resolve.return_value = RouteResult("org-a", "wildcard")
+    mock_registry.get.return_value = mock_ctx
+
+    # Production path: owner secrets dict is populated (not empty)
+    owner_secrets = {"org-a": owner_secret, "org-b": "other-secret-12345"}
+
+    with (
+        patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
+        patch("app.api.v1.pull_request.get_owner_webhook_secrets", return_value=owner_secrets),
+        patch("app.api.v1.pull_request.get_owner_registry", return_value=mock_registry),
+        patch("app.api.v1.pull_request.queue_review", return_value=mock_run) as mock_queue,
+    ):
+        response = client.post(
+            "/pull-request",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "pull_request",
+            },
+        )
+        assert response.status_code == 202
+        mock_queue.assert_called_once()
+        call_kwargs = mock_queue.call_args.kwargs
+        assert call_kwargs["owner_id"] == "org-a"
+
+
+def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
+    """Labeled event with custom override_label queues review with force=True using real registry."""
+    import json
+
+    from app.config import AppConfig
+    from app.owners.registry import OwnerRegistry
 
     app, client = _create_test_app()
     secret = "webhook-secret-16ch"
+    custom_label = "custom-force-label"
+
+    # Build a real registry with a custom override_label
+    mock_settings = MagicMock()
+    mock_settings.github_token = ""
+    mock_settings.github_app_id = 0
+    mock_settings.github_app_private_key = ""
+    mock_settings.github_installation_id = 0
+    mock_settings.github_webhook_secret = ""
+    mock_settings.jira_base_url = ""
+    mock_settings.jira_email = ""
+    mock_settings.jira_api_token = ""
+    mock_settings.slack_bot_token = ""
+    mock_settings.openai_api_key = ""
+    mock_settings.review_api_key = ""
+    mock_settings.github_private_key_pem.return_value = ""
+
+    config = AppConfig(
+        size_guard={"override_label": custom_label},
+        owners={
+            "org-a": {
+                "default": True,
+                "github": {
+                    "auth": "pat",
+                    "webhook_secret_env": "OWNER_ORG_A_WEBHOOK_SECRET",
+                    "allowed_repos": ["org/repo"],
+                },
+                "size_guard": {"override_label": custom_label},
+            },
+        },
+    )
+    env = {
+        "OWNER_ORG_A_GITHUB_TOKEN": "ghp_test_token",
+        "OWNER_ORG_A_WEBHOOK_SECRET": secret,
+    }
+
+    registry = OwnerRegistry.build(mock_settings, config, env=env)
+
     payload = {
         "action": "labeled",
-        "label": {"name": "autoreview:force"},
+        "label": {"name": custom_label},
         "repository": {"full_name": "org/repo"},
         "pull_request": {
             "number": 42,
@@ -193,12 +291,11 @@ def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
 
     with (
         patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),
-        patch("app.api.v1.pull_request.get_normalized_secret", return_value=secret),
-        patch("app.api.v1.pull_request.repo_allowed", return_value=True),
-        patch("app.api.v1.pull_request.get_app_config") as mock_config,
+        patch("app.api.v1.pull_request.get_owner_webhook_secrets", return_value={"org-a": secret}),
+        patch("app.api.v1.pull_request.get_owner_registry", return_value=registry),
+        patch("app.api.v1.pull_request.get_app_config", return_value=config),
         patch("app.api.v1.pull_request.queue_review", return_value=mock_run) as mock_queue,
     ):
-        mock_config.return_value.size_guard.override_label = "autoreview:force"
         response = client.post(
             "/pull-request",
             content=body,
@@ -207,10 +304,11 @@ def test_webhook_labeled_autoreview_force_calls_queue_with_force_true() -> None:
                 "X-GitHub-Event": "pull_request",
             },
         )
-        assert response.status_code in (200, 202), f"Expected 2xx, got {response.status_code}"
+        assert response.status_code == 202
         mock_queue.assert_called_once()
         call_kwargs = mock_queue.call_args.kwargs
         assert call_kwargs["force"] is True, "queue_review should be called with force=True"
+        assert call_kwargs["owner_id"] == "org-a"
 
 
 # --- Webhook secret validation tests ---
@@ -407,13 +505,16 @@ def test_webhook_endpoint_returns_503_when_disabled() -> None:
     """Webhook endpoint should return 503 when secret is not configured."""
     app, client = _create_test_app()
 
-    with patch("app.api.v1.pull_request.is_webhook_enabled", return_value=False):
+    with (
+        patch("app.api.v1.pull_request.is_webhook_enabled", return_value=False),
+        patch("app.api.v1.pull_request.is_legacy_single_owner_mode", return_value=True),
+    ):
         response = client.post(
             "/pull-request",
             json={},
         )
         assert response.status_code == 503
-        assert "not configured" in response.json()["detail"]
+        assert response.json()["detail"] == "webhook endpoint disabled: GITHUB_WEBHOOK_SECRET not configured"
 
 
 # --- /api/v1/reviews endpoint requires API key ---

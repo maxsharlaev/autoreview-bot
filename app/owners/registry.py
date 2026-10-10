@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +17,19 @@ from dotenv import dotenv_values
 from app.config import RoutingYaml
 from app.owners.context import GitHubCredentials, JiraBinding, OwnerContext, SlackBinding
 from app.owners.schema import OwnerYaml, validate_owner_id
+
+# Routing reasons for RouteResult
+ROUTE_EXPLICIT = "explicit"
+ROUTE_EXACT = "exact"
+ROUTE_WILDCARD = "wildcard"
+ROUTE_INSTALLATION = "installation"
+ROUTE_DEFAULT_FALLBACK = "default_fallback"
+
+# Rejection reasons
+REJECT_UNKNOWN_OWNER = "unknown_owner"
+REJECT_REPO_NOT_ALLOWED = "repo_not_allowed"
+REJECT_OWNER_REPO_CONFLICT = "owner_repo_conflict"
+REJECT_OWNER_DISABLED = "owner_disabled"
 
 if TYPE_CHECKING:
     from app.config import AppConfig, Settings
@@ -30,6 +44,23 @@ class OwnerConfigError(ValueError):
     """Raised when owner configuration is invalid at startup."""
 
 
+@dataclass(frozen=True)
+class RouteResult:
+    """Result of routing a repository to an owner."""
+
+    owner_id: str
+    reason: str
+
+    def rejected(self) -> bool:
+        """Return True if this is a rejection (no owner assigned)."""
+        return self.reason in {
+            REJECT_UNKNOWN_OWNER,
+            REJECT_REPO_NOT_ALLOWED,
+            REJECT_OWNER_REPO_CONFLICT,
+            REJECT_OWNER_DISABLED,
+        }
+
+
 @dataclass
 class OwnerRegistry:
     """Registry of all owners with their contexts."""
@@ -39,11 +70,84 @@ class OwnerRegistry:
     default_owner_id: str
     routing: RoutingYaml
     warnings: list[str]
+    # Claim maps for routing
+    exact_claims: dict[str, str] = field(default_factory=dict)  # lowercase full_name -> owner_id
+    wildcard_claims: dict[str, str] = field(default_factory=dict)  # lowercase org -> owner_id
+    installation_claims: dict[int, str] = field(default_factory=dict)  # installation_id -> owner_id
+    # Store owner YAMLs for allowlist lookups
+    _owner_yamls: dict[str, OwnerYaml] = field(default_factory=dict, repr=False)
+    # Track disabled owners (for owner_disabled vs owner_not_configured distinction)
+    disabled_owners: set[str] = field(default_factory=set)
 
     def get(self, owner_id: str) -> OwnerContext | None:
-        """Get owner by id or alias."""
-        resolved = self.aliases.get(owner_id, owner_id)
-        return self.owners.get(resolved)
+        """Get owner by id or alias (case-insensitive)."""
+        owner_lower = owner_id.lower()
+        # Try case-insensitive alias match
+        for alias, target in self.aliases.items():
+            if alias.lower() == owner_lower:
+                return self.owners.get(target)
+        # Try case-insensitive owner_id match
+        for oid, ctx in self.owners.items():
+            if oid.lower() == owner_lower:
+                return ctx
+        return None
+
+    def canonicalize(self, owner_id: str) -> str | None:
+        """Resolve alias and case to the canonical owner_id.
+
+        Returns the canonical owner_id or None if the owner doesn't exist.
+        Also returns None for disabled owners (caller must check is_disabled).
+        """
+        owner_lower = owner_id.lower()
+        # Try case-insensitive alias match
+        for alias, target in self.aliases.items():
+            if alias.lower() == owner_lower:
+                # Disabled owners return None from canonicalize
+                if target in self.disabled_owners:
+                    return None
+                return target
+        # Try case-insensitive owner_id match
+        for oid in self.owners:
+            if oid.lower() == owner_lower:
+                return oid
+        # Check disabled owners (return None - caller must use is_disabled)
+        for oid in self.disabled_owners:
+            if oid.lower() == owner_lower:
+                return None
+        return None
+
+    def is_disabled(self, owner_id: str) -> bool:
+        """Check if owner exists but is disabled (case-insensitive, alias-aware).
+
+        Returns True if the owner (or its alias target) is disabled.
+        """
+        owner_lower = owner_id.lower()
+        # Try alias match
+        for alias, target in self.aliases.items():
+            if alias.lower() == owner_lower:
+                return target in self.disabled_owners
+        # Try direct owner_id match
+        for oid in self.disabled_owners:
+            if oid.lower() == owner_lower:
+                return True
+        return False
+
+    def legacy_default_alias(self) -> str | None:
+        """Owner id that owns rows stored with the legacy owner_id 'default'.
+
+        Rows written before multi-owner support (and by the legacy single-owner
+        setup) carry owner_id='default'. The binding is explicit and never follows
+        the `default: true` flag:
+        - 'default' if an owner literally named 'default' exists (modes A/B);
+        - else the enabled owner that lists 'default' in its aliases (modes C/D);
+        - else None: legacy rows are visible to no owner.
+        """
+        if DEFAULT_OWNER_ID in self.owners:
+            return DEFAULT_OWNER_ID
+        for alias, target in self.aliases.items():
+            if alias.lower() == DEFAULT_OWNER_ID and target in self.owners:
+                return target
+        return None
 
     def get_default(self) -> OwnerContext | None:
         """Get the default owner context, or None if no owners are configured."""
@@ -54,6 +158,193 @@ class OwnerRegistry:
     def webhook_secrets(self) -> dict[str, str]:
         """Return mapping of owner_id -> webhook_secret for owners with valid secrets."""
         return {owner_id: ctx.webhook_secret for owner_id, ctx in self.owners.items() if ctx.webhook_enabled()}
+
+    def resolve(
+        self,
+        full_name: str,
+        installation_id: int | None = None,
+        explicit_owner: str | None = None,
+    ) -> RouteResult:
+        """Route a repository to an owner.
+
+        Order:
+        1. Explicit owner (URL path / header / query / owner-scoped API key)
+        2. Exact full_name in some owner's allowed_repos
+        3. Wildcard org/* match
+        4. installation_id matches an owner's non-zero installation_id
+        5. routing.unclaimed: 'default' -> default owner, 'reject' -> unknown_owner
+
+        After selection, applies the owner's allowlist check.
+
+        Returns:
+            RouteResult with owner_id and reason (or rejection reason)
+        """
+        full_name_lower = full_name.lower()
+        org = full_name_lower.split("/", 1)[0] if "/" in full_name_lower else ""
+
+        # Step 1: Explicit owner (case-insensitive)
+        if explicit_owner:
+            explicit_lower = explicit_owner.lower()
+            resolved_id: str | None = None
+            is_disabled_via_alias = False
+            # Try case-insensitive alias match
+            for alias, target in self.aliases.items():
+                if alias.lower() == explicit_lower:
+                    resolved_id = target
+                    # Check if alias target is disabled
+                    if target in self.disabled_owners:
+                        is_disabled_via_alias = True
+                    break
+            # Try case-insensitive owner_id match
+            if resolved_id is None:
+                for oid in self.owners:
+                    if oid.lower() == explicit_lower:
+                        resolved_id = oid
+                        break
+            # Check if the owner is disabled (return owner_disabled, not unknown_owner)
+            if resolved_id is None:
+                for oid in self.disabled_owners:
+                    if oid.lower() == explicit_lower:
+                        return RouteResult("", REJECT_OWNER_DISABLED)
+            # Alias resolved to a disabled owner
+            if is_disabled_via_alias:
+                return RouteResult("", REJECT_OWNER_DISABLED)
+            if resolved_id is None:
+                return RouteResult("", REJECT_UNKNOWN_OWNER)
+            ctx = self.owners.get(resolved_id)
+            if ctx is None:
+                return RouteResult("", REJECT_UNKNOWN_OWNER)
+
+            # Check if repo is claimed by another owner
+            exact_claimer = self.exact_claims.get(full_name_lower)
+            wildcard_claimer = self.wildcard_claims.get(org) if org else None
+            if exact_claimer and exact_claimer != resolved_id:
+                return RouteResult("", REJECT_OWNER_REPO_CONFLICT)
+            if wildcard_claimer and wildcard_claimer != resolved_id and not exact_claimer:
+                return RouteResult("", REJECT_OWNER_REPO_CONFLICT)
+
+            # Check owner's allowlist
+            if not self._repo_allowed_for_owner(ctx, full_name_lower):
+                return RouteResult("", REJECT_REPO_NOT_ALLOWED)
+
+            return RouteResult(resolved_id, ROUTE_EXPLICIT)
+
+        # Step 2: Exact claim
+        if full_name_lower in self.exact_claims:
+            owner_id = self.exact_claims[full_name_lower]
+            ctx = self.owners.get(owner_id)
+            if ctx is None:
+                return RouteResult("", REJECT_UNKNOWN_OWNER)
+            return RouteResult(owner_id, ROUTE_EXACT)
+
+        # Step 3: Wildcard claim
+        if org and org in self.wildcard_claims:
+            owner_id = self.wildcard_claims[org]
+            ctx = self.owners.get(owner_id)
+            if ctx is None:
+                return RouteResult("", REJECT_UNKNOWN_OWNER)
+            return RouteResult(owner_id, ROUTE_WILDCARD)
+
+        # Step 4: Installation ID claim
+        if installation_id and installation_id in self.installation_claims:
+            owner_id = self.installation_claims[installation_id]
+            ctx = self.owners.get(owner_id)
+            if ctx is None:
+                return RouteResult("", REJECT_UNKNOWN_OWNER)
+            # Check owner's allowlist
+            if not self._repo_allowed_for_owner(ctx, full_name_lower):
+                return RouteResult("", REJECT_REPO_NOT_ALLOWED)
+            return RouteResult(owner_id, ROUTE_INSTALLATION)
+
+        # Step 5: Unclaimed - use routing config
+        if self.routing.unclaimed == "reject":
+            return RouteResult("", REJECT_UNKNOWN_OWNER)
+
+        # Default fallback
+        if not self.default_owner_id:
+            return RouteResult("", REJECT_UNKNOWN_OWNER)
+
+        ctx = self.owners.get(self.default_owner_id)
+        if ctx is None:
+            return RouteResult("", REJECT_UNKNOWN_OWNER)
+
+        # Check default owner's allowlist
+        if not self._repo_allowed_for_owner(ctx, full_name_lower):
+            return RouteResult("", REJECT_REPO_NOT_ALLOWED)
+
+        return RouteResult(self.default_owner_id, ROUTE_DEFAULT_FALLBACK)
+
+    def _repo_allowed_for_owner(self, ctx: OwnerContext, full_name_lower: str) -> bool:
+        """Check if a repository is allowed by the owner's allowlist.
+
+        Empty allowlist means all repos are allowed.
+        """
+        # Get owner's allowed_repos from config
+        owner_yaml = self._get_owner_yaml(ctx.id)
+        if owner_yaml is None:
+            # Legacy owner - check global config
+            allowed = [item.lower() for item in ctx.config.github.allowed_repos]
+        else:
+            allowed = [item.lower() for item in owner_yaml.github.allowed_repos]
+
+        if not allowed:
+            return True
+
+        org = full_name_lower.split("/", 1)[0] if "/" in full_name_lower else ""
+        for pattern in allowed:
+            if pattern == full_name_lower:
+                return True
+            if pattern.endswith("/*") and pattern[:-2] == org:
+                return True
+        return False
+
+    def _get_owner_yaml(self, owner_id: str) -> OwnerYaml | None:
+        """Get the OwnerYaml for a given owner_id (None for legacy owner)."""
+        # This is set during build() and stored in _owner_yamls
+        return getattr(self, "_owner_yamls", {}).get(owner_id)
+
+    def get_allowed_repos_for_owner(self, owner_id: str) -> list[str] | None:
+        """Get the allowed_repos list for an owner.
+
+        Returns:
+            - owner's allowed_repos from YAML for named owners
+            - None for the legacy default owner (caller should use global config)
+        """
+        owner_yaml = self._get_owner_yaml(owner_id)
+        if owner_yaml is None:
+            return None
+        return list(owner_yaml.github.allowed_repos)
+
+    def principal_for_key(self, key: str, operator_key: str | None = None) -> tuple[str, str | None]:
+        """Identify the principal for an API key.
+
+        Args:
+            key: The presented API key
+            operator_key: The global REVIEW_API_KEY from settings (operator key)
+
+        Returns:
+            (kind, owner_id) where kind is 'operator' (global key) or 'owner' (scoped key)
+            Returns ('', None) if key is invalid
+        """
+        if not key:
+            return ("", None)
+
+        # Check operator key (global REVIEW_API_KEY) first
+        # This gives access to all owners
+        if operator_key and hmac.compare_digest(operator_key, key):
+            return ("operator", None)
+
+        # Check owner-scoped keys (constant-time across all keys)
+        # These are the api.key_env values from each owner's config
+        matched_owner: str | None = None
+        for owner_id, ctx in self.owners.items():
+            if ctx.api_key and hmac.compare_digest(ctx.api_key, key):
+                matched_owner = owner_id
+
+        if matched_owner:
+            return ("owner", matched_owner)
+
+        return ("", None)
 
     @classmethod
     def build(
@@ -112,6 +403,7 @@ class OwnerRegistry:
         owners: dict[str, OwnerContext] = {}
         aliases: dict[str, str] = {}
         warnings: list[str] = []
+        disabled_owners_set: set[str] = set()
         default_owner_id: str | None = None
 
         if has_legacy_github:
@@ -120,16 +412,6 @@ class OwnerRegistry:
             default_owner_id = DEFAULT_OWNER_ID
 
         if has_owners_block:
-            # M1: Reject owners block without legacy credentials.
-            # In M1, adapters are not fully wired to owner contexts yet - they still read from settings.
-            # M2 will wire the adapters and remove this restriction.
-            if not has_legacy_github:
-                raise OwnerConfigError(
-                    "M1 requires legacy GitHub credentials when using the owners block. "
-                    "Set GITHUB_TOKEN/GITHUB_PAT or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY in addition to "
-                    "the owners block. M2 will remove this restriction when adapter wiring is complete."
-                )
-
             if DEFAULT_OWNER_ID in owners_yaml:
                 raise OwnerConfigError(
                     f"Cannot have owner '{DEFAULT_OWNER_ID}' in owners block when legacy GitHub credentials are set "
@@ -167,6 +449,7 @@ class OwnerRegistry:
                     aliases[alias] = owner_id
 
                 if not owner_yaml.enabled:
+                    disabled_owners_set.add(owner_id)
                     continue
 
                 ctx = _build_owner_context(
@@ -233,6 +516,7 @@ class OwnerRegistry:
                 default_owner_id="",
                 routing=routing,
                 warnings=warnings,
+                disabled_owners=set(),
             )
 
         if default_owner_id is None and owners:
@@ -247,6 +531,7 @@ class OwnerRegistry:
                 default_owner_id="",
                 routing=routing,
                 warnings=warnings,
+                disabled_owners=disabled_owners_set,
             )
 
         # Build allowed_repos map for validation
@@ -259,16 +544,22 @@ class OwnerRegistry:
             if owner_id in owners:
                 allowed_repos_map[owner_id] = owner_yaml.github.allowed_repos
 
-        _validate_claims(allowed_repos_map, warnings)
-        _validate_api_keys(owners)
+        exact_claims, wildcard_claims = _validate_claims(allowed_repos_map, warnings)
+        installation_claims = _build_installation_claims(owners)
+        _validate_api_keys(owners, operator_key=settings.review_api_key, has_legacy_owner=has_legacy_github)
         _validate_credentials_uniqueness(owners, warnings)
 
         return cls(
             owners=owners,
             aliases=aliases,
-            default_owner_id=default_owner_id,
+            default_owner_id=default_owner_id or "",
             routing=routing,
             warnings=warnings,
+            exact_claims=exact_claims,
+            wildcard_claims=wildcard_claims,
+            installation_claims=installation_claims,
+            _owner_yamls=owners_yaml,
+            disabled_owners=disabled_owners_set,
         )
 
 
@@ -501,8 +792,14 @@ def _merge_owner_config(app_config: AppConfig, owner_yaml: OwnerYaml) -> AppConf
     return app_config
 
 
-def _validate_claims(allowed_repos_map: dict[str, list[str]], warnings: list[str]) -> None:
-    """Validate that no two owners claim the same repo or wildcard."""
+def _validate_claims(
+    allowed_repos_map: dict[str, list[str]], warnings: list[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Validate that no two owners claim the same repo or wildcard.
+
+    Returns:
+        Tuple of (exact_claims, wildcard_claims) maps
+    """
     exact_claims: dict[str, str] = {}
     wildcard_claims: dict[str, str] = {}
 
@@ -533,15 +830,57 @@ def _validate_claims(allowed_repos_map: dict[str, list[str]], warnings: list[str
                     f"and via wildcard '{org}/*' by '{wildcard_owner}'; exact claim takes precedence."
                 )
 
+    return exact_claims, wildcard_claims
 
-def _validate_api_keys(owners: dict[str, OwnerContext]) -> None:
-    """Validate that no two owners have the same API key."""
+
+def _build_installation_claims(owners: dict[str, OwnerContext]) -> dict[int, str]:
+    """Build installation_id claims for routing.
+
+    Only non-zero installation_ids are claims.
+    """
+    installation_claims: dict[int, str] = {}
+    for owner_id, ctx in owners.items():
+        if ctx.github.kind == "app" and ctx.github.installation_id:
+            inst_id = ctx.github.installation_id
+            if inst_id in installation_claims:
+                raise OwnerConfigError(
+                    f"installation_id={inst_id} is claimed by both '{installation_claims[inst_id]}' and '{owner_id}'"
+                )
+            installation_claims[inst_id] = owner_id
+    return installation_claims
+
+
+def _validate_api_keys(
+    owners: dict[str, OwnerContext],
+    operator_key: str | None = None,
+    has_legacy_owner: bool = False,
+) -> None:
+    """Validate API key uniqueness and separation from operator key.
+
+    Checks:
+    1. No two owners share the same API key
+    2. No owner's API key equals the global operator key (REVIEW_API_KEY)
+       - This prevents privilege escalation where an owner-scoped key
+         would match as the operator key (which has access to all owners)
+       - Exception: In Mode A (legacy only), the default owner's key IS the
+         operator key by design - skip this check for the legacy owner
+    """
     key_to_owner: dict[str, str] = {}
     for owner_id, ctx in owners.items():
         if ctx.api_key:
+            # Check for duplicate keys between owners
             if ctx.api_key in key_to_owner:
                 raise OwnerConfigError(f"API key is used by both '{key_to_owner[ctx.api_key]}' and '{owner_id}'")
             key_to_owner[ctx.api_key] = owner_id
+
+            # Check that owner key doesn't equal operator key (privilege escalation)
+            # Skip for legacy default owner (Mode A) since its api_key IS the operator key
+            is_legacy_default = has_legacy_owner and owner_id == DEFAULT_OWNER_ID
+            if operator_key and not is_legacy_default and hmac.compare_digest(operator_key, ctx.api_key):
+                raise OwnerConfigError(
+                    f"Owner '{owner_id}' has an API key that equals the global REVIEW_API_KEY. "
+                    "Owner-scoped keys must be distinct from the operator key."
+                )
 
 
 def _validate_credentials_uniqueness(owners: dict[str, OwnerContext], warnings: list[str]) -> None:
@@ -572,6 +911,24 @@ def _validate_credentials_uniqueness(owners: dict[str, OwnerContext], warnings: 
                 f"Same GitHub PAT is used by owners: {', '.join(owner_ids)}. "
                 "Comments will share the same author identity."
             )
+
+
+LEGACY_DEFAULT_UNBOUND_WARNING = (
+    "Owner config: no owner is bound to legacy owner_id 'default'. Findings, review history "
+    "and comment authors recorded before multi-owner support stay hidden from every owner. "
+    "Add `aliases: [default]` to the owner that should inherit them."
+)
+
+
+def warn_if_legacy_default_unbound(registry: OwnerRegistry, log: logging.Logger) -> bool:
+    """Log the startup warning when named owners exist but none is bound to legacy 'default'.
+
+    Shared by API and worker startup so both emit the same text. Returns True if it warned.
+    """
+    if registry.owners and registry.legacy_default_alias() is None:
+        log.warning(LEGACY_DEFAULT_UNBOUND_WARNING)
+        return True
+    return False
 
 
 @lru_cache

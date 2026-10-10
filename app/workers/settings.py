@@ -40,7 +40,20 @@ async def startup(ctx: dict) -> None:
     engine = create_engine()
     ctx["engine"] = engine
     ctx["session_factory"] = create_session_factory(engine)
+    _warn_owner_config()
     logger.info("worker ready max_jobs=%s job_timeout=%ss", settings.worker_max_jobs, settings.worker_job_timeout)
+
+
+def _warn_owner_config() -> None:
+    """Emit the same legacy 'default' binding warning as API startup, once per worker start."""
+    from app.owners.registry import OwnerConfigError, get_owner_registry, warn_if_legacy_default_unbound
+
+    try:
+        registry = get_owner_registry()
+    except OwnerConfigError as exc:
+        logger.error("Owner configuration error: %s", exc)
+        return
+    warn_if_legacy_default_unbound(registry, logger)
 
 
 async def shutdown(ctx: dict) -> None:
@@ -85,16 +98,40 @@ async def digest_open_prs(ctx: dict) -> str:
     if not config.features.digest_enabled or not config.schedule.review_digest.enabled:
         return "disabled"
     factory = ctx["session_factory"]
-    github = None
-    try:
-        from app.adapters.github import GitHubAppClient
 
-        github = GitHubAppClient()
-    except Exception:
-        logger.exception("GitHub client unavailable for digest refresh")
-    async with factory() as session:
-        digest = await run_digest(session, config=config, github=github)
-        return str(digest.id)
+    from app.owners.registry import get_owner_registry
+
+    registry = get_owner_registry()
+
+    # Run digest for each owner with their own credentials
+    digest_ids: list[str] = []
+    for owner_id, owner_ctx in registry.owners.items():
+        try:
+            from app.adapters.github import GitHubAppClient
+
+            github = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=owner_id)
+        except Exception:
+            logger.exception("GitHub client unavailable for digest refresh, owner=%s", owner_id)
+            continue
+
+        # Get owner's specific allowed_repos (None for legacy owner means use global config)
+        owner_allowed_repos = registry.get_allowed_repos_for_owner(owner_id)
+        if owner_allowed_repos is None:
+            # Legacy default owner: use global config's allowed_repos
+            owner_allowed_repos = list(config.github.allowed_repos)
+
+        async with factory() as session:
+            digest = await run_digest(
+                session,
+                config=owner_ctx.config,
+                github=github,
+                owner_id=owner_id,
+                allowed_repos=owner_allowed_repos,
+                legacy_default_owner=registry.legacy_default_alias(),
+            )
+            digest_ids.append(str(digest.id))
+
+    return ",".join(digest_ids) if digest_ids else "no_owners"
 
 
 def _cron_jobs() -> list:

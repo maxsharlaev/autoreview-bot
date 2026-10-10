@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from app.adapters.github import GitHubAppClient, PullRequestInfo
 from app.adapters.jira import JiraIssue
 from app.api.v1.pull_request import pull_request_webhook
 from app.config import AppConfig, PrDescriptionYaml, PublicReposYaml, Settings
+from app.owners.registry import RouteResult
 from app.services.comment_render import (
     FindingTransitionView,
     RenderInput,
@@ -129,23 +130,37 @@ def test_public_policy_defaults_and_rejects_unknown_modes() -> None:
 
 @pytest.mark.asyncio
 async def test_webhook_passes_repository_visibility_to_queue(monkeypatch) -> None:
+    from app.owners.registry import RouteResult
+
     payload = {
         "action": "opened",
         "repository": {"full_name": "org/repo", "private": True},
         "pull_request": {
             "number": 7,
-            "head": {"sha": "a" * 40},
-            "base": {"sha": "b" * 40},
+            "draft": False,
+            "head": {"sha": "a" * 40, "repo": {"full_name": "org/repo", "fork": False}},
+            "base": {"sha": "b" * 40, "repo": {"full_name": "org/repo"}},
         },
     }
     request = SimpleNamespace(body=AsyncMock(return_value=b"payload"), json=AsyncMock(return_value=payload))
     queue = AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4(), status="pending"))
+
+    # Mock owner context
+    mock_ctx = SimpleNamespace(config=AppConfig())
+    mock_registry = MagicMock()
+    mock_registry.resolve.return_value = RouteResult("default", "exact")
+    mock_registry.get.return_value = mock_ctx
+
     monkeypatch.setattr("app.api.v1.pull_request.is_webhook_enabled", lambda: True)
+    monkeypatch.setattr("app.api.v1.pull_request.get_normalized_secret", lambda: "secret-12345678")
+    monkeypatch.setattr("app.api.v1.pull_request.get_owner_webhook_secrets", lambda: {})
     monkeypatch.setattr("app.api.v1.pull_request.verify_github_signature", lambda **_kwargs: True)
-    monkeypatch.setattr("app.api.v1.pull_request.classify_pull_request_event", lambda *_args: None)
+    monkeypatch.setattr("app.api.v1.pull_request.get_owner_registry", lambda: mock_registry)
     monkeypatch.setattr("app.api.v1.pull_request.get_redis", lambda _request: None)
     monkeypatch.setattr("app.api.v1.pull_request.queue_review", queue)
-    await pull_request_webhook(request, SimpleNamespace())
+    await pull_request_webhook(
+        request, SimpleNamespace(), x_hub_signature_256="sha256=test", x_github_event="pull_request"
+    )
     assert queue.await_args.kwargs["repository_visibility"] == "private"
 
 
@@ -355,7 +370,7 @@ async def test_public_alignment_returns_only_fixed_status(tmp_path) -> None:
         files=[],
         jira_text=SECRET,
         config=AppConfig(),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     assert status == "partial"
     assert SECRET in codex.await_args.kwargs["prompt"]
@@ -371,7 +386,7 @@ async def test_public_alignment_failure_falls_back_to_unknown(tmp_path) -> None:
         files=[],
         jira_text=SECRET,
         config=AppConfig(),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
     )
     assert status == "unknown"
 
@@ -409,7 +424,7 @@ async def test_public_pr_text_model_never_receives_jira_content(tmp_path, disclo
             pr_description=PrDescriptionYaml(enabled=True, mode="comment"),
             public_repos=PublicReposYaml(jira_disclosure=disclosure),
         ),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         visibility="public",
     )
     assert SECRET not in codex.await_args.kwargs["prompt"]
@@ -452,7 +467,7 @@ async def test_private_pr_text_retains_jira_context_and_output(tmp_path) -> None
         files=[],
         jira_issue=_issue(),
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, mode="comment")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         visibility="private",
     )
     assert SECRET in codex.await_args.kwargs["prompt"]
@@ -486,7 +501,7 @@ async def test_private_pr_text_is_not_published_after_visibility_changes(tmp_pat
         files=[],
         jira_issue=_issue(),
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, mode="comment")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         visibility="private",
     )
     github.upsert_sticky_comment.assert_not_awaited()
@@ -524,7 +539,7 @@ async def test_public_none_removes_issue_key_from_generated_title_and_suggestion
             pr_description=PrDescriptionYaml(enabled=True, mode="comment", title_mode="until_human_edit"),
             public_repos=PublicReposYaml(jira_disclosure="none"),
         ),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         visibility="public",
     )
     assert github.update_pull_request_title.await_args.args[-1] == "feat: validate SHA-256 inputs"
@@ -562,7 +577,7 @@ async def test_key_only_omits_unavailable_jira_content(tmp_path) -> None:
         files=[],
         jira_issue=None,
         config=AppConfig(pr_description=PrDescriptionYaml(enabled=True, mode="comment")),
-        settings=Settings.model_construct(openai_api_key="test"),
+        openai_api_key="test",
         visibility="public",
     )
     text = github.upsert_sticky_comment.await_args.args[-1]
@@ -970,7 +985,8 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     info = _info("public")
     info.title = SECRET
     info.body = plan_pr_body_update("Human notes", SECRET, mode="append") or ""
-    repository = SimpleNamespace(full_name="org/repo")
+    repository = SimpleNamespace(full_name="org/repo", owner_id="default", comment_authors=[])
+    finding_run_id = uuid.uuid4()
     stored = SimpleNamespace(
         stable_id="prior-1",
         severity="P2",
@@ -981,6 +997,8 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         evidence="previous evidence",
         scenario="previous scenario",
         recommendation="previous recommendation",
+        first_seen_run_id=finding_run_id,
+        owner_id="default",
     )
     pr = SimpleNamespace(id=uuid.uuid4(), repository=repository, number=7, findings=[stored], bot_title=SECRET)
     run = SimpleNamespace(
@@ -990,7 +1008,9 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         head_sha=info.head_sha,
         summary=None,
         trigger="webhook",
+        owner_id="default",
     )
+    # Mock execute to return run (no longer need run_owner_cache since findings have owner_id)
     session = SimpleNamespace(
         execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run)),
         commit=AsyncMock(),
@@ -1020,6 +1040,20 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     monkeypatch.setattr("app.services.orchestrator._publish", publish)
     monkeypatch.setattr("app.services.orchestrator._complete", AsyncMock(return_value=run))
 
+    # Mock registry that returns the default owner
+    mock_ctx = SimpleNamespace(
+        config=AppConfig(),
+        openai_api_key="test-key",
+        jira=None,
+        slack=None,
+    )
+    mock_registry = MagicMock()
+    mock_registry.get.return_value = mock_ctx
+    mock_registry.resolve.return_value = RouteResult("default", "exact")
+    mock_registry.default_owner_id = "default"
+    mock_registry.legacy_default_alias.return_value = "default"
+    mock_registry.is_disabled.return_value = False
+
     await run_review(
         session,
         run.id,
@@ -1028,6 +1062,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
         github=github,
         jira=jira,
         publisher=SimpleNamespace(),
+        registry=mock_registry,
     )
 
     assert build.call_args.kwargs["jira_text"] is None

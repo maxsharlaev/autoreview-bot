@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from app.adapters.github import PullRequestInfo
 from app.config import AppConfig, PrDescriptionYaml, SizeGuardYaml
+from app.owners.registry import RouteResult
 from app.services.orchestrator import _complete_then_describe, run_review
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size
 
@@ -63,7 +64,7 @@ def test_size_guard_rejects_reversed_thresholds() -> None:
 @pytest.mark.asyncio
 async def test_hard_limit_skips_before_model_or_file_requests() -> None:
     info = _info()
-    repo = SimpleNamespace(full_name="org/repo")
+    repo = SimpleNamespace(full_name="org/repo", owner_id="default", comment_authors=[])
     pr = SimpleNamespace(repository=repo, number=7, findings=[], bot_title=None)
     run = SimpleNamespace(
         id=uuid.uuid4(),
@@ -72,6 +73,7 @@ async def test_hard_limit_skips_before_model_or_file_requests() -> None:
         head_sha=info.head_sha,
         summary={"size_metrics": {"commits": 151, "additions": 0, "deletions": 0, "changed_files": 1}},
         trigger="webhook",
+        owner_id="default",
     )
     session = SimpleNamespace(
         execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run)),
@@ -83,6 +85,18 @@ async def test_hard_limit_skips_before_model_or_file_requests() -> None:
         upsert_sticky_comment=AsyncMock(),
         list_files=AsyncMock(),
     )
+
+    # Mock registry that returns the default owner
+    mock_ctx = SimpleNamespace(
+        config=AppConfig(),
+        openai_api_key="test-key",
+        jira=None,
+        slack=None,
+    )
+    mock_registry = MagicMock()
+    mock_registry.get.return_value = mock_ctx
+    mock_registry.resolve.return_value = RouteResult("default", "exact")
+
     codex = AsyncMock()
     result = await run_review(
         session,
@@ -93,6 +107,7 @@ async def test_hard_limit_skips_before_model_or_file_requests() -> None:
         jira=SimpleNamespace(),
         publisher=SimpleNamespace(),
         codex_fn=codex,
+        registry=mock_registry,
     )
     assert result.status == "skipped"
     assert github.upsert_sticky_comment.await_args.kwargs["marker"] == SIZE_SKIP_MARKER

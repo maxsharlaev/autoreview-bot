@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 REVIEW_RUNS = Counter(
     "open_pr_review_review_runs_total",
     "Finished review runs",
-    ["status", "error_code", "trigger"],
+    ["status", "error_code", "trigger", "owner"],
 )
 REVIEW_DURATION = Histogram(
     "open_pr_review_review_duration_seconds",
@@ -40,7 +40,17 @@ CODEX_DURATION = Histogram(
 ENQUEUE_TOTAL = Counter(
     "open_pr_review_review_enqueue_total",
     "Queue outcomes for a review request",
-    ["result"],
+    ["result", "owner"],
+)
+ROUTING_TOTAL = Counter(
+    "open_pr_review_routing_total",
+    "Routing decisions for webhook/API requests",
+    ["owner", "reason"],
+)
+ROUTING_REJECTED_TOTAL = Counter(
+    "open_pr_review_routing_rejected_total",
+    "Rejected routing decisions",
+    ["reason"],
 )
 WORKER_JOBS_IN_PROGRESS = Gauge(
     "open_pr_review_worker_jobs_in_progress",
@@ -86,22 +96,32 @@ def start_worker_metrics_server(port: int) -> None:
     logger.info("worker metrics listening on 0.0.0.0:%s", port)
 
 
-def record_enqueue(result: str) -> None:
-    ENQUEUE_TOTAL.labels(result=result).inc()
+def record_enqueue(result: str, owner: str = "default") -> None:
+    ENQUEUE_TOTAL.labels(result=result, owner=owner).inc()
 
 
-def record_review_finished(*, status: str, error_code: str | None, trigger: str, duration_ms: int | None) -> None:
+def record_routing(owner: str, reason: str, rejected: bool) -> None:
+    """Record a routing decision for metrics."""
+    ROUTING_TOTAL.labels(owner=owner or "none", reason=reason).inc()
+    if rejected:
+        ROUTING_REJECTED_TOTAL.labels(reason=reason).inc()
+
+
+def record_review_finished(
+    *, status: str, error_code: str | None, trigger: str, duration_ms: int | None, owner: str = "default"
+) -> None:
     code = error_code or "none"
-    REVIEW_RUNS.labels(status=status, error_code=code, trigger=trigger or "unknown").inc()
+    REVIEW_RUNS.labels(status=status, error_code=code, trigger=trigger or "unknown", owner=owner).inc()
     REVIEW_DURATION.labels(status=status).observe(max((duration_ms or 0) / 1000.0, 0.0))
     if status == "completed" and not error_code:
         LAST_SUCCESS.set(time.time())
     logger.info(
-        "review_finished status=%s error_code=%s trigger=%s duration_ms=%s",
+        "review_finished status=%s error_code=%s trigger=%s duration_ms=%s owner=%s",
         status,
         code,
         trigger,
         duration_ms,
+        owner,
     )
 
 
