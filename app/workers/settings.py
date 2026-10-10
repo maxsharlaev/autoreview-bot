@@ -96,17 +96,27 @@ async def review_pull_request(ctx: dict, review_run_id: str) -> str:
 
 async def digest_open_prs(ctx: dict) -> str:
     config = get_app_config()
-    if not config.features.digest_enabled or not config.schedule.review_digest.enabled:
+    if not config.schedule.review_digest.enabled:
         return "disabled"
-    factory = ctx["session_factory"]
 
     from app.owners.registry import get_owner_registry
 
     registry = get_owner_registry()
+    # features.digest_enabled is per owner (effective config); the schedule stays global.
+    digest_owners = [
+        (owner_id, owner_ctx)
+        for owner_id, owner_ctx in registry.owners.items()
+        if owner_ctx.config.features.digest_enabled
+    ]
+    if registry.owners and not digest_owners:
+        return "disabled"
+    if not registry.owners and not config.features.digest_enabled:
+        return "disabled"
+    factory = ctx["session_factory"]
 
     # Run digest for each owner with their own credentials
     digest_ids: list[str] = []
-    for owner_id, owner_ctx in registry.owners.items():
+    for owner_id, owner_ctx in digest_owners:
         try:
             from app.adapters.github import GitHubAppClient
 
@@ -143,10 +153,23 @@ async def digest_open_prs(ctx: dict) -> str:
     return ",".join(digest_ids) if digest_ids else "no_owners"
 
 
+def _digest_enabled_for_any_owner(config) -> bool:
+    """True if some active owner has features.digest_enabled in its effective config."""
+    from app.owners.registry import get_owner_registry
+
+    try:
+        registry = get_owner_registry()
+    except Exception:  # invalid owner config is reported by worker startup; keep the import safe
+        return config.features.digest_enabled
+    if not registry.owners:
+        return config.features.digest_enabled
+    return any(owner_ctx.config.features.digest_enabled for owner_ctx in registry.owners.values())
+
+
 def _cron_jobs() -> list:
     config = get_app_config()
     jobs = []
-    if config.features.digest_enabled and config.schedule.review_digest.enabled:
+    if config.schedule.review_digest.enabled and _digest_enabled_for_any_owner(config):
         jobs.append(cron(digest_open_prs, **parse_cron(config.schedule.review_digest.cron)))
     return jobs
 

@@ -150,12 +150,15 @@ async def pull_request_webhook(
     if action not in HANDLED_ACTIONS:
         return {"status": "skipped", "reason": "ignored_action"}
 
+    registry = get_owner_registry()
+
     # Mode A parity: check label before routing/allowlist
-    # For labeled events with non-override labels, return ignored_label before checking repo
+    # A label that is no owner's override label is ignored before checking the repo; the
+    # routed owner's own label is checked again in classify_pull_request_event below.
     if action == "labeled":
         label = (payload.get("label") or {}).get("name") or ""
-        override_label = get_app_config().size_guard.override_label
-        if label.casefold() != override_label.casefold():
+        known_labels = registry.override_labels() or {get_app_config().size_guard.override_label.casefold()}
+        if label.casefold() not in known_labels:
             return {"status": "skipped", "reason": "ignored_label"}
 
     full_name = _full_name(payload)
@@ -165,7 +168,6 @@ async def pull_request_webhook(
     installation_id = _get_installation_id(payload)
 
     # Route to owner
-    registry = get_owner_registry()
     route_result = registry.resolve(full_name, installation_id=installation_id)
 
     if route_result.rejected():
