@@ -5,6 +5,7 @@ import uuid
 
 from arq.cron import cron
 
+from app.adapters.slack import SlackClient
 from app.config import get_app_config, get_settings
 from app.db import create_engine, create_session_factory
 from app.logging_setup import configure_logging
@@ -120,10 +121,18 @@ async def digest_open_prs(ctx: dict) -> str:
             # Legacy default owner: use global config's allowed_repos
             owner_allowed_repos = list(config.github.allowed_repos)
 
+        # Each owner posts only with its own Slack binding; no binding -> never posts.
+        slack = (
+            SlackClient.from_binding(owner_ctx.slack, owner_ctx.config)
+            if owner_ctx.slack
+            else SlackClient.disabled(owner_ctx.config)
+        )
+
         async with factory() as session:
             digest = await run_digest(
                 session,
                 config=owner_ctx.config,
+                slack=slack,
                 github=github,
                 owner_id=owner_id,
                 allowed_repos=owner_allowed_repos,
