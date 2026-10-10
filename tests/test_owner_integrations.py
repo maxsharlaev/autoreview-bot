@@ -107,6 +107,42 @@ def build_registry() -> OwnerRegistry:
     return OwnerRegistry.build(legacy_settings(), app_config(), env=dict(ENV))
 
 
+@pytest.fixture(autouse=True)
+def global_legacy_integrations(monkeypatch, tmp_path):
+    """Make the process-wide settings/config carry the legacy Jira site and Slack channel.
+
+    Any code path that falls back to get_settings()/get_app_config() for a named owner
+    would then reach the legacy hosts, which the tests assert never happens.
+    """
+    import yaml
+    from app.config import get_app_config, get_settings
+
+    config_file = tmp_path / "global-config.yaml"
+    config_file.write_text(
+        yaml.safe_dump(app_config().model_dump(include={"github", "jira", "slack"})), encoding="utf-8"
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_file))
+    monkeypatch.setenv("JIRA_BASE_URL", LEGACY_JIRA)
+    monkeypatch.setenv("JIRA_EMAIL", "legacy@legacy.example")
+    monkeypatch.setenv("JIRA_API_TOKEN", "legacy-jira-token")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-legacy")
+    get_settings.cache_clear()
+    get_app_config.cache_clear()
+    yield
+    get_settings.cache_clear()
+    get_app_config.cache_clear()
+
+
+def test_global_fallback_would_reach_legacy_integrations() -> None:
+    """Guard for the isolation tests below: the legacy (global) clients are live in this module."""
+    from app.adapters.jira import JiraClient
+    from app.adapters.slack import SlackClient
+
+    jira, slack = JiraClient(), SlackClient()
+    assert (jira.base_url, jira.token, jira.enabled()) == (LEGACY_JIRA, "legacy-jira-token", True)
+    assert (slack._channel, slack._token, slack.enabled()) == ("#legacy", "xoxb-legacy", True)
+
+
 class JiraSite:
     """respx routes for one Jira site; records method, path and Authorization per request."""
 

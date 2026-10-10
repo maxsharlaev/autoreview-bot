@@ -35,6 +35,7 @@ from tests.test_owner_integrations import (
     JiraSite,
     SlackApi,
     build_registry,
+    global_legacy_integrations,  # noqa: F401  (autouse: global settings carry the legacy Jira/Slack)
     legacy_settings,
 )
 
