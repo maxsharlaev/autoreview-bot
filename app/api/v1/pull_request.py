@@ -21,6 +21,7 @@ from app.security.webhook_config import (
     get_owner_webhook_secrets,
     is_legacy_single_owner_mode,
     is_webhook_enabled,
+    is_webhook_secret_valid,
 )
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
 from app.services.review_enqueue import queue_review
@@ -259,8 +260,14 @@ async def pull_request_webhook_for_owner(
     # Get owner context (case-insensitive, alias-aware lookup)
     ctx = registry.get(owner_id)
     if ctx is None:
-        # Check if owner exists but is disabled
         if registry.is_disabled(owner_id):
+            # Disabled owner: answer owner_disabled only to callers holding its webhook secret,
+            # so unsigned requests can't probe owner state. No valid secret -> always 401.
+            body = await request.body()
+            secret = registry.disabled_owner_webhook_secret(owner_id) or ""
+            secret_valid, _ = is_webhook_secret_valid(secret)
+            if not secret_valid or not verify_github_signature(secret=secret, body=body, header=x_hub_signature_256):
+                raise HTTPException(status_code=401, detail="invalid signature")
             return {"status": "skipped", "reason": "owner_disabled"}
         raise HTTPException(status_code=404, detail="unknown_owner")
 
