@@ -544,14 +544,16 @@ class OwnerRegistry:
             default_owner_id = next(iter(owners.keys()))
 
         if not owners:
-            # No owners configured - this can happen in mode A without credentials
-            # The warning was already added above
+            # No active owners: either mode A without credentials (warning added above) or an
+            # owners block where every owner is disabled. Keep the disabled owners' aliases and
+            # config so /pull-request/<alias> and API selectors still answer owner_disabled.
             return cls(
                 owners={},
-                aliases={},
+                aliases=aliases,
                 default_owner_id="",
                 routing=routing,
                 warnings=warnings,
+                _owner_yamls=owners_yaml,
                 disabled_owners=disabled_owners_set,
                 disabled_webhook_secrets=disabled_webhook_secrets,
             )

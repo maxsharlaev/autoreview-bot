@@ -508,3 +508,99 @@ def test_disabled_owner_without_secret_always_401() -> None:
 
 def test_unknown_owner_path_still_404() -> None:
     assert _post_disabled("nobody", {}).status_code == 404
+
+
+# --- owners block with only disabled owners (no active owner at all) ---
+
+ONLY_OFF_SECRET = "only-off-owner-secret-0123456789"
+
+
+def only_disabled_registry() -> OwnerRegistry:
+    config = AppConfig(
+        owners={
+            "org-off": {
+                "enabled": False,
+                "aliases": ["off-alias"],
+                "github": {"auth": "pat", "webhook_secret_env": "ONLY_OFF_WEBHOOK_SECRET", "allowed_repos": ["off/*"]},
+            }
+        }
+    )
+    return OwnerRegistry.build(Settings.model_construct(), config, env={"ONLY_OFF_WEBHOOK_SECRET": ONLY_OFF_SECRET})
+
+
+def test_only_disabled_owners_keep_aliases_and_config() -> None:
+    registry = only_disabled_registry()
+    assert registry.owners == {}
+    assert registry.aliases == {"off-alias": "org-off"}
+    assert registry.disabled_owners == {"org-off"}
+    assert registry.get_allowed_repos_for_owner("org-off") == ["off/*"]
+    for selector in ("org-off", "ORG-OFF", "Off-Alias", "off-alias", "OFF-ALIAS"):
+        assert registry.is_disabled(selector)
+        assert registry.disabled_owner_webhook_secret(selector) == ONLY_OFF_SECRET
+        assert registry.resolve("off/repo", explicit_owner=selector).reason == "owner_disabled"
+    assert not registry.is_disabled("nobody")
+
+
+@pytest.mark.parametrize("path_owner", ["org-off", "ORG-OFF", "Off-Alias", "off-alias", "OFF-ALIAS"])
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"X-Hub-Signature-256": "sha256=invalid"},
+        {"X-Hub-Signature-256": _signature("some-other-owner-secret-123456", BODY)},
+    ],
+    ids=["unsigned", "garbage", "foreign-secret"],
+)
+def test_only_disabled_owners_path_rejects_bad_signature(path_owner, headers) -> None:
+    response = _post_disabled(path_owner, headers, only_disabled_registry())
+    assert response.status_code == 401
+    assert response.json() == {"detail": "invalid signature"}
+
+
+@pytest.mark.parametrize("path_owner", ["org-off", "ORG-OFF", "Off-Alias", "off-alias", "OFF-ALIAS"])
+def test_only_disabled_owners_path_with_valid_signature_reports_disabled(path_owner) -> None:
+    headers = {"X-Hub-Signature-256": _signature(ONLY_OFF_SECRET, BODY)}
+    response = _post_disabled(path_owner, headers, only_disabled_registry())
+    assert response.status_code == 202
+    assert response.json() == {"status": "skipped", "reason": "owner_disabled"}
+
+
+def test_only_disabled_owners_unknown_path_still_404() -> None:
+    assert _post_disabled("nobody", {}, only_disabled_registry()).status_code == 404
+
+
+@pytest.mark.parametrize("selector", ["org-off", "Off-Alias", "off-alias", "OFF-ALIAS"])
+@pytest.mark.parametrize("via", ["header", "query"])
+def test_only_disabled_owners_api_selector_reports_disabled(selector, via) -> None:
+    from unittest.mock import MagicMock
+
+    from app.api.deps import get_session
+    from app.api.v1.reviews import router
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.redis = MagicMock()
+
+    async def _no_session():
+        yield MagicMock()
+
+    app.dependency_overrides[get_session] = _no_session
+    registry = only_disabled_registry()
+    headers = {"X-Api-Key": "operator-key-0123456789"}
+    params = {}
+    if via == "header":
+        headers["X-Review-Owner"] = selector
+    else:
+        params["owner"] = selector
+    with (
+        patch("app.api.deps.get_settings", return_value=Settings.model_construct(review_api_key=headers["X-Api-Key"])),
+        patch("app.api.deps.get_owner_registry", return_value=registry),
+        patch("app.api.v1.reviews.get_owner_registry", return_value=registry),
+    ):
+        response = TestClient(app).post(
+            "/reviews", params=params, headers=headers, json={"repository": "off/repo", "number": 1}
+        )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "owner_disabled"}
