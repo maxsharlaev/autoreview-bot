@@ -7,11 +7,11 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import jsonschema
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -34,7 +34,7 @@ from app.owners.registry import DEFAULT_OWNER_ID, OwnerRegistry, get_owner_regis
 from app.paths import data_file
 from app.progress import ReviewProgress
 from app.services.codex_runner import CodexRunnerError, run_codex
-from app.services.comment_render import FindingTransitionView, RenderInput
+from app.services.comment_render import FindingTransitionView, RenderInput, review_has_sensitive_content
 from app.services.constants import (
     AI_OUTPUT_INVALID,
     CODEX_NO_RETRY,
@@ -64,6 +64,7 @@ from app.services.pr_description import (
     without_managed_block,
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
+from app.services.progress_status import ProgressReporter, final_outcome, locked_state
 from app.services.publisher import Publisher, empty_verified
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
@@ -127,6 +128,22 @@ async def _remember_comment_author(
     await session.commit()
 
 
+@dataclass
+class _ProgressTracking:
+    """What the finally block needs to finalize the progress status, captured while the run is healthy."""
+
+    reporter: ProgressReporter | None = None
+    run: ReviewRun | None = None
+    run_id: str = ""
+    full_name: str = ""
+    number: int | None = None
+    sha: str = ""
+    state: dict | None = None
+    visibility: str = "public"
+    issue_key: str | None = None
+    config: AppConfig | None = None
+
+
 async def run_review(
     session: AsyncSession,
     review_run_id: uuid.UUID,
@@ -138,6 +155,115 @@ async def run_review(
     publisher: Publisher | None = None,
     codex_fn=run_codex,
     registry: OwnerRegistry | None = None,
+) -> ReviewRun:
+    """Run one review; the progress status is always finalized, including on errors and timeouts."""
+    tracking = _ProgressTracking()
+    crashed: BaseException | None = None
+    try:
+        return await _run_review(
+            session,
+            review_run_id,
+            settings=settings,
+            config=config,
+            github=github,
+            jira=jira,
+            publisher=publisher,
+            codex_fn=codex_fn,
+            registry=registry,
+            tracking=tracking,
+        )
+    except BaseException as exc:
+        crashed = exc
+        raise
+    finally:
+        if tracking.reporter is not None:
+            await _finalize_progress(session, tracking, crashed)
+
+
+async def _finalize_progress(session: AsyncSession, tracking: _ProgressTracking, crashed: BaseException | None) -> None:
+    reporter = tracking.reporter
+    if reporter is None or tracking.config is None:
+        return
+    try:
+        if crashed is not None or tracking.run is None:
+            # The session may be unusable after a crash: start a fresh transaction.
+            await session.rollback()
+        tracking.state = await _current_state(session, tracking)
+        if crashed is None and tracking.run is not None:
+            run = tracking.run
+            outcome = final_outcome(
+                status=run.status,
+                error_code=run.error_code,
+                skip_reason=getattr(run, "skip_reason", None),
+                summary=run.summary,
+                comment_url=getattr(run, "comment_url", None),
+                issue_key=tracking.issue_key,
+                visibility=tracking.visibility,
+                config=tracking.config,
+            )
+        else:
+            # The session may be unusable here: rely only on the values captured earlier.
+            outcome = final_outcome(
+                status="running",
+                error_code=None,
+                skip_reason=None,
+                summary=None,
+                comment_url=None,
+                issue_key=None,
+                visibility="public",
+                config=tracking.config,
+                crashed=crashed,
+            )
+        state = await reporter.finish(
+            full_name=tracking.full_name,
+            number=tracking.number,
+            sha=tracking.sha,
+            run_id=tracking.run_id,
+            state=tracking.state,
+            outcome=outcome,
+        )
+    except Exception:
+        logger.exception("progress status finalization failed (ignored)")
+        return
+    try:
+        if crashed is None and tracking.run is not None:
+            tracking.run.progress_status = state
+            await session.commit()
+        else:
+            await session.execute(
+                update(ReviewRun).where(ReviewRun.id == uuid.UUID(tracking.run_id)).values(progress_status=state)
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.warning("could not store progress status for run %s (ignored): %s", tracking.run_id, exc)
+
+
+async def _current_state(session: AsyncSession, tracking: _ProgressTracking) -> dict | None:
+    """The run's progress state as stored now, with the row locked until the next commit.
+
+    The API may have written the queued status after this worker loaded the run; reading it here
+    reuses that check run instead of creating a second one. Falls back to the captured state.
+    """
+    try:
+        found, _status, state = await locked_state(session, uuid.UUID(tracking.run_id))
+    except Exception as exc:
+        logger.warning("could not read progress status for run %s (ignored): %s", tracking.run_id, exc)
+        return tracking.state
+    return state if found else tracking.state
+
+
+async def _run_review(
+    session: AsyncSession,
+    review_run_id: uuid.UUID,
+    *,
+    settings: Settings | None,
+    config: AppConfig | None,
+    github: GitHubAppClient | None,
+    jira: JiraClient | None,
+    publisher: Publisher | None,
+    codex_fn,
+    registry: OwnerRegistry | None,
+    tracking: _ProgressTracking,
 ) -> ReviewRun:
     from app.services.constants import SKIP_OWNER_CHANGED, SKIP_OWNER_DISABLED, SKIP_OWNER_NOT_CONFIGURED
 
@@ -164,6 +290,14 @@ async def run_review(
     # Get owner context for this run
     owner_id = run.owner_id
     ctx = registry.get(owner_id)
+
+    if ctx is not None and run.trigger == "webhook":
+        _start_tracking(tracking, run, pr, ctx, github=github, config=config or ctx.config)
+    elif ctx is None and run.trigger == "webhook" and registry.is_disabled(owner_id):
+        # Close the disabled owner's queued status as skipped, with that owner's own credentials only.
+        disabled_ctx = registry.disabled_status_context(owner_id)
+        if disabled_ctx is not None:
+            _start_tracking(tracking, run, pr, disabled_ctx, github=github, config=disabled_ctx.config)
 
     # Check if owner is configured and enabled
     if ctx is None:
@@ -254,6 +388,11 @@ async def run_review(
     run.status = "running"
     await session.commit()
     progress.event(f"running owner={owner_id}")
+    if tracking.reporter is not None:
+        run.progress_status = await _current_state(session, tracking)
+        await tracking.reporter.in_progress(run, pr.repository.full_name, pr.number)
+        tracking.state = run.progress_status
+        await session.commit()
 
     owner, repo = pr.repository.full_name.split("/", 1)
     progress.event(f"load PR #{pr.number} from GitHub")
@@ -267,6 +406,7 @@ async def run_review(
     _sync_pr(pr, info)
     visibility = confirmed_visibility((run.summary or {}).get("repository_visibility"), info.visibility)
     context_visibility = visibility
+    tracking.visibility = visibility
     progress.event(f"repository visibility={visibility}")
     progress.event(f"PR loaded title={info.title!r} sha={info.head_sha[:12]} author={info.author}")
     if info.is_fork:
@@ -310,7 +450,7 @@ async def run_review(
     size_decision = classify_pr_size(size_info, config.size_guard)
     if size_decision == "hard":
         try:
-            await github.upsert_sticky_comment(
+            url = await github.upsert_sticky_comment(
                 owner,
                 repo,
                 pr.number,
@@ -318,6 +458,8 @@ async def run_review(
                 marker=SIZE_SKIP_MARKER,
                 can_replace=lambda _body: False,
             )
+            run.comment_url = url if isinstance(url, str) else None
+            run.has_sensitive_content = False
         except GitHubError:
             logger.exception("Failed to post size-guard skip comment for %s#%s", info.full_name, info.number)
         progress.event(f"skipped: {SKIP_TOO_LARGE} (size guard)")
@@ -329,6 +471,7 @@ async def run_review(
     human_title = "" if pr.bot_title and info.title == pr.bot_title else info.title
     issue_key = extract_issue_key(human_title, info.head_ref, without_managed_block(info.body))
     pr.issue_key = issue_key
+    tracking.issue_key = issue_key
     progress.event(f"diff files={len(files)} issue_key={issue_key or 'none'}")
 
     jira_text = None
@@ -422,6 +565,7 @@ async def run_review(
                 return await _fail(session, run, started, "HEAD_CHANGED")
             if publication == "public_fallback":
                 visibility = "public"
+                tracking.visibility = "public"
         await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
         await _publish(
             publisher,
@@ -522,6 +666,7 @@ async def run_review(
                     return await _fail(session, run, started, "HEAD_CHANGED")
                 if publication == "public_fallback":
                     visibility = "public"
+                    tracking.visibility = "public"
             await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
             await _publish(
                 publisher,
@@ -587,6 +732,7 @@ async def run_review(
             return await _fail(session, run, started, "HEAD_CHANGED")
         if publication == "public_fallback":
             visibility = "public"
+            tracking.visibility = "public"
     transitions = await _store_findings(
         session,
         pr,
@@ -618,6 +764,9 @@ async def run_review(
         public_alignment=public_alignment,
         force_public_redaction=publication == "public_fallback",
         redacted_prior_ids=redacted_prior_ids,
+        unredacted=verified,
+        unredacted_transitions=transitions,
+        jira_in_context=bool(jira_text) and context_visibility == "private",
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
@@ -643,6 +792,35 @@ async def run_review(
             visibility=visibility,
         ),
     )
+
+
+def _start_tracking(
+    tracking: _ProgressTracking,
+    run: ReviewRun,
+    pr: PullRequest,
+    ctx,
+    *,
+    github: GitHubAppClient | None,
+    config: AppConfig,
+) -> None:
+    """Prepare progress reporting with the run owner's own credentials; never raises."""
+    try:
+        credentials = getattr(ctx, "github", None)
+        kind = getattr(credentials, "kind", None)
+        if kind is None:
+            return
+        client = github or GitHubAppClient.from_credentials(credentials, owner_id=run.owner_id)
+        tracking.reporter = ProgressReporter.build(client, config, kind)
+        tracking.run = run
+        tracking.run_id = str(run.id)
+        tracking.full_name = pr.repository.full_name
+        tracking.number = pr.number
+        tracking.sha = run.head_sha
+        tracking.state = getattr(run, "progress_status", None)
+        tracking.config = config
+    except Exception:
+        logger.exception("progress status setup failed (ignored)")
+        tracking.reporter = None
 
 
 async def _complete_then_describe(
@@ -1324,7 +1502,15 @@ async def _publish(
     public_alignment: str | None = None,
     force_public_redaction: bool = False,
     redacted_prior_ids: set[str] | None = None,
+    unredacted: VerifiedReview | None = None,
+    unredacted_transitions: list[FindingTransitionView] | None = None,
+    jira_in_context: bool = False,
 ) -> None:
+    sensitive = review_has_sensitive_content(
+        unredacted or verified,
+        unredacted_transitions if unredacted_transitions is not None else transitions,
+        jira_in_context=jira_in_context,
+    )
     render = RenderInput(
         repository=pr.repository.full_name,
         pr_number=pr.number,
@@ -1358,6 +1544,9 @@ async def _publish(
         issue_key=issue_key,
         current_jira_status=jira_status,
     )
+    url = getattr(publisher, "last_comment_url", None)
+    run.comment_url = url if isinstance(url, str) else None
+    run.has_sensitive_content = sensitive
     if session is None:
         return
     snapshot = (

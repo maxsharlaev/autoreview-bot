@@ -81,6 +81,9 @@ class OwnerRegistry:
     # Webhook secrets of disabled owners: /pull-request/{owner_id} verifies the signature
     # before answering owner_disabled, so the endpoint does not reveal owner state to anyone.
     disabled_webhook_secrets: dict[str, str] = field(default_factory=dict, repr=False)
+    # Contexts of disabled owners, built best effort. Used ONLY to close that owner's own
+    # progress statuses (check run / commit status); never for reviews or routing.
+    disabled_status_contexts: dict[str, OwnerContext] = field(default_factory=dict, repr=False)
 
     def get(self, owner_id: str) -> OwnerContext | None:
         """Get owner by id or alias (case-insensitive)."""
@@ -118,6 +121,16 @@ class OwnerRegistry:
             if oid.lower() == owner_lower:
                 return None
         return None
+
+    def disabled_status_context(self, owner_id: str) -> OwnerContext | None:
+        """Credentials of a disabled owner for closing its own progress statuses; None if unavailable."""
+        owner_lower = owner_id.lower()
+        target = next((t for alias, t in self.aliases.items() if alias.lower() == owner_lower), None)
+        if target is None:
+            target = next((oid for oid in self.disabled_owners if oid.lower() == owner_lower), None)
+        if target is None or target not in self.disabled_owners:
+            return None
+        return self.disabled_status_contexts.get(target)
 
     def is_disabled(self, owner_id: str) -> bool:
         """Check if owner exists but is disabled (case-insensitive, alias-aware).
@@ -426,6 +439,7 @@ class OwnerRegistry:
         warnings: list[str] = []
         disabled_owners_set: set[str] = set()
         disabled_webhook_secrets: dict[str, str] = {}
+        disabled_status_contexts: dict[str, OwnerContext] = {}
         default_owner_id: str | None = None
 
         if has_legacy_github:
@@ -475,6 +489,19 @@ class OwnerRegistry:
                     disabled_secret = _owner_webhook_secret(owner_id, owner_yaml, env, dotenv_fallback)
                     if disabled_secret:
                         disabled_webhook_secrets[owner_id] = disabled_secret
+                    try:
+                        # A disabled owner may have incomplete settings: never fail startup on it.
+                        disabled_status_contexts[owner_id] = _build_owner_context(
+                            owner_id=owner_id,
+                            owner_yaml=owner_yaml,
+                            app_config=app_config,
+                            env=env,
+                            dotenv_fallback=dotenv_fallback,
+                            settings=settings,
+                            warnings=[],
+                        )
+                    except Exception as exc:
+                        logger.info("disabled owner %s has no usable credentials for status cleanup: %s", owner_id, exc)
                     continue
 
                 ctx = _build_owner_context(
@@ -540,6 +567,7 @@ class OwnerRegistry:
                 _owner_yamls=owners_yaml,
                 disabled_owners=disabled_owners_set,
                 disabled_webhook_secrets=disabled_webhook_secrets,
+                disabled_status_contexts=disabled_status_contexts,
             )
 
         # Build allowed_repos map for validation
@@ -569,6 +597,7 @@ class OwnerRegistry:
             _owner_yamls=owners_yaml,
             disabled_owners=disabled_owners_set,
             disabled_webhook_secrets=disabled_webhook_secrets,
+            disabled_status_contexts=disabled_status_contexts,
         )
 
 
@@ -824,7 +853,15 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
-_POLICY_SECTIONS = ("public_repos", "language", "features", "pr_description", "size_guard", "codex")
+_POLICY_SECTIONS = (
+    "public_repos",
+    "language",
+    "features",
+    "pr_description",
+    "size_guard",
+    "progress_status",
+    "codex",
+)
 
 
 def _merge_owner_config(owner_id: str, app_config: AppConfig, owner_yaml: OwnerYaml) -> AppConfig:
@@ -834,8 +871,8 @@ def _merge_owner_config(owner_id: str, app_config: AppConfig, owner_yaml: OwnerY
     blocks (empty/disabled when absent), so code reading config.jira/config.slack can't
     reach the legacy owner's site or channel.
 
-    Policy sections (public_repos, language, features, pr_description, size_guard and
-    codex.model/reasoning_effort) are deep-merged over the global sections: only the fields
+    Policy sections (public_repos, language, features, pr_description, size_guard,
+    progress_status and codex.model/reasoning_effort) are deep-merged over the global sections: only the fields
     the owner sets change, and the merged section is validated like the global one.
     """
     from pydantic import ValidationError

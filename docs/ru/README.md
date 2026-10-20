@@ -9,6 +9,7 @@
 - [Роадмап](ROADMAP.md)
 - [Черновик описания PR](PR_DESCRIPTION.md)
 - [Раскрытие данных в публичных репозиториях](PUBLIC_DISCLOSURE.md)
+- [Статус прогресса ревью (check run / commit status)](PROGRESS_STATUS.md)
 
 Наблюдаемость и чеклист публикации пока доступны [на английском](../OBSERVABILITY.md) и [на английском](../PUBLIC_RELEASE_CHECKLIST.md).
 

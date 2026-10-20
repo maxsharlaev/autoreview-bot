@@ -116,4 +116,5 @@ def test_digest_check_does_not_hide_invalid_owner_config(owner_config) -> None:
 )
 def test_cron_registration_with_valid_config(owner_config, data, env, jobs) -> None:
     owner_config(data, env)
-    assert len(worker_settings._cron_jobs()) == jobs
+    digest = [job for job in worker_settings._cron_jobs() if job.coroutine is worker_settings.digest_open_prs]
+    assert len(digest) == jobs

@@ -420,5 +420,5 @@ def test_digest_cron_registered_when_any_owner_has_digest(global_enabled, owner_
         patch.object(worker_settings, "get_app_config", return_value=config),
         patch("app.owners.registry.get_owner_registry", return_value=registry),
     ):
-        jobs = worker_settings._cron_jobs()
+        jobs = [job for job in worker_settings._cron_jobs() if job.coroutine is worker_settings.digest_open_prs]
     assert (len(jobs) == 1) is expected

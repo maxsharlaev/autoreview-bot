@@ -33,7 +33,7 @@ REVIEW_API_KEY=<свой ключ API сервиса, не PAT>
 GITHUB_WEBHOOK_SECRET=<secret webhook репозитория, если настраиваете webhook>
 ```
 
-Поля App (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) можно оставить пустыми. Если задан PAT, JWT приложения не используется. Комментарии в PR идут от имени владельца токена.
+Поля App (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) можно оставить пустыми. Если задан PAT, JWT приложения не используется. Комментарии в PR идут от имени владельца токена. Для статуса прогресса (commit status `autoreview`) PAT нужно право **Commit statuses: Read and write** (у классического PAT — `repo:status`); без него ревью работает, просто без статуса.
 
 События: GitHub Action в репозитории с кодом ([examples/github/ai-review-trigger.yml](../../examples/github/ai-review-trigger.yml), фильтры paths/branches — [OPERATIONS.md](OPERATIONS.md)) или ручной `POST /api/v1/reviews`. Прямой webhook станет рекомендуемым способом после изменения авторизации. Репозиторий должен быть в `github.allowed_repos`. CI этого сервиса (`ci.yml`) ревью не вызывает.
 
@@ -49,6 +49,7 @@ GITHUB_WEBHOOK_SECRET=<secret webhook репозитория, если наст�
    - **Contents**: Read-only
    - **Pull requests**: Read and write
    - **Metadata**: Read-only
+   - **Checks**: Read and write — для check run `autoreview` с прогрессом ревью (необязательно: без него ревью работает, просто без статуса)
 6. При будущем включении webhook подписаться только на **Pull request**.
 7. Where can this App be installed: **Only on this account**.
 8. Create App. Запомните **App ID** → `GITHUB_APP_ID`.

@@ -128,7 +128,7 @@ A disabled owner's webhook URL `/api/v1/pull-request/<id>` answers `owner_disabl
 
 ### Multiple owners: policies and model per owner
 
-`public_repos`, `language`, `features` (`jira_comment`, `jira_transition`, `digest_enabled`), `pr_description` and `size_guard` can be overridden per owner. Overrides are partial and deep-merged over the top-level sections: unset fields keep the global value, and the merged section is validated like the global one (for example, `size_guard.hard` must stay at least `size_guard.soft`). They apply to everything that reads them for that owner's runs: the review prompt and comment, public-repository redaction, the size guard and its `override_label` (also in the webhook label check), PR description drafts, Jira comments/transitions and the digest. The digest schedule stays global; `features.digest_enabled` decides per owner.
+`public_repos`, `language`, `features` (`jira_comment`, `jira_transition`, `digest_enabled`), `pr_description`, `size_guard` and `progress_status` can be overridden per owner. Overrides are partial and deep-merged over the top-level sections: unset fields keep the global value, and the merged section is validated like the global one (for example, `size_guard.hard` must stay at least `size_guard.soft`). They apply to everything that reads them for that owner's runs: the review prompt and comment, public-repository redaction, the size guard and its `override_label` (also in the webhook label check), PR description drafts, Jira comments/transitions and the digest. The digest schedule stays global; `features.digest_enabled` decides per owner.
 
 `codex.model` and `codex.reasoning_effort` can be set per owner; other `codex` fields (sandbox, approval policy, limits, prompt file) stay global. The model key for an owner's runs is `codex.api_key_env` (required when set), else `OWNER_<ID>_OPENAI_API_KEY` if present, else the shared `OPENAI_API_KEY`. Only that key reaches the Codex sandbox, and only for that owner's runs; other owners' keys and owner secrets never enter the Codex or git environment.
 
@@ -155,7 +155,7 @@ owners:
 3. Connect the new owner's events: install the same GitHub App in the other organization (same env names, `allowed_repos: [org-b/*]` or `installation_id`), or give the owner its own App/PAT with a webhook to `/api/v1/pull-request/<id>`.
 4. Check a manual `POST /api/v1/reviews` with and without `X-Review-Owner`, a test PR in each organization, and `owner` in `GET /api/v1/reviews/{id}`.
 5. Optional: move the legacy setup into a named owner with `default: true`, `aliases: [default]` and `*_env` pointing at the existing variable names (see above).
-6. Rollback within multi-owner versions: remove or disable the `owners.<id>` block and restart; runs queued for that owner are skipped with `owner_not_configured` / `owner_disabled`, and its rows stay in the database.
+6. Rollback within multi-owner versions: remove or disable the `owners.<id>` block and restart; runs queued for that owner are skipped with `owner_not_configured` / `owner_disabled`, and its rows stay in the database. A disabled owner's open progress statuses are closed as `skipped`; a removed owner's can't be closed (see [Review progress status](#review-progress-status)).
 7. Rollback to an image from before multi-owner support: with the new image, run `alembic downgrade 004_finding_details_visibility` first, then deploy the old image. The old image cannot use the upgraded schema as is: after `007_findings_owner_id`, `findings.owner_id` is required without a default, and after `006_comment_authors_objects` comment authors are stored as objects. If findings of several owners share a stable id on one pull request, the `007` downgrade refuses and reports the count; set `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` to keep the repository owner's row (or the oldest) and delete the others together with their transitions.
 
 ## Optional PR description draft
@@ -179,6 +179,33 @@ For public repositories, `key_only` shows the Jira key as plain text; `none` rem
 When `security_findings: redact` is set (the default), findings are redacted if they have a `security` category or if their title, scenario, evidence, or recommendation matches security-related keywords (injection, XSS, SSRF, CSRF, RCE, path traversal, deserialization, auth bypass, privilege escalation, secret, token leak, credential, and similar) or a CWE reference (`CWE-\d+`). This keyword heuristic does not guarantee detection of every mislabeled vulnerability; for strict setups, use `redact_all` to redact all finding categories unconditionally. Redacted findings show only severity, path/line, and a generic label. Full details remain in the database and go to configured Jira comments or Slack; configure Slack only with a private channel restricted to the intended reviewers. If neither destination is configured, the PR comment says details are hidden.
 
 When a private visibility recheck fails or reports a public repository, publication uses a generic public-safe version; the same reduced text is sent to Jira and Slack for that run. A changed PR head fails the run with `HEAD_CHANGED`. `security_findings: full` explicitly restores detailed GitHub findings, except older private details. Existing comments are not rewritten.
+
+## Review progress status
+
+Webhook-triggered reviews report progress on the PR head commit, so the author can see whether the bot is queued, working, skipped or broken without an extra comment. The default needs no config change:
+
+```yaml
+progress_status:
+  enabled: true
+  mode: auto          # auto | check_run | commit_status | off (auto = check_run for a GitHub App, commit_status for a PAT)
+  reaction: false     # add an eyes reaction while a worker reviews the PR
+  timeout_seconds: 5  # per GitHub call
+```
+
+- **GitHub App: check run `autoreview`.** `queued` when the webhook is accepted, `in_progress` when a worker picks the job up, then `completed` with `success` (no P0-P2 findings), `neutral` (P0-P2 findings), `skipped` (reason in the summary: draft, fork, repository not allowed, author without write access, size guard, owner disabled or changed), `cancelled` (superseded by a newer push or a head change during the review) or `failure` (bot errors and timeouts only). Findings never produce `failure`, so the check can't block merges. Needs the **Checks: Read and write** App permission.
+- **PAT: commit status, context `autoreview`.** `pending` while queued or running, then `success` (review published or skipped), `failure` (bot error or timeout) or `error` (cancelled), with a one-line description and `target_url` pointing to the review comment. A fine-grained PAT needs **Commit statuses: Read and write**; a classic PAT needs `repo:status` (included in `repo`).
+- Each owner's status is written with that owner's own credentials; `auto` picks the mode per owner from its credential type.
+- Updates are best effort: a missing permission, a GitHub error or a slow call (capped by `timeout_seconds`) is logged and ignored, and never fails or delays the review. Deployments without the new permission keep working; they just don't get a status. Webhook-level skips (draft, fork, repository not allowed) are reported in the webhook request, so they add at most `timeout_seconds` to the response.
+- The worker sets the final state in a `finally` block, including errors and the arq job timeout. A worker cron job every 10 minutes marks statuses still open after `WORKER_JOB_TIMEOUT` plus 5 minutes as timed out, so a crashed worker can't leave a status pending forever.
+- A new push creates a new check run on the new head and marks the run for the previous SHA `cancelled` if it was still open.
+- Write order: the review run row is committed before the job is enqueued. If enqueueing fails (for example Redis is down), the run is marked `failed` / `QUEUE_UNAVAILABLE` and no status is created. The queued status is written after a successful enqueue, with the run row locked and only while the run is still pending, so a fast worker's newer state is never overwritten and only one check run is created.
+- Owner disabled after the webhook (`owner_disabled`): the worker, or the cleanup job for a stale status, closes the status as `skipped` with that owner's own credentials. The registry keeps a disabled owner's credentials for this purpose only; if they can't be loaded, the status is closed only in the database.
+- Owner removed from config (`owner_not_configured`): **its open statuses can't be closed on GitHub.** No credentials exist for it, and the bot never uses another owner's or the global credentials for it, so the check run stays `queued` / `in_progress` (or the commit status `pending`) on that commit. The cleanup job closes it in the database and logs a warning. To avoid this, disable an owner (`enabled: false`) and let its queued runs drain before removing the block, or close the check runs by hand.
+- Summaries contain only the state, the skip reason or error code, finding counts and the comment link. They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
+- Manual (`/api/v1/reviews`) and scheduled digest runs don't report a status.
+- An owner can override any of these fields in its `owners.<id>.progress_status` block, for example `mode: off` for an owner whose credentials lack the permission.
+
+Each review run also records `comment_url` and `has_sensitive_content`: whether the review comment it published, before the public repository policy is applied, would contain security finding details or Jira text (unmet acceptance criteria, or any review text written with Jira context in the prompt). `NULL` means unknown: runs from before migration `008_review_run_progress` and runs that published no review comment. The flag is groundwork for a later admin view; nothing acts on it yet.
 
 ## Manual local review (no GitHub webhook)
 

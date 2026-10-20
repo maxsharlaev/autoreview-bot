@@ -24,6 +24,7 @@ from app.security.webhook_config import (
     is_webhook_secret_valid,
 )
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
+from app.services.progress_status import report_webhook_skip, reporter_for_owner
 from app.services.review_enqueue import queue_review
 from app.services.visibility import repository_visibility
 
@@ -81,6 +82,19 @@ def classify_pull_request_event(
     if is_fork:
         return {"status": "skipped", "reason": SKIP_FORK}
     return None
+
+
+def _reporter(ctx):
+    try:
+        return reporter_for_owner(ctx)
+    except Exception:
+        logger.exception("progress status reporter unavailable (ignored)")
+        return None
+
+
+async def _report_classified_skip(ctx, full_name: str, payload: dict[str, Any], skipped: dict[str, Any]) -> None:
+    if skipped.get("reason") in {SKIP_DRAFT, SKIP_FORK}:
+        await report_webhook_skip(ctx, full_name, payload.get("pull_request") or {}, skipped["reason"])
 
 
 def _get_installation_id(payload: dict[str, Any]) -> int | None:
@@ -180,6 +194,10 @@ async def pull_request_webhook(
         if route_result.reason == REJECT_UNKNOWN_OWNER:
             return {"status": "skipped", "reason": "unknown_owner"}
         if route_result.reason == REJECT_REPO_NOT_ALLOWED:
+            # Report only when exactly one owner signed the delivery: that owner's credentials post it.
+            if len(matched_owners) == 1:
+                signer = registry.get(next(iter(matched_owners)))
+                await report_webhook_skip(signer, full_name, payload.get("pull_request") or {}, SKIP_REPO)
             return {"status": "skipped", "reason": SKIP_REPO}
         return {"status": "skipped", "reason": route_result.reason}
 
@@ -216,6 +234,7 @@ async def pull_request_webhook(
         override_label=ctx.config.size_guard.override_label,
     )
     if skipped is not None:
+        await _report_classified_skip(ctx, full_name, payload, skipped)
         return skipped
 
     pr_payload = payload.get("pull_request") or {}
@@ -240,6 +259,7 @@ async def pull_request_webhook(
         owner_id=owner_id,
         installation_id=installation_id,
         route_reason=route_result.reason,
+        progress=_reporter(ctx),
     )
     return {
         "status": run.status,
@@ -337,6 +357,7 @@ async def pull_request_webhook_for_owner(
         if route_result.reason == REJECT_OWNER_REPO_CONFLICT:
             raise HTTPException(status_code=409, detail="owner_repo_conflict")
         if route_result.reason == REJECT_REPO_NOT_ALLOWED:
+            await report_webhook_skip(ctx, full_name, payload.get("pull_request") or {}, SKIP_REPO)
             return {"status": "skipped", "reason": SKIP_REPO}
         return {"status": "skipped", "reason": route_result.reason}
 
@@ -355,6 +376,7 @@ async def pull_request_webhook_for_owner(
         override_label=ctx.config.size_guard.override_label,
     )
     if skipped is not None:
+        await _report_classified_skip(ctx, full_name, payload, skipped)
         return skipped
 
     pr_payload = payload.get("pull_request") or {}
@@ -379,6 +401,7 @@ async def pull_request_webhook_for_owner(
         owner_id=canonical_owner_id,
         installation_id=installation_id,
         route_reason=route_result.reason,
+        progress=_reporter(ctx),
     )
     return {
         "status": run.status,

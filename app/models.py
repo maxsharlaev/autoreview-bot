@@ -150,6 +150,13 @@ class ReviewRun(TimestampMixin, Base):
     arq_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     owner_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False, index=True)
+    # URL of the review comment this run published (None if it published none)
+    comment_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # True when the published comment, unredacted, would carry security finding details or Jira text.
+    # None = unknown: rows from before migration 008, or runs that published no review comment.
+    has_sensitive_content: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Check run / commit status bookkeeping (see app.services.progress_status)
+    progress_status: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     pull_request: Mapped[PullRequest] = relationship(back_populates="review_runs")
     task_snapshot: Mapped[TaskSnapshot | None] = relationship(back_populates="review_run", uselist=False)

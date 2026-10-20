@@ -169,6 +169,15 @@ class OwnerSizeGuardYaml(BaseModel, extra="forbid"):
     override_label: str | None = None
 
 
+class OwnerProgressStatusYaml(BaseModel, extra="forbid"):
+    """Override progress_status settings for an owner (partial)."""
+
+    enabled: bool | None = None
+    mode: Literal["auto", "check_run", "commit_status", "off"] | None = None
+    reaction: bool | None = None
+    timeout_seconds: float | None = None
+
+
 class OwnerYaml(BaseModel, extra="forbid"):
     """Configuration for a single owner in the owners block."""
 
@@ -188,6 +197,7 @@ class OwnerYaml(BaseModel, extra="forbid"):
     codex: OwnerCodexYaml | None = None
     pr_description: OwnerPrDescriptionYaml | None = None
     size_guard: OwnerSizeGuardYaml | None = None
+    progress_status: OwnerProgressStatusYaml | None = None
 
     @field_validator("aliases")
     @classmethod
@@ -207,6 +217,7 @@ class OwnerYaml(BaseModel, extra="forbid"):
                 self.codex is not None,
                 self.pr_description is not None,
                 self.size_guard is not None,
+                self.progress_status is not None,
             ]
         )
 

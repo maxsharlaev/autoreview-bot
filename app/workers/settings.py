@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -12,7 +13,7 @@ from app.logging_setup import configure_logging
 from app.metrics import WORKER_JOBS_IN_PROGRESS, WORKER_UP, record_review_finished, start_worker_metrics_server
 from app.models import ReviewRun
 from app.queue import redis_settings
-from app.services.constants import INTERNAL_ERROR
+from app.services.constants import INTERNAL_ERROR, REVIEW_TIMEOUT
 from app.services.digest import run_digest
 from app.services.orchestrator import run_review
 
@@ -94,8 +95,40 @@ async def review_pull_request(ctx: dict, review_run_id: str) -> str:
                         duration_ms=run.duration_ms,
                     )
                 raise
+            except asyncio.CancelledError:
+                # arq cancels the job on job_timeout; the progress status was finalized in run_review.
+                logger.warning("review_pull_request timed out for %s", review_run_id)
+                await _mark_timed_out(factory, run_id)
+                raise
     finally:
         WORKER_JOBS_IN_PROGRESS.dec()
+
+
+async def _mark_timed_out(factory, run_id: uuid.UUID) -> None:
+    try:
+        async with factory() as session:
+            run = await session.get(ReviewRun, run_id)
+            if run is not None and run.status in {"pending", "running"}:
+                run.status = "failed"
+                run.error_code = REVIEW_TIMEOUT
+                await session.commit()
+                record_review_finished(
+                    status="failed", error_code=REVIEW_TIMEOUT, trigger=run.trigger, duration_ms=run.duration_ms
+                )
+    except Exception:
+        logger.exception("could not mark review run %s as timed out", run_id)
+
+
+async def cleanup_progress_status(ctx: dict) -> int:
+    """Mark progress statuses left queued or in progress after a worker crash as timed out."""
+    from app.owners.registry import get_owner_registry
+    from app.services.progress_status import cleanup_stale
+
+    async with ctx["session_factory"]() as session:
+        cleaned = await cleanup_stale(session, get_owner_registry(), get_settings().worker_job_timeout)
+    if cleaned:
+        logger.info("progress status cleanup marked %s stale run(s) as timed out", cleaned)
+    return cleaned
 
 
 async def digest_open_prs(ctx: dict) -> str:
@@ -171,14 +204,14 @@ def _digest_enabled_for_any_owner(config) -> bool:
 
 def _cron_jobs() -> list:
     config = get_app_config()
-    jobs = []
+    jobs = [cron(cleanup_progress_status, minute=set(range(0, 60, 10)))]
     if config.schedule.review_digest.enabled and _digest_enabled_for_any_owner(config):
         jobs.append(cron(digest_open_prs, **parse_cron(config.schedule.review_digest.cron)))
     return jobs
 
 
 class WorkerSettings:
-    functions = [review_pull_request, digest_open_prs]
+    functions = [review_pull_request, digest_open_prs, cleanup_progress_status]
     cron_jobs = _cron_jobs()
     on_startup = startup
     on_shutdown = shutdown
