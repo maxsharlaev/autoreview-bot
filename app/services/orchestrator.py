@@ -64,7 +64,7 @@ from app.services.pr_description import (
     without_managed_block,
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
-from app.services.progress_status import ProgressReporter, final_outcome
+from app.services.progress_status import ProgressReporter, final_outcome, locked_state
 from app.services.publisher import Publisher, empty_verified
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
@@ -185,6 +185,10 @@ async def _finalize_progress(session: AsyncSession, tracking: _ProgressTracking,
     if reporter is None or tracking.config is None:
         return
     try:
+        if crashed is not None or tracking.run is None:
+            # The session may be unusable after a crash: start a fresh transaction.
+            await session.rollback()
+        tracking.state = await _current_state(session, tracking)
         if crashed is None and tracking.run is not None:
             run = tracking.run
             outcome = final_outcome(
@@ -226,13 +230,26 @@ async def _finalize_progress(session: AsyncSession, tracking: _ProgressTracking,
             tracking.run.progress_status = state
             await session.commit()
         else:
-            await session.rollback()
             await session.execute(
                 update(ReviewRun).where(ReviewRun.id == uuid.UUID(tracking.run_id)).values(progress_status=state)
             )
             await session.commit()
     except Exception as exc:
         logger.warning("could not store progress status for run %s (ignored): %s", tracking.run_id, exc)
+
+
+async def _current_state(session: AsyncSession, tracking: _ProgressTracking) -> dict | None:
+    """The run's progress state as stored now, with the row locked until the next commit.
+
+    The API may have written the queued status after this worker loaded the run; reading it here
+    reuses that check run instead of creating a second one. Falls back to the captured state.
+    """
+    try:
+        found, _status, state = await locked_state(session, uuid.UUID(tracking.run_id))
+    except Exception as exc:
+        logger.warning("could not read progress status for run %s (ignored): %s", tracking.run_id, exc)
+        return tracking.state
+    return state if found else tracking.state
 
 
 async def _run_review(
@@ -276,6 +293,11 @@ async def _run_review(
 
     if ctx is not None and run.trigger == "webhook":
         _start_tracking(tracking, run, pr, ctx, github=github, config=config or ctx.config)
+    elif ctx is None and run.trigger == "webhook" and registry.is_disabled(owner_id):
+        # Close the disabled owner's queued status as skipped, with that owner's own credentials only.
+        disabled_ctx = registry.disabled_status_context(owner_id)
+        if disabled_ctx is not None:
+            _start_tracking(tracking, run, pr, disabled_ctx, github=github, config=disabled_ctx.config)
 
     # Check if owner is configured and enabled
     if ctx is None:
@@ -367,6 +389,7 @@ async def _run_review(
     await session.commit()
     progress.event(f"running owner={owner_id}")
     if tracking.reporter is not None:
+        run.progress_status = await _current_state(session, tracking)
         await tracking.reporter.in_progress(run, pr.repository.full_name, pr.number)
         tracking.state = run.progress_status
         await session.commit()

@@ -147,6 +147,7 @@ class Harness:
         jira_issue=None,
     ) -> None:
         self.config = config or AppConfig()
+        self.stored: dict | None = None
         self.github = github or FakeGitHub(info=_info(visibility, draft=draft))
         if self.github.info is None:
             self.github.info = _info(visibility, draft=draft)
@@ -176,7 +177,16 @@ class Harness:
         )
         self.session = SimpleNamespace(
             execute=AsyncMock(
-                return_value=SimpleNamespace(scalar_one=lambda: self.run, scalar_one_or_none=lambda: None)
+                return_value=SimpleNamespace(
+                    scalar_one=lambda: self.run,
+                    scalar_one_or_none=lambda: None,
+                    # locked_state(): the row as "stored"; tests can change self.stored to
+                    # simulate a concurrent writer (the API's queued status).
+                    first=lambda: (
+                        self.run.status,
+                        self.stored if self.stored is not None else self.run.progress_status,
+                    ),
+                )
             ),
             commit=AsyncMock(),
             rollback=AsyncMock(),
@@ -654,6 +664,7 @@ async def test_cleanup_marks_stale_statuses_timed_out() -> None:
     ctx = SimpleNamespace(id="org-a", config=AppConfig(), github=SimpleNamespace(kind="app"))
     registry = MagicMock()
     registry.get.side_effect = lambda owner: ctx if owner == "org-a" else None
+    registry.is_disabled.return_value = False
 
     with patch("app.adapters.github.GitHubAppClient.from_credentials", return_value=fake):
         cleaned = await ps.cleanup_stale(session, registry, 900, now=now)
@@ -878,3 +889,185 @@ def test_owner_can_override_progress_status() -> None:
     config.owners["org-a"]["progress_status"] = {"timeout_seconds": 0}
     with pytest.raises(OwnerConfigError, match="progress_status"):
         policy_registry(config)
+
+
+# --- Write order: the worker reuses a status the API stored after the worker loaded the run ---
+
+
+@pytest.mark.asyncio
+async def test_worker_reads_stored_state_instead_of_creating_a_second_check_run(monkeypatch, tmp_path) -> None:
+    h = Harness(monkeypatch, tmp_path)
+    # The API stored its queued check run after this worker loaded the row (in-memory state is None).
+    h.stored = {"mode": "check_run", "state": "queued", "check_run_id": 4242}
+    await h.review()
+    assert h.github.payloads("create") == []
+    assert {call[1] for call in h.github.calls if call[0] == "update"} == {4242}
+    assert h.github.check_states() == ["in_progress", "completed"]
+    assert h.run.progress_status["check_run_id"] == 4242
+
+
+# --- Disabled / removed owners in the worker ---
+
+
+def _owner_gone(h: Harness, *, disabled: bool) -> None:
+    h.registry.get.return_value = None
+    h.registry.is_disabled.return_value = disabled
+    h.registry.disabled_status_context.return_value = h.ctx if disabled else None
+
+
+@pytest.mark.parametrize("kind", ["app", "pat"])
+@pytest.mark.asyncio
+async def test_worker_closes_disabled_owner_status_as_skipped(monkeypatch, tmp_path, kind) -> None:
+    h = Harness(monkeypatch, tmp_path, kind=kind)
+    await h.queue()
+    _owner_gone(h, disabled=True)
+    result = await h.review()
+
+    assert result.status == "skipped" and result.skip_reason == "owner_disabled"
+    h.registry.disabled_status_context.assert_called_with("org-a")
+    if kind == "app":
+        assert h.github.check_states() == ["queued", "completed"]
+        final = h.github.calls[-1]
+        assert final[1] == 101
+        assert final[2]["conclusion"] == "skipped"
+        assert "owner is disabled" in final[2]["output"]["summary"]
+    else:
+        states = [p["state"] for p in h.github.payloads("status")]
+        assert states == ["pending", "success"]
+        assert "owner is disabled" in h.github.payloads("status")[-1]["description"]
+    assert h.run.progress_status["state"] == "completed"
+    assert h.run.progress_status["conclusion"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_worker_cannot_close_removed_owner_status(monkeypatch, tmp_path) -> None:
+    h = Harness(monkeypatch, tmp_path)
+    await h.queue()
+    calls_before = list(h.github.calls)
+    _owner_gone(h, disabled=False)
+    result = await h.review()
+
+    assert result.status == "skipped" and result.skip_reason == "owner_not_configured"
+    h.registry.disabled_status_context.assert_not_called()
+    assert h.github.calls == calls_before  # no credentials of any other owner are used
+    assert h.run.progress_status["state"] == "queued"  # left for the cleanup job
+
+
+# --- Cleanup for disabled / removed owners ---
+
+
+@pytest.mark.parametrize("kind", ["app", "pat"])
+@pytest.mark.asyncio
+async def test_cleanup_closes_disabled_owner_status_with_its_own_credentials(kind, caplog) -> None:
+    now = datetime.now(UTC)
+    old = (now - timedelta(hours=2)).isoformat()
+    mode = "check_run" if kind == "app" else "commit_status"
+    state = {"mode": mode, "state": "queued", "updated_at": old}
+    if kind == "app":
+        state["check_run_id"] = 77
+    disabled = _stale_run(state, owner_id="org-x")
+    removed = _stale_run({"mode": mode, "state": "in_progress", "updated_at": old}, owner_id="gone")
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [disabled, removed]
+    session = SimpleNamespace(execute=AsyncMock(return_value=result), commit=AsyncMock())
+    fake = FakeGitHub()
+    x_credentials = SimpleNamespace(kind=kind)
+    ctx = SimpleNamespace(id="org-x", config=AppConfig(), github=x_credentials)
+    registry = MagicMock()
+    registry.get.return_value = None
+    registry.is_disabled.side_effect = lambda owner: owner == "org-x"
+    registry.disabled_status_context.side_effect = lambda owner: ctx if owner == "org-x" else None
+
+    with patch("app.adapters.github.GitHubAppClient.from_credentials", return_value=fake) as build:
+        cleaned = await ps.cleanup_stale(session, registry, 900, now=now)
+
+    assert cleaned == 2
+    build.assert_called_once_with(x_credentials, owner_id="org-x")
+    if kind == "app":
+        assert [call[:2] for call in fake.calls] == [("update", 77)]
+        assert fake.calls[0][2]["conclusion"] == "skipped"
+        assert "owner is disabled" in fake.calls[0][2]["output"]["summary"]
+    else:
+        assert [call[2]["state"] for call in fake.calls] == ["success"]
+        assert "owner is disabled" in fake.calls[0][2]["description"]
+    assert disabled.progress_status["conclusion"] == "skipped"
+    assert removed.progress_status["state"] == "completed"
+    assert removed.progress_status["conclusion"] == "failure"
+    assert "cannot be closed on GitHub" in caplog.text and "gone" in caplog.text
+
+
+def test_registry_keeps_disabled_owner_credentials_only_for_status_cleanup() -> None:
+    from tests.test_owner_policies import policy_config, policy_registry
+
+    config = policy_config()
+    config.owners["org-b"]["enabled"] = False
+    config.owners["org-c"]["enabled"] = False
+    registry = policy_registry(config, env={k: v for k, v in _owner_secrets().items() if "ORG_C" not in k})
+
+    assert registry.get("org-b") is None and registry.is_disabled("org-b")
+    b = registry.disabled_status_context("org-b")
+    assert b is not None and b.id == "org-b" and b.github.kind == "pat"
+    assert b.github.token == "ghp_b"
+    assert registry.disabled_status_context("org-c") is None  # no usable credentials: startup still works
+    assert registry.disabled_status_context("org-a") is None  # enabled owners are never served here
+    assert registry.disabled_status_context("unknown") is None
+
+
+def _owner_secrets() -> dict[str, str]:
+    from tests.test_owner_policies import SECRETS
+
+    return dict(SECRETS)
+
+
+@pytest.mark.asyncio
+async def test_disabled_owner_skip_closes_the_stored_check_run(monkeypatch, tmp_path) -> None:
+    h = Harness(monkeypatch, tmp_path)
+    h.stored = {"mode": "check_run", "state": "queued", "check_run_id": 4242}
+    _owner_gone(h, disabled=True)
+    await h.review()
+    assert h.github.payloads("create") == []
+    assert [call[:2] for call in h.github.calls] == [("update", 4242)]
+    assert h.github.calls[0][2]["conclusion"] == "skipped"
+
+
+def _queued_session(status: str, state: dict | None, *, commit_error: Exception | None = None):
+    result = SimpleNamespace(first=lambda: (status, state))
+    return SimpleNamespace(
+        execute=AsyncMock(return_value=result),
+        commit=AsyncMock(side_effect=commit_error),
+        rollback=AsyncMock(),
+    )
+
+
+def _pending_run():
+    return SimpleNamespace(id=uuid.uuid4(), head_sha=HEAD, progress_status=None)
+
+
+@pytest.mark.parametrize(
+    "status,state", [("running", None), ("completed", None), ("pending", {"state": "in_progress"})]
+)
+@pytest.mark.asyncio
+async def test_queued_write_is_skipped_once_the_worker_owns_the_status(status, state) -> None:
+    from app.services.review_enqueue import _report_queued
+
+    fake = FakeGitHub()
+    session = _queued_session(status, state)
+    run = _pending_run()
+    await _report_queued(session, ps.ProgressReporter(fake, "check_run", AppConfig()), run, "org/repo")
+    assert fake.calls == []
+    assert run.progress_status is None
+    session.commit.assert_awaited()  # the row lock is released
+
+
+@pytest.mark.asyncio
+async def test_unrecorded_queued_check_run_is_closed() -> None:
+    from app.services.review_enqueue import _report_queued
+
+    fake = FakeGitHub()
+    session = _queued_session("pending", None, commit_error=RuntimeError("db gone"))
+    await _report_queued(session, ps.ProgressReporter(fake, "check_run", AppConfig()), _pending_run(), "org/repo")
+    assert [call[0] for call in fake.calls] == ["create", "update"]
+    assert fake.calls[0][1]["status"] == "queued"
+    assert fake.calls[1][1] == 101
+    assert fake.calls[1][2]["status"] == "completed" and fake.calls[1][2]["conclusion"] == "cancelled"
+    session.rollback.assert_awaited()

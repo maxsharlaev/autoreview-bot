@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -260,3 +261,155 @@ async def test_cleanup_marks_stale_rows_in_database(session_factory) -> None:
         assert run.progress_status["conclusion"] == "failure"
     final = [call[2] for call in fake.calls if call[0] == "status"][-1]
     assert final["state"] == "failure"
+
+
+# --- Write order around enqueue (review finding P2-1) ---
+
+
+def _redis(side_effect):
+    redis = MagicMock()
+    redis.enqueue_job = AsyncMock(side_effect=side_effect)
+    return redis
+
+
+async def _queue_with(session_factory, reporter, redis):
+    from app.services.review_enqueue import queue_review
+
+    async with session_factory() as session:
+        return await queue_review(
+            session,
+            redis,
+            full_name="org/repo",
+            number=7,
+            pr_payload={"number": 7, "title": "ABC-12 validate", "head": {"ref": "feature/ABC-12"}},
+            head_sha=HEAD,
+            base_sha="b" * 40,
+            is_fork=False,
+            owner_id="org-a",
+            progress=reporter,
+        )
+
+
+async def _only_run(session_factory):
+    from app.models import ReviewRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        return (await session.execute(select(ReviewRun))).scalars().one()
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_enqueue_failure_marks_run_failed_and_leaves_no_status(session_factory, mode) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    fake = FakeGitHub()
+    with pytest.raises(ConnectionError):
+        await _queue_with(session_factory, ProgressReporter(fake, mode, AppConfig()), _redis(ConnectionError("redis")))
+
+    run = await _only_run(session_factory)
+    assert run.status == "failed"
+    assert run.error_code == "QUEUE_UNAVAILABLE"
+    assert run.progress_status is None
+    assert fake.calls == []  # nothing was created on GitHub, so nothing can stay queued
+
+
+def _worker(session_factory, h):
+    from app.services.orchestrator import run_review
+
+    async def work(run_id):
+        async with session_factory() as session:
+            return await run_review(
+                session,
+                run_id,
+                settings=SimpleNamespace(openai_api_key=""),
+                github=h.github,
+                jira=h.jira,
+                publisher=h.publisher,
+                codex_fn=h.codex,
+                registry=h.registry,
+            )
+
+    return work
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_worker_finishing_before_queued_write_is_not_clobbered(
+    session_factory, monkeypatch, tmp_path, mode
+) -> None:
+    import uuid as _uuid
+
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    kind = "app" if mode == "check_run" else "pat"
+    h = Harness(monkeypatch, tmp_path, kind=kind)
+    work = _worker(session_factory, h)
+
+    async def enqueue_and_run(_name, run_id):
+        # The fastest possible worker: the whole review finishes inside enqueue_job.
+        await work(_uuid.UUID(run_id))
+        return MagicMock(job_id="job-fast")
+
+    await _queue_with(session_factory, ProgressReporter(h.github, mode, AppConfig()), _redis(enqueue_and_run))
+
+    run = await _only_run(session_factory)
+    assert run.status == "completed"
+    assert run.progress_status["state"] == "completed"
+    assert run.arq_job_id == "job-fast"
+    if mode == "check_run":
+        assert h.github.check_states() == ["in_progress", "completed"]
+    else:
+        assert [p["state"] for p in h.github.payloads("status")] == ["pending", "success"]
+        assert not any(p["description"].startswith("The review is waiting") for p in h.github.payloads("status"))
+
+
+class _SlowQueuedGitHub(FakeGitHub):
+    """The API's queued write is slow; calls are recorded when they land on GitHub."""
+
+    async def create_check_run(self, owner, repo, payload):
+        if payload["status"] == "queued":
+            await asyncio.sleep(0.5)
+        self.calls.append(("create", payload))
+        return 101 + len(self.payloads("create"))
+
+    async def create_commit_status(self, owner, repo, sha, payload):
+        if payload["description"].startswith("The review is waiting"):
+            await asyncio.sleep(0.5)
+        self.calls.append(("status", sha, payload))
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_worker_racing_the_queued_write_waits_and_reuses_it(session_factory, monkeypatch, tmp_path, mode) -> None:
+    import uuid as _uuid
+
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    kind = "app" if mode == "check_run" else "pat"
+    slow = _SlowQueuedGitHub(info=None)
+    h = Harness(monkeypatch, tmp_path, kind=kind, github=slow)
+    work = _worker(session_factory, h)
+    tasks = []
+
+    async def enqueue_and_start(_name, run_id):
+        # The worker starts while the API is still writing the queued status.
+        tasks.append(asyncio.create_task(work(_uuid.UUID(run_id))))
+        return MagicMock(job_id="job-race")
+
+    await _queue_with(session_factory, ProgressReporter(slow, mode, AppConfig()), _redis(enqueue_and_start))
+    result = await asyncio.wait_for(tasks[0], timeout=20)
+
+    assert result.status == "completed"
+    run = await _only_run(session_factory)
+    assert run.progress_status["state"] == "completed"
+    if mode == "check_run":
+        assert len(slow.payloads("create")) == 1  # one check run, never a second queued one
+        assert slow.check_states() == ["queued", "in_progress", "completed"]
+        assert run.progress_status["check_run_id"] == 102
+    else:
+        assert [p["state"] for p in slow.payloads("status")] == ["pending", "pending", "success"]
+        assert slow.payloads("status")[0]["description"].startswith("The review is waiting")

@@ -265,8 +265,36 @@ class ProgressReporter:
         """Webhook-level skip (draft, fork, repository not allowed): no review run exists."""
         if not sha:
             return
-        outcome = Outcome("completed", "skipped", "Review skipped", f"Skipped: {skip_text(reason)}.")
-        await self._write(full_name, sha, outcome, None, None)
+        await self._write(full_name, sha, skipped_outcome(reason), None, None)
+
+
+def skipped_outcome(reason: str) -> Outcome:
+    return Outcome("completed", "skipped", "Review skipped", f"Skipped: {skip_text(reason)}.")
+
+
+SUPERSEDED_OUTCOME = Outcome(
+    "completed", "cancelled", "Review status replaced", "This status was not recorded; another one tracks the review."
+)
+
+
+async def locked_state(session: Any, run_id: Any) -> tuple[bool, str | None, dict[str, Any] | None]:
+    """Lock the run row and read its status and progress state from the database.
+
+    The lock serializes the API's queued write with the worker's writes, so neither side
+    creates a second check run or overwrites a newer state. Returns (found, status, state).
+    """
+    from sqlalchemy import select
+
+    from app.models import ReviewRun
+
+    row = (
+        await session.execute(
+            select(ReviewRun.status, ReviewRun.progress_status).where(ReviewRun.id == run_id).with_for_update()
+        )
+    ).first()
+    if row is None:
+        return False, None, None
+    return True, row[0], row[1]
 
 
 def reporter_for_owner(ctx: Any, github: Any = None) -> ProgressReporter | None:
@@ -344,7 +372,13 @@ async def cleanup_stale(session: Any, registry: Any, job_timeout_seconds: int, n
     for run in rows:
         if not is_stale(run.progress_status, cutoff):
             continue
-        reporter = reporter_for_owner(registry.get(run.owner_id))
+        ctx = registry.get(run.owner_id)
+        outcome = STALE_OUTCOME
+        if ctx is None and registry.is_disabled(run.owner_id):
+            # A disabled owner's status is closed as skipped with that owner's own credentials.
+            ctx = registry.disabled_status_context(run.owner_id)
+            outcome = skipped_outcome(SKIP_OWNER_DISABLED)
+        reporter = reporter_for_owner(ctx)
         state = dict(run.progress_status)
         if reporter is not None:
             state = await reporter.finish(
@@ -353,11 +387,19 @@ async def cleanup_stale(session: Any, registry: Any, job_timeout_seconds: int, n
                 sha=run.head_sha,
                 run_id=str(run.id),
                 state=state,
-                outcome=STALE_OUTCOME,
+                outcome=outcome,
             )
         else:
-            # Owner gone or reporting turned off: stop tracking without calling GitHub.
-            state.update({"state": "completed", "conclusion": "failure", "updated_at": _now()})
+            # No credentials (owner removed from config, or a disabled owner without usable
+            # credentials) or reporting turned off: the GitHub status cannot be closed, and other
+            # owners' credentials are never used for it. Stop tracking it locally.
+            if ctx is None:
+                logger.warning(
+                    "progress status of run %s (owner %s) cannot be closed on GitHub: no credentials for the owner",
+                    run.id,
+                    run.owner_id,
+                )
+            state.update({"state": "completed", "conclusion": outcome.conclusion, "updated_at": _now()})
         run.progress_status = state
         cleaned += 1
     await session.commit()

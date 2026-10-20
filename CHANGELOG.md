@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`progress_status.enabled: true`, `mode: auto`); updates are best effort, so
   deployments without the permission keep working. Findings never produce a
   failing check.
+  A failed enqueue marks the run `failed` / `QUEUE_UNAVAILABLE` without
+  creating a status; a disabled owner's statuses are closed as `skipped` with
+  its own credentials. Statuses of an owner removed from config can't be closed
+  on GitHub (documented).
 - Migration `008_review_run_progress`: `review_runs.progress_status`,
   `comment_url` and `has_sensitive_content` (NULL for existing rows).
 - **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can

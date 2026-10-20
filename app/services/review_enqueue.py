@@ -11,10 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.metrics import record_enqueue
 from app.models import PullRequest, Repository, ReviewRun
 from app.queue import abort_job, enqueue_review, job_is_active
-from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR
+from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR, QUEUE_UNAVAILABLE
 from app.services.issue_key import extract_issue_key
 from app.services.pr_description import without_managed_block
-from app.services.progress_status import ProgressReporter, final_outcome
+from app.services.progress_status import SUPERSEDED_OUTCOME, ProgressReporter, final_outcome, locked_state
 from app.services.visibility import Visibility
 
 logger = logging.getLogger(__name__)
@@ -40,8 +40,12 @@ async def queue_review(
 ) -> ReviewRun:
     """Create or reuse a review run and enqueue it.
 
-    With a progress reporter (webhook runs), the new run gets a queued status before it is
-    enqueued, and in-flight runs it supersedes get theirs marked cancelled.
+    The run row is committed before the job is enqueued, so a fast worker always finds it. If
+    enqueueing fails, the row is marked failed (QUEUE_UNAVAILABLE) and no external status exists.
+    With a progress reporter (webhook runs), the queued status is written after a successful
+    enqueue, under a row lock and only while the run is still pending without a status, so it can
+    never overwrite a state the worker already reported. In-flight runs it supersedes get their
+    status marked cancelled.
     """
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
@@ -210,13 +214,17 @@ async def queue_review(
         owner_id=owner_id,
     )
     session.add(run)
-    await session.flush()
-    if progress is not None and head_sha:
-        # Before enqueueing, so a fast worker always finds the check run id
-        await progress.queued(run, full_name)
-    job_id = await enqueue_review(redis, str(run.id))
+    await session.commit()
+    try:
+        job_id = await enqueue_review(redis, str(run.id))
+    except Exception:
+        logger.exception("enqueue failed review_run=%s %s#%s owner=%s", run.id, full_name, number, owner_id)
+        await _mark_enqueue_failed(session, run)
+        raise
     run.arq_job_id = job_id
     await session.commit()
+    if progress is not None and head_sha:
+        await _report_queued(session, progress, run, full_name)
     logger.info(
         "queued review_run=%s %s#%s sha=%s trigger=%s owner=%s",
         run.id,
@@ -228,6 +236,48 @@ async def queue_review(
     )
     record_enqueue("queued", owner=owner_id)
     return run
+
+
+async def _mark_enqueue_failed(session: AsyncSession, run: ReviewRun) -> None:
+    run_id = run.id
+    try:
+        run.status = "failed"
+        run.error_code = QUEUE_UNAVAILABLE
+        await session.commit()
+    except Exception as exc:
+        logger.warning("could not mark review_run=%s failed after enqueue error: %s", run_id, exc)
+
+
+async def _report_queued(session: AsyncSession, progress: ProgressReporter, run: ReviewRun, full_name: str) -> None:
+    """Best-effort queued status; skipped when the worker already took the run over."""
+    created: dict[str, Any] | None = None
+    run_id, sha = run.id, run.head_sha
+    try:
+        found, status, state = await locked_state(session, run.id)
+        if not found or status != "pending" or state is not None:
+            await session.commit()  # release the lock; the worker owns the status now
+            return
+        await progress.queued(run, full_name)
+        created = run.progress_status
+        await session.commit()
+    except Exception as exc:
+        logger.warning("progress status queued write failed for run %s (ignored): %s", run_id, exc)
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        if created and created.get("check_run_id"):
+            # The check run exists but was not recorded, so the worker will create its own. Close
+            # this one instead of leaving it queued. (A commit status has no id: the worker's next
+            # write on the same context replaces it.)
+            await progress.finish(
+                full_name=full_name,
+                number=None,
+                sha=sha,
+                run_id=str(run_id),
+                state=created,
+                outcome=SUPERSEDED_OUTCOME,
+            )
 
 
 async def _report_cancelled(progress: ProgressReporter | None, run: ReviewRun, full_name: str, number: int) -> None:
