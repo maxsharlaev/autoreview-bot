@@ -11,7 +11,7 @@
 | Способ | Когда | Что править |
 | --- | --- | --- |
 | GitHub Actions в репозитории с кодом | Текущий MVP | Файл ниже + секреты. **Не** `.github/workflows/ci.yml` этого репозитория |
-| Прямой GitHub webhook | После обязательной проверки подписи | [GITHUB_SETUP.md](GITHUB_SETUP.md) и [ROADMAP.md](ROADMAP.md) |
+| Прямой GitHub webhook | Подпись `X-Hub-Signature-256` обязательна | [GITHUB_SETUP.md](GITHUB_SETUP.md) |
 | Ручной `POST /api/v1/reviews` | Отладка | README |
 
 CI **этого** репозитория (`ci.yml`) — lint/тесты/docker build. Триггера ревью там нет и не должно быть.
@@ -76,7 +76,7 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/ops/status" -Headers @{ Aut
 
 Поле `hints` — человеческий диагноз: нет квоты OpenAI, нет ключа, очередь есть а running=0 (worker не ест job), stale pending/running.
 
-Grafana (ваш инстанс): скрейпить `api:8000/metrics` и `worker:9100/metrics`, импорт дашборда `observability/grafana/dashboards/open-pr-review.json`. Как подключить: [OBSERVABILITY.md](../OBSERVABILITY.md).
+Grafana (ваш инстанс): скрейпить `api:8000/metrics` и `worker:9100/metrics`, импорт дашборда `observability/grafana/dashboards/autoreview-bot.json`. Как подключить: [OBSERVABILITY.md](../OBSERVABILITY.md).
 
 ## Что должно быть зелёным
 

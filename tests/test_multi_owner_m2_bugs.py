@@ -1049,6 +1049,7 @@ class TestModeAParityLabelAndAction:
 
         mock_registry = MagicMock()
         mock_registry.resolve.return_value = RouteResult("", REJECT_UNKNOWN_OWNER)
+        mock_registry.override_labels.return_value = {override_label}
 
         with (
             patch("app.api.v1.pull_request.is_webhook_enabled", return_value=True),

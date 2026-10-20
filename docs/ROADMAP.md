@@ -13,6 +13,7 @@ This is a five-month sequence of verifiable milestones, not fixed release dates.
 | Observability | API/worker metrics, alerts, dashboard, logs | Stage correlation, SLOs, alert exercise and data exposure review |
 | Operations | Run status API and queue snapshot | Optional authenticated task dashboard |
 | Language and prompts | English defaults; `en`/`ru` fields and comment labels; configurable prompt file | Channel templates, locale catalog, per-repository settings and full translation tests |
+| Owners | Several GitHub owners in one deployment: routing, per-owner GitHub credentials, webhook secrets, API keys, Jira, Slack, policies and model key ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)) | Owners in the database or an admin UI, hot reload, per-owner quotas |
 | Quality | Unit tests and CI lint/format/test/image build | Database/queue/contract tests and local pre-commit hooks |
 
 ## Month 0 — prepare public repository (1–2 weeks)

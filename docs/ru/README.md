@@ -12,3 +12,7 @@
 - [Статус прогресса ревью (check run / commit status)](PROGRESS_STATUS.md)
 
 Наблюдаемость и чеклист публикации пока доступны [на английском](../OBSERVABILITY.md) и [на английском](../PUBLIC_RELEASE_CHECKLIST.md).
+
+## Несколько owner'ов
+
+Один деплой может обслуживать несколько owner'ов GitHub (организаций или аккаунтов): у каждого свои креды GitHub, webhook-секрет, API-ключ, Jira, Slack, политики и ключ модели. Конфиг без `owners:` работает как раньше. Основное описание (режимы A–D, маршрутизация, имена секретов `OWNER_<ID>_*`, перенос истории через `aliases: [default]`, отсутствие наследования интеграций, обновление и откат, флаг `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES`) — в [README](../../README.md#multiple-owners) на английском. Кратко на русском: [архитектура](ARCHITECTURE.md#несколько-ownerов), [GitHub](GITHUB_SETUP.md#несколько-ownerов), [деплой](DEPLOY.md#несколько-ownerов).

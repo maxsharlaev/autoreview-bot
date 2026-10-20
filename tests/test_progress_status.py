@@ -850,3 +850,31 @@ async def test_size_guard_comment_is_not_sensitive(monkeypatch, tmp_path) -> Non
     await h.review()
     assert h.run.has_sensitive_content is False
     assert h.run.comment_url == COMMENT_URL
+
+
+def test_stale_cleanup_cron_is_always_registered() -> None:
+    from app.workers import settings as worker
+
+    jobs = [job for job in worker._cron_jobs() if job.coroutine is worker.cleanup_progress_status]
+    assert len(jobs) == 1
+    assert jobs[0].minute == set(range(0, 60, 10))
+    assert worker.cleanup_progress_status in worker.WorkerSettings.functions
+
+
+def test_owner_can_override_progress_status() -> None:
+    from app.owners.registry import OwnerConfigError
+    from tests.test_owner_policies import policy_config, policy_registry
+
+    config = policy_config()
+    config.progress_status = ProgressStatusYaml(reaction=True)
+    config.owners["org-a"]["progress_status"] = {"mode": "off"}
+    registry = policy_registry(config)
+    a, b = registry.get("org-a").config, registry.get("org-b").config
+    assert (a.progress_status.mode, a.progress_status.reaction) == ("off", True)
+    assert (b.progress_status.mode, b.progress_status.reaction) == ("auto", True)
+    assert ps.resolve_mode(a, "pat") is None
+    assert ps.resolve_mode(b, "pat") == "commit_status"
+
+    config.owners["org-a"]["progress_status"] = {"timeout_seconds": 0}
+    with pytest.raises(OwnerConfigError, match="progress_status"):
+        policy_registry(config)
