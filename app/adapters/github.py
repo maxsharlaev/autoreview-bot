@@ -41,6 +41,14 @@ def _clear_caches() -> None:
     _COMMENT_AUTHOR_LOGINS.clear()
 
 
+def _comment_url(response: httpx.Response) -> str | None:
+    try:
+        url = response.json().get("html_url")
+    except Exception:
+        return None
+    return str(url) if url else None
+
+
 class GitHubError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -484,7 +492,8 @@ class GitHubAppClient:
         *,
         marker: str = MARKER,
         can_replace: Callable[[str], bool] | None = None,
-    ) -> None:
+    ) -> str | None:
+        """Create or update the bot's sticky comment and return its URL (None when left unchanged)."""
         token = await self.installation_token(owner, repo)
         try:
             author_login = (await self.comment_author_login(token)).casefold()
@@ -514,7 +523,7 @@ class GitHubAppClient:
                 if marker in (comment.get("body") or ""):
                     if can_replace is not None and not can_replace(comment.get("body") or ""):
                         logger.info("Sticky comment was edited; leaving it unchanged")
-                        return
+                        return None
                     comment_id = int(comment["id"])
                     break
             if comment_id or len(batch) < 100:
@@ -522,19 +531,63 @@ class GitHubAppClient:
             page += 1
         payload = {"body": body}
         if comment_id:
-            await self._request(
+            response = await self._request(
                 "PATCH",
                 f"{API}/repos/{owner}/{repo}/issues/comments/{comment_id}",
                 token=token,
                 json=payload,
                 _evict_on_401=True,
             )
-            return
-        await self._request(
+            return _comment_url(response)
+        response = await self._request(
             "POST",
             f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
             token=token,
             json=payload,
+            _evict_on_401=True,
+        )
+        return _comment_url(response)
+
+    async def create_check_run(self, owner: str, repo: str, payload: dict[str, Any]) -> int:
+        token = await self.installation_token(owner, repo)
+        response = await self._request(
+            "POST", f"{API}/repos/{owner}/{repo}/check-runs", token=token, json=payload, _evict_on_401=True
+        )
+        return int(response.json()["id"])
+
+    async def update_check_run(self, owner: str, repo: str, check_run_id: int, payload: dict[str, Any]) -> None:
+        token = await self.installation_token(owner, repo)
+        await self._request(
+            "PATCH",
+            f"{API}/repos/{owner}/{repo}/check-runs/{check_run_id}",
+            token=token,
+            json=payload,
+            _evict_on_401=True,
+        )
+
+    async def create_commit_status(self, owner: str, repo: str, sha: str, payload: dict[str, Any]) -> None:
+        token = await self.installation_token(owner, repo)
+        await self._request(
+            "POST", f"{API}/repos/{owner}/{repo}/statuses/{sha}", token=token, json=payload, _evict_on_401=True
+        )
+
+    async def add_issue_reaction(self, owner: str, repo: str, number: int, content: str) -> int:
+        token = await self.installation_token(owner, repo)
+        response = await self._request(
+            "POST",
+            f"{API}/repos/{owner}/{repo}/issues/{number}/reactions",
+            token=token,
+            json={"content": content},
+            _evict_on_401=True,
+        )
+        return int(response.json()["id"])
+
+    async def delete_issue_reaction(self, owner: str, repo: str, number: int, reaction_id: int) -> None:
+        token = await self.installation_token(owner, repo)
+        await self._request(
+            "DELETE",
+            f"{API}/repos/{owner}/{repo}/issues/{number}/reactions/{reaction_id}",
+            token=token,
             _evict_on_401=True,
         )
 

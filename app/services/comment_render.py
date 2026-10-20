@@ -296,6 +296,27 @@ def _transition_is_security(item: FindingTransitionView) -> bool:
     return _security_text(combined)
 
 
+def review_has_sensitive_content(
+    verified: VerifiedReview,
+    transitions: list[FindingTransitionView],
+    *,
+    jira_in_context: bool,
+) -> bool:
+    """True when the unredacted review comment would carry what the public repository policy redacts.
+
+    That is security finding details (security category or security wording in a finding, a
+    transition or the summary) or Jira text: unmet acceptance criteria, or any model text written
+    with Jira context in the prompt.
+    """
+    if jira_in_context or verified.unmet_acceptance_criteria:
+        return True
+    if _security_text(verified.summary):
+        return True
+    return any(_finding_is_security(item) for item in verified.findings) or any(
+        _transition_is_security(item) for item in transitions
+    )
+
+
 def _public_alignment(status: str) -> str:
     return {"satisfied": "matches", "unmet": "mismatch", "unclear": "unknown"}.get(status, "unknown")
 

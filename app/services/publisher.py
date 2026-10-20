@@ -35,6 +35,8 @@ class Publisher:
         self.jira = jira or JiraClient()
         self.slack = slack or SlackClient()
         self.config = config or get_app_config()
+        # URL of the sticky comment written by the last publish() call
+        self.last_comment_url: str | None = None
 
     @classmethod
     def from_context(
@@ -85,7 +87,9 @@ class Publisher:
         slack_enabled = self.slack.enabled()
         render.private_channels_configured = jira_comment_enabled or slack_enabled
         body = render_sticky_comment(render)
-        await self.github.upsert_sticky_comment(owner, repo, pr_number, body)
+        comment_url = await self.github.upsert_sticky_comment(owner, repo, pr_number, body)
+
+        self.last_comment_url = comment_url if isinstance(comment_url, str) else None
 
         result = {"github_comment": True, "jira_comment": False, "jira_transition": False, "slack": False}
         if issue_key and self.jira.project_allowed(issue_key) and self.jira.enabled():

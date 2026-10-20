@@ -121,6 +121,15 @@ class PublicReposYaml(BaseModel):
     security_findings: Literal["redact", "redact_all", "full"] = "redact"
 
 
+class ProgressStatusYaml(BaseModel):
+    """Progress status on the PR head commit: a check run (GitHub App) or a commit status (PAT)."""
+
+    enabled: bool = True
+    mode: Literal["auto", "check_run", "commit_status", "off"] = "auto"
+    reaction: bool = False
+    timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+
+
 class CodexYaml(BaseModel):
     model: str = "gpt-5.6-sol"
     prompt_file: str = ""
@@ -151,6 +160,7 @@ class AppConfig(BaseModel):
     pr_text: PrTextYaml = Field(default_factory=PrTextYaml)
     size_guard: SizeGuardYaml = Field(default_factory=SizeGuardYaml)
     public_repos: PublicReposYaml = Field(default_factory=PublicReposYaml)
+    progress_status: ProgressStatusYaml = Field(default_factory=ProgressStatusYaml)
     codex: CodexYaml = Field(default_factory=CodexYaml)
 
     # Multi-owner support (M1): owners block and routing config

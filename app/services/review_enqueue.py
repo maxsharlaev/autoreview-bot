@@ -14,6 +14,7 @@ from app.queue import abort_job, enqueue_review, job_is_active
 from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR
 from app.services.issue_key import extract_issue_key
 from app.services.pr_description import without_managed_block
+from app.services.progress_status import ProgressReporter, final_outcome
 from app.services.visibility import Visibility
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,13 @@ async def queue_review(
     owner_id: str = "default",
     installation_id: int | None = None,
     route_reason: str | None = None,
+    progress: ProgressReporter | None = None,
 ) -> ReviewRun:
+    """Create or reuse a review run and enqueue it.
+
+    With a progress reporter (webhook runs), the new run gets a queued status before it is
+    enqueued, and in-flight runs it supersedes get theirs marked cancelled.
+    """
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
         repo = Repository(full_name=full_name, enabled=True, owner_id=owner_id)
@@ -158,6 +165,7 @@ async def queue_review(
         elif existing.status in IN_FLIGHT_STATUSES:
             await abort_job(redis, existing.arq_job_id)
             existing.status = "cancelled"
+            await _report_cancelled(progress, existing, full_name, number)
             await session.flush()
 
     # Only cancel in-flight runs from the SAME owner
@@ -178,6 +186,7 @@ async def queue_review(
     for old in in_flight:
         await abort_job(redis, old.arq_job_id)
         old.status = "cancelled"
+        await _report_cancelled(progress, old, full_name, number)
 
     metric_keys = ("commits", "additions", "deletions", "changed_files")
     summary: dict[str, Any] = {}
@@ -202,6 +211,9 @@ async def queue_review(
     )
     session.add(run)
     await session.flush()
+    if progress is not None and head_sha:
+        # Before enqueueing, so a fast worker always finds the check run id
+        await progress.queued(run, full_name)
     job_id = await enqueue_review(redis, str(run.id))
     run.arq_job_id = job_id
     await session.commit()
@@ -216,3 +228,22 @@ async def queue_review(
     )
     record_enqueue("queued", owner=owner_id)
     return run
+
+
+async def _report_cancelled(progress: ProgressReporter | None, run: ReviewRun, full_name: str, number: int) -> None:
+    state = run.progress_status
+    if progress is None or not state or state.get("state") == "completed":
+        return
+    outcome = final_outcome(
+        status="cancelled",
+        error_code=None,
+        skip_reason=None,
+        summary=None,
+        comment_url=None,
+        issue_key=None,
+        visibility="public",
+        config=progress.config,
+    )
+    run.progress_status = await progress.finish(
+        full_name=full_name, number=number, sha=run.head_sha, run_id=str(run.id), state=state, outcome=outcome
+    )
