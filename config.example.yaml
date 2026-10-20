@@ -55,6 +55,15 @@ public_repos:
   jira_disclosure: key_only # none | key_only | full
   security_findings: redact # redact | full
 
+# Progress on the PR head commit (webhook runs). Best effort: without the permission the review still runs.
+# GitHub App: check run "autoreview", needs Checks: Read and write.
+# PAT: commit status "autoreview", needs Commit statuses: Read and write (classic PAT: repo:status).
+progress_status:
+  enabled: true
+  mode: auto # auto | check_run | commit_status | off (auto = check_run for an App, commit_status for a PAT)
+  reaction: false # eyes reaction on the PR while a worker reviews it
+  timeout_seconds: 5 # per GitHub call
+
 codex:
   model: gpt-5.6-sol
   prompt_file: "" # optional: prompts/local/review.md (relative to the service working directory)

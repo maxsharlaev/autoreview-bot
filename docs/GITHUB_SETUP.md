@@ -19,11 +19,11 @@ Generate a long random service API key, for example `openssl rand -hex 32`. It i
 
 ## Option A: fine-grained PAT
 
-Give the PAT access to every allowed repository, with Pull requests read/write and Contents access for clone. Set `GITHUB_TOKEN=github_pat_...` in `.env` and leave App fields blank. PR comments appear under the token owner's account. Use a test repository first and verify clone plus comment permissions.
+Give the PAT access to every allowed repository, with Pull requests read/write, Contents access for clone and Commit statuses read/write for the progress status (optional; without it the review still runs). Set `GITHUB_TOKEN=github_pat_...` in `.env` and leave App fields blank. PR comments appear under the token owner's account. Use a test repository first and verify clone plus comment permissions.
 
 ## Option B: GitHub App
 
-1. Create a GitHub App under organization or account developer settings. Give it repository permissions: Contents read, Pull requests read/write and Metadata read.
+1. Create a GitHub App under organization or account developer settings. Give it repository permissions: Contents read, Pull requests read/write, Metadata read and Checks read/write (for the `autoreview` progress check run; optional, without it the review still runs).
 2. For the current Actions-based MVP, the App can have webhooks disabled. The App still supplies a token for PR reads, clone and comments.
 3. Record the App ID as `GITHUB_APP_ID`; generate a private key and place its contents or file path in `GITHUB_APP_PRIVATE_KEY`. `GITHUB_INSTALLATION_ID=0` lets the service resolve the installation.
 4. Install the App on each repository listed in `config.yaml` under `github.allowed_repos`.

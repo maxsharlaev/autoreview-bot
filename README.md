@@ -131,6 +131,30 @@ When `security_findings: redact` is set (the default), findings are redacted if 
 
 When a private visibility recheck fails or reports a public repository, publication uses a generic public-safe version; the same reduced text is sent to Jira and Slack for that run. A changed PR head fails the run with `HEAD_CHANGED`. `security_findings: full` explicitly restores detailed GitHub findings, except older private details. Existing comments are not rewritten.
 
+## Review progress status
+
+Webhook-triggered reviews report progress on the PR head commit, so the author can see whether the bot is queued, working, skipped or broken without an extra comment. The default needs no config change:
+
+```yaml
+progress_status:
+  enabled: true
+  mode: auto          # auto | check_run | commit_status | off (auto = check_run for a GitHub App, commit_status for a PAT)
+  reaction: false     # add an eyes reaction while a worker reviews the PR
+  timeout_seconds: 5  # per GitHub call
+```
+
+- **GitHub App: check run `autoreview`.** `queued` when the webhook is accepted, `in_progress` when a worker picks the job up, then `completed` with `success` (no P0-P2 findings), `neutral` (P0-P2 findings), `skipped` (reason in the summary: draft, fork, repository not allowed, author without write access, size guard, owner disabled or changed), `cancelled` (superseded by a newer push or a head change during the review) or `failure` (bot errors and timeouts only). Findings never produce `failure`, so the check can't block merges. Needs the **Checks: Read and write** App permission.
+- **PAT: commit status, context `autoreview`.** `pending` while queued or running, then `success` (review published or skipped), `failure` (bot error or timeout) or `error` (cancelled), with a one-line description and `target_url` pointing to the review comment. A fine-grained PAT needs **Commit statuses: Read and write**; a classic PAT needs `repo:status` (included in `repo`).
+- Each owner's status is written with that owner's own credentials; `auto` picks the mode per owner from its credential type.
+- Updates are best effort: a missing permission, a GitHub error or a slow call (capped by `timeout_seconds`) is logged and ignored, and never fails or delays the review. Deployments without the new permission keep working; they just don't get a status. Webhook-level skips (draft, fork, repository not allowed) are reported in the webhook request, so they add at most `timeout_seconds` to the response.
+- The worker sets the final state in a `finally` block, including errors and the arq job timeout. A worker cron job every 10 minutes marks statuses still open after `WORKER_JOB_TIMEOUT` plus 5 minutes as timed out, so a crashed worker can't leave a status pending forever.
+- A new push creates a new check run on the new head and marks the run for the previous SHA `cancelled` if it was still open.
+- Summaries contain only the state, the skip reason or error code, finding counts and the comment link. They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
+- Manual (`/api/v1/reviews`) and scheduled digest runs don't report a status.
+- `progress_status` is a global setting in this release.
+
+Each review run also records `comment_url` and `has_sensitive_content`: whether the review comment it published, before the public repository policy is applied, would contain security finding details or Jira text (unmet acceptance criteria, or any review text written with Jira context in the prompt). `NULL` means unknown: runs from before migration `008_review_run_progress` and runs that published no review comment. The flag is groundwork for a later admin view; nothing acts on it yet.
+
 ## Manual local review (no GitHub webhook)
 
 The GitHub webhook is optional for a first test. Call the local API yourself. The worker still uses `GITHUB_TOKEN` (or GitHub App) to **read the PR, clone the SHA, and post the sticky comment** — you only skip GitHub delivering the event.

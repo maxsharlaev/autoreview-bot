@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Review progress status** (#7): webhook runs report progress on the PR head
+  as an `autoreview` check run (GitHub App, needs Checks: Read and write) or
+  commit status (PAT, needs Commit statuses: Read and write). On by default
+  (`progress_status.enabled: true`, `mode: auto`); updates are best effort, so
+  deployments without the permission keep working. Findings never produce a
+  failing check.
+- Migration `008_review_run_progress`: `review_runs.progress_status`,
+  `comment_url` and `has_sensitive_content` (NULL for existing rows).
+
 ### Changed
 
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
