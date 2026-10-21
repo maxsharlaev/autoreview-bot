@@ -536,38 +536,78 @@ async def test_manual_opt_out_still_cancels_previous_open_status(session_factory
     assert [c[0] for c in fake.calls] == ["create", "update"]
 
 
+@pytest.mark.parametrize("order", ["api_first", "worker_first"])
 @pytest.mark.parametrize("mode", ["check_run", "commit_status"])
 @pytest.mark.asyncio
-async def test_manual_worker_racing_queued_write_reuses_it(session_factory, monkeypatch, tmp_path, mode) -> None:
+async def test_manual_worker_racing_queued_write_reuses_it(session_factory, monkeypatch, tmp_path, mode, order) -> None:
+    """The worker starts while the API is still about to write the queued status.
+
+    Both orders are legitimate and are pinned explicitly here (no timing):
+    - api_first: the queued status lands first and the worker reuses it;
+    - worker_first: the worker claims the run first, so the API skips its queued write.
+    Either way there is one run, one enqueue, one status, and nothing after completion.
+    """
     import uuid as _uuid
 
     from app.config import AppConfig
+    from app.models import ReviewRun
+    from app.services import review_enqueue
     from app.services.progress_status import ProgressReporter
+    from sqlalchemy import select
 
     kind = "app" if mode == "check_run" else "pat"
     slow = _SlowQueuedGitHub(info=None)
     h = Harness(monkeypatch, tmp_path, kind=kind, github=slow)
     work = _worker(session_factory, h)
     tasks = []
+    queued_done = asyncio.Event()
+    real_report_queued = review_enqueue._report_queued
+
+    async def until_claimed(run_id):
+        while True:
+            async with session_factory() as session:
+                status = (await session.execute(select(ReviewRun.status).where(ReviewRun.id == run_id))).scalar_one()
+            if status != "pending":
+                return
+            await asyncio.sleep(0.01)
+
+    async def report_queued(session, progress, run, full_name):
+        if order == "worker_first":
+            await asyncio.wait_for(until_claimed(run.id), timeout=10)
+        try:
+            await real_report_queued(session, progress, run, full_name)
+        finally:
+            queued_done.set()
+
+    async def start_worker(run_id):
+        if order == "api_first":
+            await asyncio.wait_for(queued_done.wait(), timeout=10)
+        return await work(run_id)
 
     async def enqueue_and_start(_name, run_id, **_kw):
-        tasks.append(asyncio.create_task(work(_uuid.UUID(run_id))))
+        tasks.append(asyncio.create_task(start_worker(_uuid.UUID(run_id))))
         return MagicMock(job_id="job-manual")
 
-    await _queue_trigger(
-        session_factory,
-        ProgressReporter(slow, mode, AppConfig()),
-        _redis(enqueue_and_start),
-        trigger="manual",
-        force=True,
-    )
+    redis = _redis(enqueue_and_start)
+    with patch("app.services.review_enqueue._report_queued", report_queued):
+        await _queue_trigger(
+            session_factory,
+            ProgressReporter(slow, mode, AppConfig()),
+            redis,
+            trigger="manual",
+            force=True,
+        )
     result = await asyncio.wait_for(tasks[0], timeout=20)
     assert result.status == "completed" and result.trigger == "manual"
+    assert len(tasks) == 1 and redis.enqueue_job.await_count == 1
+    assert len(await _runs(session_factory)) == 1
     if mode == "check_run":
-        assert len(slow.payloads("create")) == 1
-        assert slow.check_states() == ["queued", "in_progress", "completed"]
+        assert len(slow.payloads("create")) == 1  # one check run, reused by the worker
+        expected = ["queued", "in_progress", "completed"] if order == "api_first" else ["in_progress", "completed"]
+        assert slow.check_states() == expected
     else:
-        assert [p["state"] for p in slow.payloads("status")] == ["pending", "pending", "success"]
+        expected = ["pending", "pending", "success"] if order == "api_first" else ["pending", "success"]
+        assert [p["state"] for p in slow.payloads("status")] == expected
 
 
 @pytest.mark.asyncio
