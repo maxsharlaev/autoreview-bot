@@ -44,7 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (reused, or cancelled and aborted on `force`), and the worker only processes
   `pending` runs, claiming them with a conditional `pending -> running` update.
   A duplicate request can no longer start a second paid review for the same
-  SHA, and a failed/cancelled/replaced run is never reviewed.
+  SHA, and a failed/cancelled/replaced run is never reviewed. Owner-reason
+  skips taken before the claim (owner disabled, not configured, owner changed,
+  route rejected) are conditional on `pending` too: a run another job already
+  holds is left untouched and its progress status is not written.
 - Migration `008_review_run_progress`: `review_runs.progress_status`,
   `comment_url` and `has_sensitive_content` (NULL for existing rows).
 - **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can

@@ -328,7 +328,7 @@ async def _run_review(
                 pr.repository.full_name,
             )
             progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
-            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
+            return await _skip_pending(session, run, started, tracking, SKIP_OWNER_DISABLED)
         logger.warning(
             "owner_not_configured owner=%s run=%s repo=%s",
             owner_id,
@@ -336,7 +336,7 @@ async def _run_review(
             pr.repository.full_name,
         )
         progress.event(f"skipped: {SKIP_OWNER_NOT_CONFIGURED}")
-        return await _skip(session, run, started, SKIP_OWNER_NOT_CONFIGURED)
+        return await _skip_pending(session, run, started, tracking, SKIP_OWNER_NOT_CONFIGURED)
 
     # Re-resolve routing to check if the route changed since enqueue
     # Use the same explicit_owner if the original route was explicit
@@ -357,7 +357,7 @@ async def _run_review(
                 pr.repository.full_name,
             )
             progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
-            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
+            return await _skip_pending(session, run, started, tracking, SKIP_OWNER_DISABLED)
         # Other rejection reasons: treat as owner_changed (route no longer valid)
         logger.warning(
             "owner_changed owner=%s reason=%s run=%s repo=%s",
@@ -367,7 +367,7 @@ async def _run_review(
             pr.repository.full_name,
         )
         progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
-        return await _skip(session, run, started, SKIP_OWNER_CHANGED)
+        return await _skip_pending(session, run, started, tracking, SKIP_OWNER_CHANGED)
 
     if route.owner_id != owner_id:
         logger.warning(
@@ -378,7 +378,7 @@ async def _run_review(
             pr.repository.full_name,
         )
         progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
-        return await _skip(session, run, started, SKIP_OWNER_CHANGED)
+        return await _skip_pending(session, run, started, tracking, SKIP_OWNER_CHANGED)
 
     # Owner of rows stored with the legacy owner_id 'default' (explicit binding; None = nobody)
     legacy_default_owner = registry.legacy_default_alias()
@@ -1647,6 +1647,45 @@ async def _skip(
         error_code=reason,
         trigger=run.trigger,
         duration_ms=run.duration_ms,
+        owner=run.owner_id,
+    )
+    return run
+
+
+async def _skip_pending(
+    session: AsyncSession,
+    run: ReviewRun,
+    started: float,
+    tracking: _ProgressTracking,
+    reason: str,
+) -> ReviewRun:
+    """Skip a run this worker has not claimed yet: only while it is still pending.
+
+    Another job may already hold the run as running (or it was cancelled meanwhile); then
+    nothing is written, its progress status is left to that job, and no work is done.
+    """
+    duration_ms = int((time.monotonic() - started) * 1000)
+    result = await session.execute(
+        update(ReviewRun)
+        .where(ReviewRun.id == run.id, ReviewRun.status == "pending")
+        .values(status="skipped", skip_reason=reason, duration_ms=duration_ms)
+    )
+    if result.rowcount != 1:
+        run_id = run.id
+        await session.rollback()
+        tracking.reporter = None  # the status belongs to whoever owns the run now
+        logger.info("review_run=%s is no longer pending; not skipping it (%s)", run_id, reason)
+        await session.refresh(run)
+        return run
+    await session.commit()
+    run.status = "skipped"
+    run.skip_reason = reason
+    run.duration_ms = duration_ms
+    record_review_finished(
+        status="skipped",
+        error_code=reason,
+        trigger=run.trigger,
+        duration_ms=duration_ms,
         owner=run.owner_id,
     )
     return run

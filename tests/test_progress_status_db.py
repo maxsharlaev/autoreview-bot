@@ -1109,3 +1109,105 @@ async def test_worker_losing_the_pending_claim_skips(session_factory, monkeypatc
     assert h.codex.await_count == 0 and h.publisher.publish.await_count == 0
     [row] = await _runs(session_factory)
     assert row.status == "running" and row.error_code is None
+
+
+def _owner_skip_path(h, path):
+    from app.owners.registry import RouteResult
+
+    if path == "owner_disabled":
+        h.registry.get.return_value = None
+        h.registry.is_disabled.return_value = True
+        h.registry.disabled_status_context.return_value = h.ctx
+    elif path == "owner_not_configured":
+        h.registry.get.return_value = None
+        h.registry.is_disabled.return_value = False
+        h.registry.disabled_status_context.return_value = None
+    elif path == "route_disabled":  # re-resolve rejects the route: owner disabled
+        h.registry.resolve.return_value = RouteResult("", "owner_disabled")
+    elif path == "route_rejected":  # re-resolve rejects the route for another reason
+        h.registry.resolve.return_value = RouteResult("", "repo_not_allowed")
+    else:  # owner_changed: the repository now routes to another owner
+        h.registry.resolve.return_value = RouteResult("org-b", "exact")
+
+
+async def _owner_skip_review(session_factory, h, run_id, *, held_by_other_job):
+    from app.models import ReviewRun
+    from app.services.orchestrator import run_review
+    from sqlalchemy import update
+
+    async with session_factory() as session:
+        real_execute = session.execute
+        raced: list[bool] = []
+
+        async def racing_execute(stmt, *a, **kw):
+            result = await real_execute(stmt, *a, **kw)
+            if held_by_other_job and not raced:
+                # Another job claims the run right after this one read it as pending.
+                raced.append(True)
+                async with session_factory() as other:
+                    await other.execute(update(ReviewRun).where(ReviewRun.id == run_id).values(status="running"))
+                    await other.commit()
+            return result
+
+        session.execute = racing_execute
+        return await run_review(
+            session,
+            str(run_id),
+            settings=SimpleNamespace(openai_api_key=""),
+            github=h.github,
+            publisher=h.publisher,
+            codex_fn=h.codex,
+            registry=h.registry,
+        )
+
+
+@pytest.mark.parametrize(
+    "path", ["owner_disabled", "owner_not_configured", "owner_changed", "route_disabled", "route_rejected"]
+)
+@pytest.mark.asyncio
+async def test_owner_skip_leaves_run_held_by_another_job_alone(session_factory, monkeypatch, tmp_path, path) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    h = Harness(monkeypatch, tmp_path)
+    run = await _queue_trigger(
+        session_factory,
+        ProgressReporter(h.github, "check_run", AppConfig()),
+        _ok_redis(),
+        trigger="webhook",
+        force=False,
+    )
+    queued_calls = list(h.github.calls)
+    _owner_skip_path(h, path)
+    result = await _owner_skip_review(session_factory, h, run.id, held_by_other_job=True)
+    [row] = await _runs(session_factory)
+    assert row.status == "running" and row.skip_reason is None and result.status == "running"
+    assert h.github.calls == queued_calls  # the other job owns the status: nothing written
+    assert h.codex.await_count == 0 and h.publisher.publish.await_count == 0
+
+
+@pytest.mark.parametrize(
+    "path", ["owner_disabled", "owner_not_configured", "owner_changed", "route_disabled", "route_rejected"]
+)
+@pytest.mark.asyncio
+async def test_owner_skip_of_pending_run_still_skips(session_factory, monkeypatch, tmp_path, path) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    h = Harness(monkeypatch, tmp_path)
+    run = await _queue_trigger(
+        session_factory,
+        ProgressReporter(h.github, "check_run", AppConfig()),
+        _ok_redis(),
+        trigger="webhook",
+        force=False,
+    )
+    _owner_skip_path(h, path)
+    result = await _owner_skip_review(session_factory, h, run.id, held_by_other_job=False)
+    [row] = await _runs(session_factory)
+    expected = {"route_disabled": "owner_disabled", "route_rejected": "owner_changed"}.get(path, path)
+    assert row.status == "skipped" and row.skip_reason == expected and result.status == "skipped"
+    if path == "owner_disabled":
+        # The disabled owner's queued status is closed as skipped with its own credentials.
+        assert h.github.check_states() == ["queued", "completed"]
+        assert h.github.calls[-1][2]["conclusion"] == "skipped"
