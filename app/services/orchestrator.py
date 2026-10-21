@@ -294,7 +294,10 @@ async def _run_review(
             .where(ReviewRun.id == review_run_id)
         )
     ).scalar_one()
-    if run.status in {"cancelled", "completed", "skipped"}:
+    if run.status != "pending":
+        # Only a pending run may be processed: never a failed, cancelled, replaced, finished or
+        # already running one (a duplicate or retried job for the same run).
+        logger.info("refusing review_run=%s with status=%s", review_run_id, run.status)
         return run
 
     pr = run.pull_request
@@ -400,6 +403,16 @@ async def _run_review(
     # Use owner's OpenAI API key
     openai_api_key = ctx.openai_api_key or settings.openai_api_key
 
+    claimed = await session.execute(
+        update(ReviewRun).where(ReviewRun.id == run.id, ReviewRun.status == "pending").values(status="running")
+    )
+    if claimed.rowcount != 1:
+        # Another job claimed this run, or it was cancelled/failed meanwhile: do nothing.
+        await session.rollback()
+        tracking.reporter = None
+        logger.info("review_run=%s was claimed or changed concurrently; skipping", review_run_id)
+        await session.refresh(run)  # the rollback expired it; return the row as it is now
+        return run
     run.status = "running"
     await session.commit()
     progress.event(f"running owner={owner_id}")

@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Retry-After: 5`). Superseded jobs are aborted after the lock is released,
   best effort with a 2 s cap, and the worker now sets `allow_abort_jobs`.
   Redis job status checks are capped at 2 s.
+- The per-PR lock no longer leaves a gap between committing a new run and
+  enqueueing it: the arq job id (`review:<run id>`) is stored with the run, a
+  fresh `pending` run (< 60 s) without a Redis job is treated as in flight
+  (reused, or cancelled and aborted on `force`), and the worker only processes
+  `pending` runs, claiming them with a conditional `pending -> running` update.
+  A duplicate request can no longer start a second paid review for the same
+  SHA, and a failed/cancelled/replaced run is never reviewed.
 - Migration `008_review_run_progress`: `review_runs.progress_status`,
   `comment_url` and `has_sensitive_content` (NULL for existing rows).
 - **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can

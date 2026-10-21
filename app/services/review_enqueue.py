@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from arq.connections import ArqRedis
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.metrics import record_enqueue
 from app.models import PullRequest, Repository, ReviewRun
-from app.queue import abort_job, enqueue_review, job_is_active
+from app.queue import abort_job, enqueue_review, job_is_active, review_job_id
 from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR, QUEUE_UNAVAILABLE
 from app.services.issue_key import extract_issue_key
 from app.services.pr_description import without_managed_block
@@ -156,7 +157,11 @@ async def queue_review(
         .first()
     )
     if existing:
-        stale = existing.status in IN_FLIGHT_STATUSES and not await job_is_active(redis, existing.arq_job_id)
+        stale = (
+            existing.status in IN_FLIGHT_STATUSES
+            and not _within_enqueue_grace(existing)
+            and not await job_is_active(redis, existing.arq_job_id)
+        )
         if stale:
             existing.status = "failed"
             existing.error_code = INTERNAL_ERROR
@@ -266,6 +271,9 @@ async def queue_review(
         summary=summary or None,
         owner_id=owner_id,
     )
+    # Stored with the row, before the lock is released: a concurrent request can check this job,
+    # and arq refuses a second job with the same id.
+    run.arq_job_id = review_job_id(str(run.id))
     session.add(run)
     await session.commit()  # releases the per-PR lock
     try:
@@ -275,8 +283,9 @@ async def queue_review(
             logger.exception("enqueue failed review_run=%s %s#%s owner=%s", run.id, full_name, number, owner_id)
             await _mark_enqueue_failed(session, run)
             raise
-        run.arq_job_id = job_id
-        await session.commit()
+        if job_id != run.arq_job_id:
+            run.arq_job_id = job_id
+            await session.commit()
         if progress is not None and head_sha and report_new_run:
             await _report_queued(session, progress, run, full_name)
     finally:
@@ -295,6 +304,19 @@ async def queue_review(
     )
     record_enqueue("queued", owner=owner_id)
     return run
+
+
+# A pending run is committed (and the per-PR lock released) just before its job is enqueued. For
+# this long after creation a pending run whose job is not (yet) in Redis counts as in flight,
+# not lost; enqueueing is bounded well below it.
+ENQUEUE_GRACE_SECONDS = 60.0
+
+
+def _within_enqueue_grace(run: ReviewRun) -> bool:
+    if run.status != "pending" or run.created_at is None:
+        return False
+    created = run.created_at if run.created_at.tzinfo else run.created_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - created < timedelta(seconds=ENQUEUE_GRACE_SECONDS)
 
 
 async def _lock_pr(session: AsyncSession, full_name: str, number: int) -> None:

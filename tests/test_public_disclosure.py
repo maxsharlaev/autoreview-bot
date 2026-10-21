@@ -1012,7 +1012,7 @@ async def test_public_main_review_model_context_excludes_jira(monkeypatch) -> No
     )
     # Mock execute to return run (no longer need run_owner_cache since findings have owner_id)
     session = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run)),
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run, rowcount=1)),
         commit=AsyncMock(),
     )
     github = SimpleNamespace(

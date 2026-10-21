@@ -179,6 +179,7 @@ class Harness:
             execute=AsyncMock(
                 return_value=SimpleNamespace(
                     scalar_one=lambda: self.run,
+                    rowcount=1,  # pending -> running claim
                     scalar_one_or_none=lambda: None,
                     # locked_state(): the row as "stored"; tests can change self.stored to
                     # simulate a concurrent writer (the API's queued status).

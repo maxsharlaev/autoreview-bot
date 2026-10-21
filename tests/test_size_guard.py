@@ -76,7 +76,7 @@ async def test_hard_limit_skips_before_model_or_file_requests() -> None:
         owner_id="default",
     )
     session = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run)),
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run, rowcount=1)),
         commit=AsyncMock(),
     )
     github = SimpleNamespace(

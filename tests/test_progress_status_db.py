@@ -348,7 +348,7 @@ async def test_worker_finishing_before_queued_write_is_not_clobbered(
     h = Harness(monkeypatch, tmp_path, kind=kind)
     work = _worker(session_factory, h)
 
-    async def enqueue_and_run(_name, run_id):
+    async def enqueue_and_run(_name, run_id, **_kw):
         # The fastest possible worker: the whole review finishes inside enqueue_job.
         await work(_uuid.UUID(run_id))
         return MagicMock(job_id="job-fast")
@@ -395,7 +395,7 @@ async def test_worker_racing_the_queued_write_waits_and_reuses_it(session_factor
     work = _worker(session_factory, h)
     tasks = []
 
-    async def enqueue_and_start(_name, run_id):
+    async def enqueue_and_start(_name, run_id, **_kw):
         # The worker starts while the API is still writing the queued status.
         tasks.append(asyncio.create_task(work(_uuid.UUID(run_id))))
         return MagicMock(job_id="job-race")
@@ -441,7 +441,7 @@ async def _queue_trigger(session_factory, reporter, redis, *, trigger, force, re
 
 def _ok_redis():
     redis = MagicMock()
-    redis.enqueue_job = AsyncMock(side_effect=lambda *_a: MagicMock(job_id=f"job-{uuid.uuid4().hex[:6]}"))
+    redis.enqueue_job = AsyncMock(side_effect=lambda *_a, **_kw: MagicMock(job_id=f"job-{uuid.uuid4().hex[:6]}"))
     return redis
 
 
@@ -550,7 +550,7 @@ async def test_manual_worker_racing_queued_write_reuses_it(session_factory, monk
     work = _worker(session_factory, h)
     tasks = []
 
-    async def enqueue_and_start(_name, run_id):
+    async def enqueue_and_start(_name, run_id, **_kw):
         tasks.append(asyncio.create_task(work(_uuid.UUID(run_id))))
         return MagicMock(job_id="job-manual")
 
@@ -578,7 +578,10 @@ async def test_rerun_after_lost_job_closes_its_open_status(session_factory) -> N
     fake = FakeGitHub()
     reporter = ProgressReporter(fake, "check_run", AppConfig())
     await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="webhook", force=False)
-    with patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=False)):
+    with (
+        patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=False)),
+        patch("app.services.review_enqueue.ENQUEUE_GRACE_SECONDS", 0.0),  # the job is lost, not just slow
+    ):
         await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="manual", force=True)
     old, new = await _runs(session_factory)
     assert old.status == "failed"
@@ -949,3 +952,160 @@ async def test_manual_endpoint_answers_503_when_pr_lock_is_busy(session_factory,
     assert await _runs(session_factory) == []
     redis.enqueue_job.assert_not_awaited()
     assert fake.calls == []
+
+
+# --- commit -> enqueue window -------------------------------------------------------------
+
+
+def _paused_enqueue():
+    """enqueue_review stand-in whose first call waits until released; records every call."""
+    from app.queue import review_job_id
+
+    calls: list[str] = []
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def enqueue(_redis, run_id):
+        calls.append(run_id)
+        if len(calls) == 1:
+            reached.set()
+            await release.wait()
+        return review_job_id(run_id)
+
+    return enqueue, calls, reached, release
+
+
+@pytest.mark.parametrize("trigger", ["webhook", "manual"])
+@pytest.mark.asyncio
+async def test_second_request_in_enqueue_window_reuses_pending_run(session_factory, trigger) -> None:
+    from app.queue import review_job_id
+
+    enqueue, calls, reached, release = _paused_enqueue()
+    with (
+        patch("app.services.review_enqueue.enqueue_review", enqueue),
+        # The first job is not in Redis yet: exactly the window the grace period covers.
+        patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=False)),
+    ):
+        first = asyncio.create_task(_queue_trigger(session_factory, None, _ok_redis(), trigger="webhook", force=False))
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=10)
+            # The first run is committed (lock released) but not enqueued yet.
+            [pending] = await _runs(session_factory)
+            assert pending.status == "pending" and pending.arq_job_id == review_job_id(str(pending.id))
+            second = await _queue_trigger(session_factory, None, _ok_redis(), trigger=trigger, force=False)
+        finally:
+            release.set()
+        first_run = await asyncio.wait_for(first, timeout=10)
+    assert second.id == first_run.id
+    assert calls == [str(first_run.id)]  # no second enqueue
+    [only] = await _runs(session_factory)
+    assert only.status == "pending" and only.arq_job_id == review_job_id(str(only.id))
+
+
+@pytest.mark.asyncio
+async def test_force_in_enqueue_window_replaces_and_aborts_deterministic_job(session_factory) -> None:
+    from app.queue import review_job_id
+
+    enqueue, calls, reached, release = _paused_enqueue()
+    abort = AsyncMock()
+    with (
+        patch("app.services.review_enqueue.enqueue_review", enqueue),
+        patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=False)),
+        patch("app.services.review_enqueue.abort_job", abort),
+    ):
+        first = asyncio.create_task(_queue_trigger(session_factory, None, _ok_redis(), trigger="webhook", force=False))
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=10)
+            second = await _queue_trigger(session_factory, None, _ok_redis(), trigger="manual", force=True)
+        finally:
+            release.set()
+        first_run = await asyncio.wait_for(first, timeout=10)
+    old, new = await _runs(session_factory)
+    assert old.id == first_run.id and new.id == second.id
+    assert old.status == "cancelled" and new.status == "pending"
+    assert calls == [str(old.id), str(new.id)]
+    # The superseded job id is known before it reaches Redis, so the abort targets it.
+    abort.assert_awaited_once()
+    assert abort.await_args.args[1] == review_job_id(str(old.id))
+
+
+@pytest.mark.asyncio
+async def test_failed_enqueue_is_replaced_within_grace(session_factory) -> None:
+    from app.services.constants import QUEUE_UNAVAILABLE
+
+    broken = MagicMock()
+    broken.enqueue_job = AsyncMock(side_effect=ConnectionError("redis down"))
+    with pytest.raises(ConnectionError):
+        await _queue_trigger(session_factory, None, broken, trigger="webhook", force=False)
+    redis = _ok_redis()
+    retry = await _queue_trigger(session_factory, None, redis, trigger="webhook", force=False)
+    old, new = await _runs(session_factory)
+    assert old.status == "failed" and old.error_code == QUEUE_UNAVAILABLE
+    assert new.id == retry.id and new.status == "pending"
+    redis.enqueue_job.assert_awaited_once()
+    assert redis.enqueue_job.await_args.kwargs["_job_id"] == f"review:{new.id}"
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "running", "completed"])
+@pytest.mark.asyncio
+async def test_worker_refuses_non_pending_run(session_factory, monkeypatch, tmp_path, status) -> None:
+    from app.models import ReviewRun
+    from app.services.orchestrator import run_review
+    from sqlalchemy import update
+
+    run = await _queue_trigger(session_factory, None, _ok_redis(), trigger="webhook", force=False)
+    async with session_factory() as session:
+        await session.execute(update(ReviewRun).where(ReviewRun.id == run.id).values(status=status))
+        await session.commit()
+    github, codex = MagicMock(), AsyncMock()
+    async with session_factory() as session:
+        result = await run_review(
+            session,
+            str(run.id),
+            settings=SimpleNamespace(openai_api_key=""),
+            github=github,
+            codex_fn=codex,
+            registry=Harness(monkeypatch, tmp_path).registry,
+        )
+    assert result.status == status
+    assert github.mock_calls == [] and codex.await_count == 0
+    [row] = await _runs(session_factory)
+    assert row.status == status
+
+
+@pytest.mark.asyncio
+async def test_worker_losing_the_pending_claim_skips(session_factory, monkeypatch, tmp_path) -> None:
+    from app.models import ReviewRun
+    from app.services.orchestrator import run_review
+    from sqlalchemy import update
+
+    run = await _queue_trigger(session_factory, None, _ok_redis(), trigger="webhook", force=False)
+    h = Harness(monkeypatch, tmp_path)
+    async with session_factory() as session:
+        real_execute = session.execute
+
+        raced: list[bool] = []
+
+        async def racing_execute(stmt, *a, **kw):
+            result = await real_execute(stmt, *a, **kw)
+            if not raced:
+                # A competing job claims the run right after this worker read it as pending.
+                raced.append(True)
+                async with session_factory() as other:
+                    await other.execute(update(ReviewRun).where(ReviewRun.id == run.id).values(status="running"))
+                    await other.commit()
+            return result
+
+        session.execute = racing_execute
+        await run_review(
+            session,
+            str(run.id),
+            settings=SimpleNamespace(openai_api_key=""),
+            github=h.github,
+            publisher=h.publisher,
+            codex_fn=h.codex,
+            registry=h.registry,
+        )
+    # No paid model call and no publication: the competing job owns the run.
+    assert h.codex.await_count == 0 and h.publisher.publish.await_count == 0
+    [row] = await _runs(session_factory)
+    assert row.status == "running" and row.error_code is None

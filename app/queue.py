@@ -24,9 +24,15 @@ async def create_redis_pool(url: str | None = None) -> ArqRedis:
     return await create_pool(redis_settings(url))
 
 
+def review_job_id(review_run_id: str) -> str:
+    """Deterministic arq job id for a run: stored before enqueueing, and arq refuses duplicates."""
+    return f"review:{review_run_id}"
+
+
 async def enqueue_review(redis: ArqRedis, review_run_id: str) -> str | None:
-    job = await redis.enqueue_job("review_pull_request", review_run_id)
-    return job.job_id if job else None
+    job_id = review_job_id(review_run_id)
+    job = await redis.enqueue_job("review_pull_request", review_run_id, _job_id=job_id)
+    return job.job_id if job else job_id
 
 
 async def abort_job(redis: ArqRedis, job_id: str | None, timeout: float | None = None) -> None:

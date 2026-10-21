@@ -115,6 +115,7 @@ async def test_hard_limit_uses_persisted_author_after_credential_change() -> Non
         execute=AsyncMock(
             side_effect=[
                 SimpleNamespace(scalar_one=lambda: run),
+                SimpleNamespace(rowcount=1),  # pending -> running claim
                 SimpleNamespace(scalar_one=lambda: repository),
             ]
         ),
@@ -217,6 +218,7 @@ async def test_legacy_comment_authors_trusted_only_for_bound_owner(build, owner_
         execute=AsyncMock(
             side_effect=[
                 SimpleNamespace(scalar_one=lambda: run),
+                SimpleNamespace(rowcount=1),  # pending -> running claim
                 SimpleNamespace(scalar_one=lambda: repository),
             ]
         ),
