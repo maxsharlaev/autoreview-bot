@@ -20,7 +20,8 @@ from app.owners.registry import (
 )
 from app.services.constants import SKIP_REPO
 from app.services.manual_review import ManualReviewRequest, pr_payload_from_request
-from app.services.review_enqueue import queue_review
+from app.services.progress_status import reporter_for_owner
+from app.services.review_enqueue import HeadCheckError, QueueBusyError, StaleHeadError, queue_review
 
 logger = logging.getLogger(__name__)
 
@@ -103,49 +104,60 @@ async def start_review(
     if ctx is None:
         raise HTTPException(status_code=404, detail="owner_not_configured")
 
-    info = None
-    head_sha = body.head_sha or ""
-    base_sha = body.base_sha or ""
-    is_fork = False
-    if not head_sha:
-        owner, repo = full_name.split("/", 1)
-        # Build GitHub client from owner context
-        github = GitHubAppClient.from_credentials(ctx.github, owner_id=owner_id)
-        try:
-            info = await github.get_pull_request(owner, repo, number)
-        except GitHubError as exc:
-            raise HTTPException(status_code=502, detail=f"github: {exc}") from exc
+    # Always read the current PR, even when head_sha is given: the run (and its progress status)
+    # must be bound to the commit the worker will actually review.
+    owner, repo = full_name.split("/", 1)
+    github = GitHubAppClient.from_credentials(ctx.github, owner_id=owner_id)
+    try:
+        info = await github.get_pull_request(owner, repo, number)
+    except GitHubError as exc:
+        raise HTTPException(status_code=502, detail=f"github: {exc}") from exc
+    if body.head_sha and body.head_sha.lower() != info.head_sha.lower():
+        # Rejected before anything is cancelled, stored, enqueued or reported.
+        raise HTTPException(
+            status_code=409,
+            detail=_stale(body.head_sha, info.head_sha),
+        )
+    # Re-check routing if GitHub returned a different full_name (repo renamed)
+    if info.full_name.lower() != full_name.lower():
+        recheck = registry.resolve(info.full_name, explicit_owner=effective_owner)
+        if recheck.rejected():
+            record_routing(owner="", reason=recheck.reason, rejected=True)
+            if recheck.reason == REJECT_REPO_NOT_ALLOWED:
+                raise HTTPException(status_code=403, detail=SKIP_REPO)
+            raise HTTPException(status_code=403, detail=recheck.reason)
+        if recheck.owner_id != owner_id:
+            raise HTTPException(status_code=409, detail=f"repo_renamed: {info.full_name} routes to different owner")
 
-        # Re-check routing if GitHub returned a different full_name (repo renamed)
-        if info.full_name.lower() != full_name.lower():
-            recheck = registry.resolve(info.full_name, explicit_owner=effective_owner)
-            if recheck.rejected():
-                record_routing(owner="", reason=recheck.reason, rejected=True)
-                if recheck.reason == REJECT_REPO_NOT_ALLOWED:
-                    raise HTTPException(status_code=403, detail=SKIP_REPO)
-                raise HTTPException(status_code=403, detail=recheck.reason)
-            if recheck.owner_id != owner_id:
-                raise HTTPException(status_code=409, detail=f"repo_renamed: {info.full_name} routes to different owner")
+    full_name = info.full_name
+    head_sha = info.head_sha
+    base_sha = info.base_sha
+    is_fork = info.is_fork
 
-        full_name = info.full_name
-        head_sha = info.head_sha
-        base_sha = info.base_sha
-        is_fork = info.is_fork
-
-    run = await queue_review(
-        session,
-        get_redis(request),
-        full_name=full_name,
-        number=info.number if info else number,
-        pr_payload=pr_payload_from_request(body, info=info),
-        head_sha=head_sha,
-        base_sha=base_sha,
-        is_fork=is_fork,
-        trigger="manual",
-        force=body.force,
-        owner_id=owner_id,
-        route_reason=route.reason,
-    )
+    try:
+        run = await queue_review(
+            session,
+            get_redis(request),
+            full_name=full_name,
+            number=info.number,
+            pr_payload=pr_payload_from_request(body, info=info),
+            head_sha=head_sha,
+            base_sha=base_sha,
+            is_fork=is_fork,
+            trigger="manual",
+            force=body.force,
+            owner_id=owner_id,
+            route_reason=route.reason,
+            progress=_reporter(ctx),
+            report_new_run=body.report_status,
+            current_head=_head_reader(github, info.owner, info.repo, info.number),
+        )
+    except StaleHeadError as exc:
+        raise HTTPException(status_code=409, detail=_stale(body.head_sha or head_sha, exc.current_head_sha)) from exc
+    except QueueBusyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "pr_queue_busy"}, headers={"Retry-After": "5"}) from exc
+    except HeadCheckError as exc:
+        raise HTTPException(status_code=502, detail=f"github: {exc}") from exc
     return {
         "status": run.status,
         "review_run_id": str(run.id),
@@ -153,6 +165,25 @@ async def start_review(
         "trigger": run.trigger,
         "owner": owner_id,
     }
+
+
+def _stale(requested: str, current: str) -> dict:
+    return {"code": "stale_head_sha", "head_sha": requested, "current_head_sha": current}
+
+
+def _head_reader(github, owner: str, repo: str, number: int):
+    async def read() -> str:
+        return (await github.get_pull_request(owner, repo, number)).head_sha
+
+    return read
+
+
+def _reporter(ctx):
+    try:
+        return reporter_for_owner(ctx)
+    except Exception:
+        logger.exception("progress status reporter unavailable (ignored)")
+        return None
 
 
 @router.get("/reviews/{review_run_id}")

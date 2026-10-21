@@ -218,3 +218,6 @@ class WorkerSettings:
     redis_settings = redis_settings()
     max_jobs = get_settings().worker_max_jobs
     job_timeout = get_settings().worker_job_timeout
+    # Superseded runs are aborted (cancelled) by the API; the run is already marked cancelled in
+    # the DB, and the worker's finalization never overwrites a closed status.
+    allow_abort_jobs = True

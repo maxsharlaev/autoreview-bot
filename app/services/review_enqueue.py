@@ -1,23 +1,57 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from arq.connections import ArqRedis
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.metrics import record_enqueue
 from app.models import PullRequest, Repository, ReviewRun
-from app.queue import abort_job, enqueue_review, job_is_active
+from app.queue import abort_job, enqueue_review, job_is_active, review_job_id
 from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR, QUEUE_UNAVAILABLE
 from app.services.issue_key import extract_issue_key
 from app.services.pr_description import without_managed_block
-from app.services.progress_status import SUPERSEDED_OUTCOME, ProgressReporter, final_outcome, locked_state
+from app.services.progress_status import (
+    PROGRESS_OPT_OUT,
+    SUPERSEDED_OUTCOME,
+    ProgressReporter,
+    final_outcome,
+    locked_state,
+)
 from app.services.visibility import Visibility
 
 logger = logging.getLogger(__name__)
+
+# Upper bound for the GitHub head read done while the per-PR lock is held.
+HEAD_CHECK_TIMEOUT_SECONDS = 10.0
+
+
+class StaleHeadError(Exception):
+    """The requested SHA is no longer the PR head; nothing was changed."""
+
+    def __init__(self, current_head_sha: str) -> None:
+        super().__init__(f"stale head sha; current head is {current_head_sha}")
+        self.current_head_sha = current_head_sha
+
+
+class QueueBusyError(Exception):
+    """The per-PR lock could not be acquired within LOCK_WAIT_SECONDS; nothing was changed."""
+
+
+# Longest wait for the per-PR lock. It must exceed the work done under the lock: the head
+# re-read (HEAD_CHECK_TIMEOUT_SECONDS) plus bounded status writes and Redis status checks.
+LOCK_WAIT_SECONDS = 20.0
+_LOCK_POLL_SECONDS = 0.1
+
+
+class HeadCheckError(Exception):
+    """The PR head could not be re-read from GitHub; nothing was changed."""
 
 
 async def queue_review(
@@ -37,6 +71,8 @@ async def queue_review(
     installation_id: int | None = None,
     route_reason: str | None = None,
     progress: ProgressReporter | None = None,
+    report_new_run: bool = True,
+    current_head: Callable[[], Awaitable[str]] | None = None,
 ) -> ReviewRun:
     """Create or reuse a review run and enqueue it.
 
@@ -46,7 +82,19 @@ async def queue_review(
     enqueue, under a row lock and only while the run is still pending without a status, so it can
     never overwrite a state the worker already reported. In-flight runs it supersedes get their
     status marked cancelled.
+
+    report_new_run=False (a manual request opting out) skips the new run's own status, and the
+    worker sees the opt-out in the run summary; superseded runs still get theirs closed.
+
+    Runs for one PR are serialized with a transaction-scoped advisory lock (repository + PR
+    number), held until the new run row is committed. With current_head (manual requests), an
+    open run of this owner on a different SHA is cancelled only after re-reading the PR head
+    under that lock: if the head is no longer head_sha, StaleHeadError is raised; if the read
+    fails or exceeds HEAD_CHECK_TIMEOUT_SECONDS, HeadCheckError. In both cases the transaction
+    is rolled back and nothing is cancelled, stored, enqueued or reported.
     """
+    await _lock_pr(session, full_name, number)
+    to_abort: list[str] = []
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
         repo = Repository(full_name=full_name, enabled=True, owner_id=owner_id)
@@ -68,6 +116,8 @@ async def queue_review(
             select(PullRequest).where(PullRequest.repository_id == repo.id, PullRequest.number == number)
         )
     ).scalar_one_or_none()
+    if current_head is not None and pr is not None:
+        await _verify_head_before_superseding(session, pr, owner_id, head_sha, current_head)
     head = pr_payload.get("head") or {}
     assignee = None
     if pr_payload.get("assignee"):
@@ -107,10 +157,16 @@ async def queue_review(
         .first()
     )
     if existing:
-        stale = existing.status in IN_FLIGHT_STATUSES and not await job_is_active(redis, existing.arq_job_id)
+        stale = (
+            existing.status in IN_FLIGHT_STATUSES
+            and not _within_enqueue_grace(existing)
+            and not await job_is_active(redis, existing.arq_job_id)
+        )
         if stale:
             existing.status = "failed"
             existing.error_code = INTERNAL_ERROR
+            # Its job is gone: close its open status too, so the commit never shows two.
+            await _report_cancelled(progress, existing, full_name, number, status="failed", error_code=INTERNAL_ERROR)
             await session.flush()
         elif not force:
             # Check for B->A case: if ownership changed back and another owner has a
@@ -167,7 +223,7 @@ async def queue_review(
                 record_enqueue("reused", owner=owner_id)
                 return existing
         elif existing.status in IN_FLIGHT_STATUSES:
-            await abort_job(redis, existing.arq_job_id)
+            to_abort.append(existing.arq_job_id)
             existing.status = "cancelled"
             await _report_cancelled(progress, existing, full_name, number)
             await session.flush()
@@ -188,7 +244,7 @@ async def queue_review(
         .all()
     )
     for old in in_flight:
-        await abort_job(redis, old.arq_job_id)
+        to_abort.append(old.arq_job_id)
         old.status = "cancelled"
         await _report_cancelled(progress, old, full_name, number)
 
@@ -202,6 +258,8 @@ async def queue_review(
         summary["installation_id"] = installation_id
     if route_reason is not None:
         summary["route_reason"] = route_reason
+    if not report_new_run:
+        summary[PROGRESS_OPT_OUT] = True
 
     run = ReviewRun(
         id=uuid.uuid4(),
@@ -213,18 +271,28 @@ async def queue_review(
         summary=summary or None,
         owner_id=owner_id,
     )
+    # Stored with the row, before the lock is released: a concurrent request can check this job,
+    # and arq refuses a second job with the same id.
+    run.arq_job_id = review_job_id(str(run.id))
     session.add(run)
-    await session.commit()
+    await session.commit()  # releases the per-PR lock
     try:
-        job_id = await enqueue_review(redis, str(run.id))
-    except Exception:
-        logger.exception("enqueue failed review_run=%s %s#%s owner=%s", run.id, full_name, number, owner_id)
-        await _mark_enqueue_failed(session, run)
-        raise
-    run.arq_job_id = job_id
-    await session.commit()
-    if progress is not None and head_sha:
-        await _report_queued(session, progress, run, full_name)
+        try:
+            job_id = await enqueue_review(redis, str(run.id))
+        except Exception:
+            logger.exception("enqueue failed review_run=%s %s#%s owner=%s", run.id, full_name, number, owner_id)
+            await _mark_enqueue_failed(session, run)
+            raise
+        if job_id != run.arq_job_id:
+            run.arq_job_id = job_id
+            await session.commit()
+        if progress is not None and head_sha and report_new_run:
+            await _report_queued(session, progress, run, full_name)
+    finally:
+        # Superseded runs are already cancelled in the DB; aborting their jobs is best effort,
+        # bounded, and done outside the lock so a slow Redis or worker never blocks this PR.
+        for job in to_abort:
+            await abort_job(redis, job)
     logger.info(
         "queued review_run=%s %s#%s sha=%s trigger=%s owner=%s",
         run.id,
@@ -236,6 +304,66 @@ async def queue_review(
     )
     record_enqueue("queued", owner=owner_id)
     return run
+
+
+# A pending run is committed (and the per-PR lock released) just before its job is enqueued. For
+# this long after creation a pending run whose job is not (yet) in Redis counts as in flight,
+# not lost; enqueueing is bounded well below it.
+ENQUEUE_GRACE_SECONDS = 60.0
+
+
+def _within_enqueue_grace(run: ReviewRun) -> bool:
+    if run.status != "pending" or run.created_at is None:
+        return False
+    created = run.created_at if run.created_at.tzinfo else run.created_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - created < timedelta(seconds=ENQUEUE_GRACE_SECONDS)
+
+
+async def _lock_pr(session: AsyncSession, full_name: str, number: int) -> None:
+    """Transaction-scoped advisory lock for one PR, waiting at most LOCK_WAIT_SECONDS."""
+    key = func.hashtextextended(f"review:{full_name.lower()}#{number}", 0)
+    deadline = asyncio.get_running_loop().time() + LOCK_WAIT_SECONDS
+    while True:
+        if (await session.execute(select(func.pg_try_advisory_xact_lock(key)))).scalar():
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            await session.rollback()
+            logger.warning("per-PR enqueue lock busy %s#%s after %ss", full_name, number, LOCK_WAIT_SECONDS)
+            raise QueueBusyError(f"{full_name}#{number}")
+        await asyncio.sleep(_LOCK_POLL_SECONDS)
+
+
+async def _verify_head_before_superseding(
+    session: AsyncSession,
+    pr: PullRequest,
+    owner_id: str,
+    head_sha: str,
+    current_head: Callable[[], Awaitable[str]],
+) -> None:
+    other = (
+        await session.execute(
+            select(ReviewRun.id)
+            .where(
+                ReviewRun.pull_request_id == pr.id,
+                ReviewRun.owner_id == owner_id,
+                ReviewRun.status.in_(IN_FLIGHT_STATUSES),
+                ReviewRun.head_sha != head_sha,
+            )
+            .limit(1)
+        )
+    ).first()
+    if other is None:
+        return  # nothing would be superseded: no extra GitHub call
+    pr_id = pr.id  # objects expire on rollback below
+    try:
+        current = await asyncio.wait_for(current_head(), timeout=HEAD_CHECK_TIMEOUT_SECONDS)
+    except Exception as exc:
+        await session.rollback()
+        raise HeadCheckError(str(exc) or type(exc).__name__) from exc
+    if current.lower() != head_sha.lower():
+        await session.rollback()
+        logger.info("stale manual head pr=%s requested=%s current=%s", pr_id, head_sha[:12], current[:12])
+        raise StaleHeadError(current)
 
 
 async def _mark_enqueue_failed(session: AsyncSession, run: ReviewRun) -> None:
@@ -280,13 +408,21 @@ async def _report_queued(session: AsyncSession, progress: ProgressReporter, run:
             )
 
 
-async def _report_cancelled(progress: ProgressReporter | None, run: ReviewRun, full_name: str, number: int) -> None:
+async def _report_cancelled(
+    progress: ProgressReporter | None,
+    run: ReviewRun,
+    full_name: str,
+    number: int,
+    *,
+    status: str = "cancelled",
+    error_code: str | None = None,
+) -> None:
     state = run.progress_status
     if progress is None or not state or state.get("state") == "completed":
         return
     outcome = final_outcome(
-        status="cancelled",
-        error_code=None,
+        status=status,
+        error_code=error_code,
         skip_reason=None,
         summary=None,
         comment_url=None,

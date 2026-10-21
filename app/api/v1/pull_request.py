@@ -25,7 +25,7 @@ from app.security.webhook_config import (
 )
 from app.services.constants import HANDLED_ACTIONS, SKIP_DRAFT, SKIP_FORK, SKIP_REPO
 from app.services.progress_status import report_webhook_skip, reporter_for_owner
-from app.services.review_enqueue import queue_review
+from app.services.review_enqueue import QueueBusyError, queue_review
 from app.services.visibility import repository_visibility
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,14 @@ def classify_pull_request_event(
     if is_fork:
         return {"status": "skipped", "reason": SKIP_FORK}
     return None
+
+
+async def _queue_or_busy(*args, **kwargs):
+    """queue_review; a busy per-PR lock answers 503 so GitHub records a failed delivery (redeliverable)."""
+    try:
+        return await queue_review(*args, **kwargs)
+    except QueueBusyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "pr_queue_busy"}, headers={"Retry-After": "5"}) from exc
 
 
 def _reporter(ctx):
@@ -244,7 +252,7 @@ async def pull_request_webhook(
     head_sha = head.get("sha") or ""
     base_sha = base.get("sha") or ""
     redis: ArqRedis = get_redis(request)
-    run = await queue_review(
+    run = await _queue_or_busy(
         session,
         redis,
         full_name=full_name,
@@ -386,7 +394,7 @@ async def pull_request_webhook_for_owner(
     head_sha = head.get("sha") or ""
     base_sha = base.get("sha") or ""
     redis: ArqRedis = get_redis(request)
-    run = await queue_review(
+    run = await _queue_or_busy(
         session,
         redis,
         full_name=full_name,

@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 CHECK_NAME = "autoreview"
 STATUS_CONTEXT = "autoreview"
 OPEN_STATES = frozenset({"queued", "in_progress"})
+# Runs of a concrete PR head that report progress. Scheduled digests review no PR head.
+PROGRESS_TRIGGERS = frozenset({"webhook", "manual"})
+# review_runs.summary key: a manual request asked for no status on this run.
+PROGRESS_OPT_OUT = "progress_status_opt_out"
 STALE_MARGIN_SECONDS = 300
 _DESCRIPTION_LIMIT = 140
 

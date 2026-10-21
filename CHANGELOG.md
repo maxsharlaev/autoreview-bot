@@ -19,6 +19,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creating a status; a disabled owner's statuses are closed as `skipped` with
   its own credentials. Statuses of an owner removed from config can't be closed
   on GitHub (documented).
+- Manual runs (`POST /api/v1/reviews`) report the same progress status as
+  webhook runs; `"report_status": false` opts a request out. A manual rerun on
+  the same SHA closes the open status as `cancelled` before opening its own,
+  and a superseded worker never writes to a closed status.
+- `POST /api/v1/reviews` always reads the current PR head; a `head_sha` that is
+  not the current head is rejected with `409` `stale_head_sha` (with
+  `current_head_sha`) before anything is cancelled, stored or queued. The
+  request's `base_sha` is no longer used. The worker closes a run as
+  `HEAD_CHANGED` when the PR head moved before pickup instead of reviewing
+  newer code under the old SHA.
+- Enqueueing is serialized per PR (Postgres advisory lock). Before a manual
+  request cancels an open run on a different SHA, it re-reads the PR head under
+  the lock (10 s timeout): `409 stale_head_sha` if the head moved, `502` if the
+  read fails, and nothing changes in either case.
+- Waits around enqueueing are bounded. The per-PR lock is acquired within
+  20 s, otherwise the webhook and manual endpoints answer `503 pr_queue_busy`
+  (`Retry-After: 5`). Superseded jobs are aborted after the lock is released,
+  best effort with a 2 s cap, and the worker now sets `allow_abort_jobs`.
+  Redis job status checks are capped at 2 s.
+- The per-PR lock no longer leaves a gap between committing a new run and
+  enqueueing it: the arq job id (`review:<run id>`) is stored with the run, a
+  fresh `pending` run (< 60 s) without a Redis job is treated as in flight
+  (reused, or cancelled and aborted on `force`), and the worker only processes
+  `pending` runs, claiming them with a conditional `pending -> running` update.
+  A duplicate request can no longer start a second paid review for the same
+  SHA, and a failed/cancelled/replaced run is never reviewed. Owner-reason
+  skips taken before the claim (owner disabled, not configured, owner changed,
+  route rejected) are conditional on `pending` too: a run another job already
+  holds is left untouched and its progress status is not written.
 - Migration `008_review_run_progress`: `review_runs.progress_status`,
   `comment_url` and `has_sensitive_content` (NULL for existing rows).
 - **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can

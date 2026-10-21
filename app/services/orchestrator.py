@@ -64,7 +64,13 @@ from app.services.pr_description import (
     without_managed_block,
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
-from app.services.progress_status import ProgressReporter, final_outcome, locked_state
+from app.services.progress_status import (
+    PROGRESS_OPT_OUT,
+    PROGRESS_TRIGGERS,
+    ProgressReporter,
+    final_outcome,
+    locked_state,
+)
 from app.services.publisher import Publisher, empty_verified
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
@@ -189,6 +195,10 @@ async def _finalize_progress(session: AsyncSession, tracking: _ProgressTracking,
             # The session may be unusable after a crash: start a fresh transaction.
             await session.rollback()
         tracking.state = await _current_state(session, tracking)
+        if _closed(tracking.state):
+            # Already final, e.g. cancelled by a newer run on the same commit: never overwrite it.
+            await session.commit()
+            return
         if crashed is None and tracking.run is not None:
             run = tracking.run
             outcome = final_outcome(
@@ -238,6 +248,10 @@ async def _finalize_progress(session: AsyncSession, tracking: _ProgressTracking,
         logger.warning("could not store progress status for run %s (ignored): %s", tracking.run_id, exc)
 
 
+def _closed(state: dict | None) -> bool:
+    return bool(state) and state.get("state") == "completed"
+
+
 async def _current_state(session: AsyncSession, tracking: _ProgressTracking) -> dict | None:
     """The run's progress state as stored now, with the row locked until the next commit.
 
@@ -280,7 +294,10 @@ async def _run_review(
             .where(ReviewRun.id == review_run_id)
         )
     ).scalar_one()
-    if run.status in {"cancelled", "completed", "skipped"}:
+    if run.status != "pending":
+        # Only a pending run may be processed: never a failed, cancelled, replaced, finished or
+        # already running one (a duplicate or retried job for the same run).
+        logger.info("refusing review_run=%s with status=%s", review_run_id, run.status)
         return run
 
     pr = run.pull_request
@@ -291,9 +308,10 @@ async def _run_review(
     owner_id = run.owner_id
     ctx = registry.get(owner_id)
 
-    if ctx is not None and run.trigger == "webhook":
+    tracked = run.trigger in PROGRESS_TRIGGERS and not (run.summary or {}).get(PROGRESS_OPT_OUT)
+    if ctx is not None and tracked:
         _start_tracking(tracking, run, pr, ctx, github=github, config=config or ctx.config)
-    elif ctx is None and run.trigger == "webhook" and registry.is_disabled(owner_id):
+    elif ctx is None and tracked and registry.is_disabled(owner_id):
         # Close the disabled owner's queued status as skipped, with that owner's own credentials only.
         disabled_ctx = registry.disabled_status_context(owner_id)
         if disabled_ctx is not None:
@@ -310,7 +328,7 @@ async def _run_review(
                 pr.repository.full_name,
             )
             progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
-            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
+            return await _skip_pending(session, run, started, tracking, SKIP_OWNER_DISABLED)
         logger.warning(
             "owner_not_configured owner=%s run=%s repo=%s",
             owner_id,
@@ -318,7 +336,7 @@ async def _run_review(
             pr.repository.full_name,
         )
         progress.event(f"skipped: {SKIP_OWNER_NOT_CONFIGURED}")
-        return await _skip(session, run, started, SKIP_OWNER_NOT_CONFIGURED)
+        return await _skip_pending(session, run, started, tracking, SKIP_OWNER_NOT_CONFIGURED)
 
     # Re-resolve routing to check if the route changed since enqueue
     # Use the same explicit_owner if the original route was explicit
@@ -339,7 +357,7 @@ async def _run_review(
                 pr.repository.full_name,
             )
             progress.event(f"skipped: {SKIP_OWNER_DISABLED}")
-            return await _skip(session, run, started, SKIP_OWNER_DISABLED)
+            return await _skip_pending(session, run, started, tracking, SKIP_OWNER_DISABLED)
         # Other rejection reasons: treat as owner_changed (route no longer valid)
         logger.warning(
             "owner_changed owner=%s reason=%s run=%s repo=%s",
@@ -349,7 +367,7 @@ async def _run_review(
             pr.repository.full_name,
         )
         progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
-        return await _skip(session, run, started, SKIP_OWNER_CHANGED)
+        return await _skip_pending(session, run, started, tracking, SKIP_OWNER_CHANGED)
 
     if route.owner_id != owner_id:
         logger.warning(
@@ -360,7 +378,7 @@ async def _run_review(
             pr.repository.full_name,
         )
         progress.event(f"skipped: {SKIP_OWNER_CHANGED}")
-        return await _skip(session, run, started, SKIP_OWNER_CHANGED)
+        return await _skip_pending(session, run, started, tracking, SKIP_OWNER_CHANGED)
 
     # Owner of rows stored with the legacy owner_id 'default' (explicit binding; None = nobody)
     legacy_default_owner = registry.legacy_default_alias()
@@ -385,12 +403,23 @@ async def _run_review(
     # Use owner's OpenAI API key
     openai_api_key = ctx.openai_api_key or settings.openai_api_key
 
+    claimed = await session.execute(
+        update(ReviewRun).where(ReviewRun.id == run.id, ReviewRun.status == "pending").values(status="running")
+    )
+    if claimed.rowcount != 1:
+        # Another job claimed this run, or it was cancelled/failed meanwhile: do nothing.
+        await session.rollback()
+        tracking.reporter = None
+        logger.info("review_run=%s was claimed or changed concurrently; skipping", review_run_id)
+        await session.refresh(run)  # the rollback expired it; return the row as it is now
+        return run
     run.status = "running"
     await session.commit()
     progress.event(f"running owner={owner_id}")
     if tracking.reporter is not None:
         run.progress_status = await _current_state(session, tracking)
-        await tracking.reporter.in_progress(run, pr.repository.full_name, pr.number)
+        if not _closed(run.progress_status):
+            await tracking.reporter.in_progress(run, pr.repository.full_name, pr.number)
         tracking.state = run.progress_status
         await session.commit()
 
@@ -402,6 +431,20 @@ async def _run_review(
         logger.exception("Failed to load PR %s#%s", pr.repository.full_name, pr.number)
         progress.event("failed: GITHUB_UNAVAILABLE")
         return await _fail(session, run, started, "GITHUB_UNAVAILABLE")
+
+    if run.head_sha and info.head_sha != run.head_sha:
+        # The PR moved on since this run was queued. The status is bound to run.head_sha, so the
+        # run must not review (and report on) different code: close it as HEAD_CHANGED.
+        logger.info(
+            "head_changed_at_pickup run=%s %s#%s run_sha=%s current=%s",
+            run.id,
+            pr.repository.full_name,
+            pr.number,
+            run.head_sha[:12],
+            info.head_sha[:12],
+        )
+        progress.event("failed: HEAD_CHANGED (PR head moved before review)")
+        return await _fail(session, run, started, "HEAD_CHANGED")
 
     _sync_pr(pr, info)
     visibility = confirmed_visibility((run.summary or {}).get("repository_visibility"), info.visibility)
@@ -1604,6 +1647,45 @@ async def _skip(
         error_code=reason,
         trigger=run.trigger,
         duration_ms=run.duration_ms,
+        owner=run.owner_id,
+    )
+    return run
+
+
+async def _skip_pending(
+    session: AsyncSession,
+    run: ReviewRun,
+    started: float,
+    tracking: _ProgressTracking,
+    reason: str,
+) -> ReviewRun:
+    """Skip a run this worker has not claimed yet: only while it is still pending.
+
+    Another job may already hold the run as running (or it was cancelled meanwhile); then
+    nothing is written, its progress status is left to that job, and no work is done.
+    """
+    duration_ms = int((time.monotonic() - started) * 1000)
+    result = await session.execute(
+        update(ReviewRun)
+        .where(ReviewRun.id == run.id, ReviewRun.status == "pending")
+        .values(status="skipped", skip_reason=reason, duration_ms=duration_ms)
+    )
+    if result.rowcount != 1:
+        run_id = run.id
+        await session.rollback()
+        tracking.reporter = None  # the status belongs to whoever owns the run now
+        logger.info("review_run=%s is no longer pending; not skipping it (%s)", run_id, reason)
+        await session.refresh(run)
+        return run
+    await session.commit()
+    run.status = "skipped"
+    run.skip_reason = reason
+    run.duration_ms = duration_ms
+    record_review_finished(
+        status="skipped",
+        error_code=reason,
+        trigger=run.trigger,
+        duration_ms=duration_ms,
         owner=run.owner_id,
     )
     return run

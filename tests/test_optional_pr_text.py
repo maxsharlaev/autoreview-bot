@@ -73,7 +73,7 @@ async def test_disabled_description_is_not_started(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_completed_run_is_not_republished_on_retry() -> None:
     run = SimpleNamespace(status="completed")
-    session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run)))
+    session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: run, rowcount=1)))
     github = SimpleNamespace(get_pull_request=AsyncMock())
     result = await orchestrator.run_review(
         session,
