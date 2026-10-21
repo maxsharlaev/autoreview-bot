@@ -634,3 +634,232 @@ async def test_stale_manual_head_sha_leaves_open_run_untouched(session_factory, 
     assert after.progress_status == before.progress_status
     redis.enqueue_job.assert_not_awaited()
     assert fake.calls == calls_before  # no status write, no cancellation
+
+
+# --- Manual read/enqueue race (review finding P2 on #15) ---
+
+OLDER = "1" * 40
+
+
+def _info_at(sha: str):
+    import dataclasses
+
+    from tests.test_progress_status import _info
+
+    return dataclasses.replace(_info(), head_sha=sha)
+
+
+def _manual_client(session_factory, fake, kind):
+    from app.api.deps import get_session
+    from app.config import AppConfig
+    from app.owners.registry import RouteResult
+    from tests.test_manual_review import _client
+
+    async def real_session():
+        async with session_factory() as session:
+            yield session
+
+    client = _client(with_api_key=True)
+    client.app.dependency_overrides[get_session] = real_session
+    redis = _ok_redis()
+    client.app.state.redis = redis
+    ctx = SimpleNamespace(id="org-a", config=AppConfig(), github=SimpleNamespace(kind=kind))
+    registry = MagicMock()
+    registry.get.return_value = ctx
+    registry.resolve.return_value = RouteResult("org-a", "exact")
+    patches = (
+        patch("app.api.v1.reviews.get_owner_registry", return_value=registry),
+        patch("app.adapters.github.GitHubAppClient.from_credentials", return_value=fake),
+        patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=True)),
+    )
+    return client, redis, patches
+
+
+async def _post_manual(client, patches, **body):
+    import httpx
+
+    # In-process ASGI call on this event loop (the DB engine is bound to it).
+    transport = httpx.ASGITransport(app=client.app)
+    with patches[0], patches[1], patches[2]:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            return await http.post(
+                "/api/v1/reviews", json={"repository": "org/repo", "number": 7, "force": True, **body}
+            )
+
+
+async def _snapshot(session_factory):
+    return [(r.id, r.head_sha, r.status, r.progress_status) for r in await _runs(session_factory)]
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_manual_read_then_webhook_push_then_enqueue_is_rejected(session_factory, mode) -> None:
+    """Manual reads head A; webhook B is queued meanwhile; the manual enqueue must not cancel B."""
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    kind = "app" if mode == "check_run" else "pat"
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, mode, AppConfig())
+    reads = []
+    webhook_done = asyncio.Event()
+
+    async def get_pull_request(owner, repo, number):
+        reads.append(number)
+        if len(reads) == 1:
+            return _info_at(HEAD)  # manual request reads A
+        return _info_at(NEW_HEAD)  # the re-read under the lock sees B
+
+    fake.get_pull_request = AsyncMock(side_effect=get_pull_request)
+    client, redis, patches = _manual_client(session_factory, fake, kind)
+
+    # Webhook B is processed between the manual read and the manual enqueue: queue it right
+    # after the first read by wrapping queue_review in the endpoint.
+    from app.api.v1 import reviews
+
+    real_queue = reviews.queue_review
+
+    async def queue_after_webhook(*args, **kwargs):
+        if not webhook_done.is_set():
+            await _queue_trigger_sha(session_factory, reporter, NEW_HEAD)
+            webhook_done.set()
+        return await real_queue(*args, **kwargs)
+
+    with patch("app.api.v1.reviews.queue_review", queue_after_webhook):
+        response = await _post_manual(client, patches, head_sha=HEAD)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"code": "stale_head_sha", "head_sha": HEAD, "current_head_sha": NEW_HEAD}
+    assert len(reads) == 2
+    runs = await _runs(session_factory)
+    assert [(r.head_sha, r.status, r.trigger) for r in runs] == [(NEW_HEAD, "pending", "webhook")]
+    assert runs[0].progress_status["state"] == "queued"
+    redis.enqueue_job.assert_not_awaited()  # the endpoint's redis; webhook B used its own
+    # Only webhook B's queued status was written; the manual request wrote nothing.
+    assert len(fake.calls) == 1
+
+
+async def _queue_trigger_sha(session_factory, reporter, sha, *, trigger="webhook", force=False, current_head=None):
+    from app.services.review_enqueue import queue_review
+
+    async with session_factory() as session:
+        return await queue_review(
+            session,
+            _ok_redis(),
+            full_name="org/repo",
+            number=7,
+            pr_payload={"number": 7, "title": "ABC-12 validate", "head": {"ref": "feature/ABC-12"}},
+            head_sha=sha,
+            base_sha="b" * 40,
+            is_fork=False,
+            owner_id="org-a",
+            trigger=trigger,
+            force=force,
+            progress=reporter,
+            current_head=current_head,
+        )
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_manual_cancels_older_run_when_head_is_still_requested_sha(session_factory, mode) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    kind = "app" if mode == "check_run" else "pat"
+    fake = FakeGitHub()
+    fake.get_pull_request = AsyncMock(return_value=_info_at(HEAD))
+    await _queue_trigger_sha(session_factory, ProgressReporter(fake, mode, AppConfig()), OLDER)
+    client, redis, patches = _manual_client(session_factory, fake, kind)
+    response = await _post_manual(client, patches, head_sha=HEAD)
+
+    assert response.status_code == 202
+    assert fake.get_pull_request.await_count == 2  # request read + re-read under the lock
+    old, new = await _runs(session_factory)
+    assert old.head_sha == OLDER and old.status == "cancelled"
+    assert old.progress_status["conclusion"] == "cancelled"
+    assert new.head_sha == HEAD and new.trigger == "manual" and new.progress_status["state"] == "queued"
+    redis.enqueue_job.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_without_other_open_run_reads_github_once(session_factory) -> None:
+    from app.models import ReviewRun
+    from sqlalchemy import update
+
+    fake = FakeGitHub()
+    fake.get_pull_request = AsyncMock(return_value=_info_at(HEAD))
+    # The PR is known and has a finished run on an older SHA: nothing open to supersede.
+    older = await _queue_trigger_sha(session_factory, None, OLDER)
+    async with session_factory() as session:
+        await session.execute(update(ReviewRun).where(ReviewRun.id == older.id).values(status="completed"))
+        await session.commit()
+    client, redis, patches = _manual_client(session_factory, fake, "app")
+    response = await _post_manual(client, patches)
+    assert response.status_code == 202
+    assert fake.get_pull_request.await_count == 1
+
+
+@pytest.mark.parametrize("failure", ["error", "timeout"])
+@pytest.mark.asyncio
+async def test_manual_head_recheck_failure_changes_nothing(session_factory, monkeypatch, failure) -> None:
+    from app.adapters.github import GitHubError
+    from app.config import AppConfig
+    from app.services import review_enqueue
+    from app.services.progress_status import ProgressReporter
+
+    monkeypatch.setattr(review_enqueue, "HEAD_CHECK_TIMEOUT_SECONDS", 0.2)
+    fake = FakeGitHub()
+    await _queue_trigger_sha(session_factory, ProgressReporter(fake, "check_run", AppConfig()), OLDER)
+    snapshot, calls = await _snapshot(session_factory), list(fake.calls)
+
+    async def second_read_fails(owner, repo, number):
+        if fake.get_pull_request.await_count == 1:
+            return _info_at(HEAD)
+        if failure == "timeout":
+            await asyncio.sleep(5)
+        raise GitHubError("503 unavailable", status_code=503)
+
+    fake.get_pull_request = AsyncMock(side_effect=second_read_fails)
+    client, redis, patches = _manual_client(session_factory, fake, "app")
+    response = await _post_manual(client, patches, head_sha=HEAD)
+
+    assert response.status_code == 502
+    assert await _snapshot(session_factory) == snapshot
+    assert fake.calls == calls
+    redis.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_per_pr_lock_serializes_head_recheck_and_webhook(session_factory) -> None:
+    """While a manual enqueue re-reads the head under the lock, a webhook for the same PR waits."""
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, "check_run", AppConfig())
+    await _queue_trigger_sha(session_factory, reporter, OLDER)
+    in_check, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_head():
+        in_check.set()
+        await release.wait()
+        return HEAD
+
+    manual = asyncio.create_task(
+        _queue_trigger_sha(session_factory, reporter, HEAD, trigger="manual", force=True, current_head=slow_head)
+    )
+    await asyncio.wait_for(in_check.wait(), timeout=5)
+    webhook = asyncio.create_task(_queue_trigger_sha(session_factory, reporter, NEW_HEAD))
+    try:
+        await asyncio.sleep(0.5)
+        blocked = not webhook.done()  # waits on the per-PR lock held by the manual enqueue
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(manual, webhook, return_exceptions=True), timeout=10)
+    assert blocked
+
+    by_sha = {r.head_sha: r for r in await _runs(session_factory)}
+    assert by_sha[OLDER].status == "cancelled"
+    assert by_sha[HEAD].status == "cancelled"  # superseded by the newer webhook, in order
+    assert by_sha[NEW_HEAD].status == "pending"

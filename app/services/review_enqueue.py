@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from arq.connections import ArqRedis
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.metrics import record_enqueue
@@ -24,6 +26,21 @@ from app.services.progress_status import (
 from app.services.visibility import Visibility
 
 logger = logging.getLogger(__name__)
+
+# Upper bound for the GitHub head read done while the per-PR lock is held.
+HEAD_CHECK_TIMEOUT_SECONDS = 10.0
+
+
+class StaleHeadError(Exception):
+    """The requested SHA is no longer the PR head; nothing was changed."""
+
+    def __init__(self, current_head_sha: str) -> None:
+        super().__init__(f"stale head sha; current head is {current_head_sha}")
+        self.current_head_sha = current_head_sha
+
+
+class HeadCheckError(Exception):
+    """The PR head could not be re-read from GitHub; nothing was changed."""
 
 
 async def queue_review(
@@ -44,6 +61,7 @@ async def queue_review(
     route_reason: str | None = None,
     progress: ProgressReporter | None = None,
     report_new_run: bool = True,
+    current_head: Callable[[], Awaitable[str]] | None = None,
 ) -> ReviewRun:
     """Create or reuse a review run and enqueue it.
 
@@ -56,7 +74,17 @@ async def queue_review(
 
     report_new_run=False (a manual request opting out) skips the new run's own status, and the
     worker sees the opt-out in the run summary; superseded runs still get theirs closed.
+
+    Runs for one PR are serialized with a transaction-scoped advisory lock (repository + PR
+    number), held until the new run row is committed. With current_head (manual requests), an
+    open run of this owner on a different SHA is cancelled only after re-reading the PR head
+    under that lock: if the head is no longer head_sha, StaleHeadError is raised; if the read
+    fails or exceeds HEAD_CHECK_TIMEOUT_SECONDS, HeadCheckError. In both cases the transaction
+    is rolled back and nothing is cancelled, stored, enqueued or reported.
     """
+    await session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(f"review:{full_name.lower()}#{number}", 0)))
+    )
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
         repo = Repository(full_name=full_name, enabled=True, owner_id=owner_id)
@@ -78,6 +106,8 @@ async def queue_review(
             select(PullRequest).where(PullRequest.repository_id == repo.id, PullRequest.number == number)
         )
     ).scalar_one_or_none()
+    if current_head is not None and pr is not None:
+        await _verify_head_before_superseding(session, pr, owner_id, head_sha, current_head)
     head = pr_payload.get("head") or {}
     assignee = None
     if pr_payload.get("assignee"):
@@ -250,6 +280,39 @@ async def queue_review(
     )
     record_enqueue("queued", owner=owner_id)
     return run
+
+
+async def _verify_head_before_superseding(
+    session: AsyncSession,
+    pr: PullRequest,
+    owner_id: str,
+    head_sha: str,
+    current_head: Callable[[], Awaitable[str]],
+) -> None:
+    other = (
+        await session.execute(
+            select(ReviewRun.id)
+            .where(
+                ReviewRun.pull_request_id == pr.id,
+                ReviewRun.owner_id == owner_id,
+                ReviewRun.status.in_(IN_FLIGHT_STATUSES),
+                ReviewRun.head_sha != head_sha,
+            )
+            .limit(1)
+        )
+    ).first()
+    if other is None:
+        return  # nothing would be superseded: no extra GitHub call
+    pr_id = pr.id  # objects expire on rollback below
+    try:
+        current = await asyncio.wait_for(current_head(), timeout=HEAD_CHECK_TIMEOUT_SECONDS)
+    except Exception as exc:
+        await session.rollback()
+        raise HeadCheckError(str(exc) or type(exc).__name__) from exc
+    if current.lower() != head_sha.lower():
+        await session.rollback()
+        logger.info("stale manual head pr=%s requested=%s current=%s", pr_id, head_sha[:12], current[:12])
+        raise StaleHeadError(current)
 
 
 async def _mark_enqueue_failed(session: AsyncSession, run: ReviewRun) -> None:

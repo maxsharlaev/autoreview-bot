@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request's `base_sha` is no longer used. The worker closes a run as
   `HEAD_CHANGED` when the PR head moved before pickup instead of reviewing
   newer code under the old SHA.
+- Enqueueing is serialized per PR (Postgres advisory lock). Before a manual
+  request cancels an open run on a different SHA, it re-reads the PR head under
+  the lock (10 s timeout): `409 stale_head_sha` if the head moved, `502` if the
+  read fails, and nothing changes in either case.
 - Migration `008_review_run_progress`: `review_runs.progress_status`,
   `comment_url` and `has_sensitive_content` (NULL for existing rows).
 - **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can
