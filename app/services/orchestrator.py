@@ -419,6 +419,20 @@ async def _run_review(
         progress.event("failed: GITHUB_UNAVAILABLE")
         return await _fail(session, run, started, "GITHUB_UNAVAILABLE")
 
+    if run.head_sha and info.head_sha != run.head_sha:
+        # The PR moved on since this run was queued. The status is bound to run.head_sha, so the
+        # run must not review (and report on) different code: close it as HEAD_CHANGED.
+        logger.info(
+            "head_changed_at_pickup run=%s %s#%s run_sha=%s current=%s",
+            run.id,
+            pr.repository.full_name,
+            pr.number,
+            run.head_sha[:12],
+            info.head_sha[:12],
+        )
+        progress.event("failed: HEAD_CHANGED (PR head moved before review)")
+        return await _fail(session, run, started, "HEAD_CHANGED")
+
     _sync_pr(pr, info)
     visibility = confirmed_visibility((run.summary or {}).get("repository_visibility"), info.visibility)
     context_visibility = visibility

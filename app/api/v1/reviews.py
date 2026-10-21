@@ -104,40 +104,41 @@ async def start_review(
     if ctx is None:
         raise HTTPException(status_code=404, detail="owner_not_configured")
 
-    info = None
-    head_sha = body.head_sha or ""
-    base_sha = body.base_sha or ""
-    is_fork = False
-    if not head_sha:
-        owner, repo = full_name.split("/", 1)
-        # Build GitHub client from owner context
-        github = GitHubAppClient.from_credentials(ctx.github, owner_id=owner_id)
-        try:
-            info = await github.get_pull_request(owner, repo, number)
-        except GitHubError as exc:
-            raise HTTPException(status_code=502, detail=f"github: {exc}") from exc
+    # Always read the current PR, even when head_sha is given: the run (and its progress status)
+    # must be bound to the commit the worker will actually review.
+    owner, repo = full_name.split("/", 1)
+    github = GitHubAppClient.from_credentials(ctx.github, owner_id=owner_id)
+    try:
+        info = await github.get_pull_request(owner, repo, number)
+    except GitHubError as exc:
+        raise HTTPException(status_code=502, detail=f"github: {exc}") from exc
+    if body.head_sha and body.head_sha.lower() != info.head_sha.lower():
+        # Rejected before anything is cancelled, stored, enqueued or reported.
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "stale_head_sha", "head_sha": body.head_sha, "current_head_sha": info.head_sha},
+        )
+    # Re-check routing if GitHub returned a different full_name (repo renamed)
+    if info.full_name.lower() != full_name.lower():
+        recheck = registry.resolve(info.full_name, explicit_owner=effective_owner)
+        if recheck.rejected():
+            record_routing(owner="", reason=recheck.reason, rejected=True)
+            if recheck.reason == REJECT_REPO_NOT_ALLOWED:
+                raise HTTPException(status_code=403, detail=SKIP_REPO)
+            raise HTTPException(status_code=403, detail=recheck.reason)
+        if recheck.owner_id != owner_id:
+            raise HTTPException(status_code=409, detail=f"repo_renamed: {info.full_name} routes to different owner")
 
-        # Re-check routing if GitHub returned a different full_name (repo renamed)
-        if info.full_name.lower() != full_name.lower():
-            recheck = registry.resolve(info.full_name, explicit_owner=effective_owner)
-            if recheck.rejected():
-                record_routing(owner="", reason=recheck.reason, rejected=True)
-                if recheck.reason == REJECT_REPO_NOT_ALLOWED:
-                    raise HTTPException(status_code=403, detail=SKIP_REPO)
-                raise HTTPException(status_code=403, detail=recheck.reason)
-            if recheck.owner_id != owner_id:
-                raise HTTPException(status_code=409, detail=f"repo_renamed: {info.full_name} routes to different owner")
-
-        full_name = info.full_name
-        head_sha = info.head_sha
-        base_sha = info.base_sha
-        is_fork = info.is_fork
+    full_name = info.full_name
+    head_sha = info.head_sha
+    base_sha = info.base_sha
+    is_fork = info.is_fork
 
     run = await queue_review(
         session,
         get_redis(request),
         full_name=full_name,
-        number=info.number if info else number,
+        number=info.number,
         pr_payload=pr_payload_from_request(body, info=info),
         head_sha=head_sha,
         base_sha=base_sha,

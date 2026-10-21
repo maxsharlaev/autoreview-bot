@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   webhook runs; `"report_status": false` opts a request out. A manual rerun on
   the same SHA closes the open status as `cancelled` before opening its own,
   and a superseded worker never writes to a closed status.
+- `POST /api/v1/reviews` always reads the current PR head; a `head_sha` that is
+  not the current head is rejected with `409` `stale_head_sha` (with
+  `current_head_sha`) before anything is cancelled, stored or queued. The
+  request's `base_sha` is no longer used. The worker closes a run as
+  `HEAD_CHANGED` when the PR head moved before pickup instead of reviewing
+  newer code under the old SHA.
 - Migration `008_review_run_progress`: `review_runs.progress_status`,
   `comment_url` and `has_sensitive_content` (NULL for existing rows).
 - **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can

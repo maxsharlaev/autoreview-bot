@@ -585,3 +585,52 @@ async def test_rerun_after_lost_job_closes_its_open_status(session_factory) -> N
     assert old.progress_status["state"] == "completed" and old.progress_status["conclusion"] == "failure"
     assert new.progress_status["state"] == "queued"
     assert [c[0] for c in fake.calls] == ["create", "update", "create"]
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_stale_manual_head_sha_leaves_open_run_untouched(session_factory, mode) -> None:
+    from app.api.deps import get_session
+    from app.config import AppConfig
+    from app.owners.registry import RouteResult
+    from app.services.progress_status import ProgressReporter
+    from tests.test_manual_review import _client
+    from tests.test_progress_status import _info
+
+    fake = FakeGitHub(info=_info())  # current head: HEAD
+    kind = "app" if mode == "check_run" else "pat"
+    await _queue_trigger(
+        session_factory, ProgressReporter(fake, mode, AppConfig()), _ok_redis(), trigger="webhook", force=False
+    )
+    calls_before = list(fake.calls)
+    (before,) = await _runs(session_factory)
+
+    async def real_session():
+        async with session_factory() as session:
+            yield session
+
+    client = _client(with_api_key=True)
+    client.app.dependency_overrides[get_session] = real_session
+    redis = _ok_redis()
+    client.app.state.redis = redis
+    ctx = SimpleNamespace(id="org-a", config=AppConfig(), github=SimpleNamespace(kind=kind))
+    registry = MagicMock()
+    registry.get.return_value = ctx
+    registry.resolve.return_value = RouteResult("org-a", "exact")
+    with (
+        patch("app.api.v1.reviews.get_owner_registry", return_value=registry),
+        patch("app.adapters.github.GitHubAppClient.from_credentials", return_value=fake),
+        patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=True)),
+    ):
+        response = client.post(
+            "/api/v1/reviews", json={"repository": "org/repo", "number": 7, "head_sha": "0" * 40, "force": True}
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "stale_head_sha"
+    assert response.json()["detail"]["current_head_sha"] == HEAD
+    (after,) = await _runs(session_factory)  # no new row
+    assert after.id == before.id and after.status == "pending"
+    assert after.progress_status == before.progress_status
+    redis.enqueue_job.assert_not_awaited()
+    assert fake.calls == calls_before  # no status write, no cancellation
