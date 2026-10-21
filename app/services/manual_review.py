@@ -24,6 +24,8 @@ class ManualReviewRequest(BaseModel):
     html_url: str | None = None
     body: str | None = None
     force: bool = True
+    # false: this run reports no check run / commit status (progress_status config still applies otherwise)
+    report_status: bool = True
 
     @model_validator(mode="after")
     def resolve_repository_and_number(self) -> ManualReviewRequest:

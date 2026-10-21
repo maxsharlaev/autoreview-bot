@@ -413,3 +413,175 @@ async def test_worker_racing_the_queued_write_waits_and_reuses_it(session_factor
     else:
         assert [p["state"] for p in slow.payloads("status")] == ["pending", "pending", "success"]
         assert slow.payloads("status")[0]["description"].startswith("The review is waiting")
+
+
+# --- Manual runs (API-triggered) ---
+
+
+async def _queue_trigger(session_factory, reporter, redis, *, trigger, force, report_new_run=True):
+    from app.services.review_enqueue import queue_review
+
+    async with session_factory() as session:
+        return await queue_review(
+            session,
+            redis,
+            full_name="org/repo",
+            number=7,
+            pr_payload={"number": 7, "title": "ABC-12 validate", "head": {"ref": "feature/ABC-12"}},
+            head_sha=HEAD,
+            base_sha="b" * 40,
+            is_fork=False,
+            owner_id="org-a",
+            trigger=trigger,
+            force=force,
+            progress=reporter,
+            report_new_run=report_new_run,
+        )
+
+
+def _ok_redis():
+    redis = MagicMock()
+    redis.enqueue_job = AsyncMock(side_effect=lambda *_a: MagicMock(job_id=f"job-{uuid.uuid4().hex[:6]}"))
+    return redis
+
+
+async def _runs(session_factory):
+    from app.models import ReviewRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        return (await session.execute(select(ReviewRun).order_by(ReviewRun.created_at))).scalars().all()
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_manual_rerun_on_same_sha_replaces_open_webhook_status(session_factory, mode) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, mode, AppConfig())
+    with patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=True)):
+        hook = await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="webhook", force=False)
+        manual = await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="manual", force=True)
+
+    old, new = await _runs(session_factory)
+    assert (old.id, new.id) == (hook.id, manual.id)
+    assert old.status == "cancelled" and old.progress_status["conclusion"] == "cancelled"
+    assert new.trigger == "manual" and new.progress_status["state"] == "queued"
+    open_runs = [r for r in (old, new) if r.progress_status["state"] in ps_open()]
+    assert open_runs == [new]  # never two open statuses on one commit
+    if mode == "check_run":
+        assert [c[0] for c in fake.calls] == ["create", "update", "create"]
+        assert fake.calls[1][2]["conclusion"] == "cancelled"
+    else:
+        assert [c[2]["state"] for c in fake.calls] == ["pending", "error", "pending"]
+
+
+def ps_open():
+    from app.services.progress_status import OPEN_STATES
+
+    return OPEN_STATES
+
+
+@pytest.mark.asyncio
+async def test_webhook_on_same_sha_reuses_open_manual_run_without_new_status(session_factory) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, "check_run", AppConfig())
+    with patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=True)):
+        manual = await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="manual", force=True)
+        hook = await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="webhook", force=False)
+    assert hook.id == manual.id
+    assert [c[0] for c in fake.calls] == ["create"]
+    (run,) = await _runs(session_factory)
+    assert run.progress_status["state"] == "queued"
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_manual_enqueue_failure_leaves_no_status(session_factory, mode) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    fake = FakeGitHub()
+    with pytest.raises(ConnectionError):
+        await _queue_trigger(
+            session_factory,
+            ProgressReporter(fake, mode, AppConfig()),
+            _redis(ConnectionError("redis")),
+            trigger="manual",
+            force=True,
+        )
+    (run,) = await _runs(session_factory)
+    assert run.status == "failed" and run.error_code == "QUEUE_UNAVAILABLE"
+    assert run.progress_status is None and fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_opt_out_still_cancels_previous_open_status(session_factory) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import PROGRESS_OPT_OUT, ProgressReporter
+
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, "check_run", AppConfig())
+    with patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=True)):
+        await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="webhook", force=False)
+        await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="manual", force=True, report_new_run=False)
+    old, new = await _runs(session_factory)
+    assert old.progress_status["conclusion"] == "cancelled"
+    assert new.progress_status is None and new.summary[PROGRESS_OPT_OUT] is True
+    assert [c[0] for c in fake.calls] == ["create", "update"]
+
+
+@pytest.mark.parametrize("mode", ["check_run", "commit_status"])
+@pytest.mark.asyncio
+async def test_manual_worker_racing_queued_write_reuses_it(session_factory, monkeypatch, tmp_path, mode) -> None:
+    import uuid as _uuid
+
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    kind = "app" if mode == "check_run" else "pat"
+    slow = _SlowQueuedGitHub(info=None)
+    h = Harness(monkeypatch, tmp_path, kind=kind, github=slow)
+    work = _worker(session_factory, h)
+    tasks = []
+
+    async def enqueue_and_start(_name, run_id):
+        tasks.append(asyncio.create_task(work(_uuid.UUID(run_id))))
+        return MagicMock(job_id="job-manual")
+
+    await _queue_trigger(
+        session_factory,
+        ProgressReporter(slow, mode, AppConfig()),
+        _redis(enqueue_and_start),
+        trigger="manual",
+        force=True,
+    )
+    result = await asyncio.wait_for(tasks[0], timeout=20)
+    assert result.status == "completed" and result.trigger == "manual"
+    if mode == "check_run":
+        assert len(slow.payloads("create")) == 1
+        assert slow.check_states() == ["queued", "in_progress", "completed"]
+    else:
+        assert [p["state"] for p in slow.payloads("status")] == ["pending", "pending", "success"]
+
+
+@pytest.mark.asyncio
+async def test_rerun_after_lost_job_closes_its_open_status(session_factory) -> None:
+    from app.config import AppConfig
+    from app.services.progress_status import ProgressReporter
+
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, "check_run", AppConfig())
+    await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="webhook", force=False)
+    with patch("app.services.review_enqueue.job_is_active", AsyncMock(return_value=False)):
+        await _queue_trigger(session_factory, reporter, _ok_redis(), trigger="manual", force=True)
+    old, new = await _runs(session_factory)
+    assert old.status == "failed"
+    assert old.progress_status["state"] == "completed" and old.progress_status["conclusion"] == "failure"
+    assert new.progress_status["state"] == "queued"
+    assert [c[0] for c in fake.calls] == ["create", "update", "create"]

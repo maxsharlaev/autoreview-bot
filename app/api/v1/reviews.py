@@ -20,6 +20,7 @@ from app.owners.registry import (
 )
 from app.services.constants import SKIP_REPO
 from app.services.manual_review import ManualReviewRequest, pr_payload_from_request
+from app.services.progress_status import reporter_for_owner
 from app.services.review_enqueue import queue_review
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,8 @@ async def start_review(
         force=body.force,
         owner_id=owner_id,
         route_reason=route.reason,
+        progress=_reporter(ctx),
+        report_new_run=body.report_status,
     )
     return {
         "status": run.status,
@@ -153,6 +156,14 @@ async def start_review(
         "trigger": run.trigger,
         "owner": owner_id,
     }
+
+
+def _reporter(ctx):
+    try:
+        return reporter_for_owner(ctx)
+    except Exception:
+        logger.exception("progress status reporter unavailable (ignored)")
+        return None
 
 
 @router.get("/reviews/{review_run_id}")

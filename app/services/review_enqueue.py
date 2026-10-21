@@ -14,7 +14,13 @@ from app.queue import abort_job, enqueue_review, job_is_active
 from app.services.constants import ACTIVE_RUN_STATUSES, IN_FLIGHT_STATUSES, INTERNAL_ERROR, QUEUE_UNAVAILABLE
 from app.services.issue_key import extract_issue_key
 from app.services.pr_description import without_managed_block
-from app.services.progress_status import SUPERSEDED_OUTCOME, ProgressReporter, final_outcome, locked_state
+from app.services.progress_status import (
+    PROGRESS_OPT_OUT,
+    SUPERSEDED_OUTCOME,
+    ProgressReporter,
+    final_outcome,
+    locked_state,
+)
 from app.services.visibility import Visibility
 
 logger = logging.getLogger(__name__)
@@ -37,6 +43,7 @@ async def queue_review(
     installation_id: int | None = None,
     route_reason: str | None = None,
     progress: ProgressReporter | None = None,
+    report_new_run: bool = True,
 ) -> ReviewRun:
     """Create or reuse a review run and enqueue it.
 
@@ -46,6 +53,9 @@ async def queue_review(
     enqueue, under a row lock and only while the run is still pending without a status, so it can
     never overwrite a state the worker already reported. In-flight runs it supersedes get their
     status marked cancelled.
+
+    report_new_run=False (a manual request opting out) skips the new run's own status, and the
+    worker sees the opt-out in the run summary; superseded runs still get theirs closed.
     """
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
@@ -111,6 +121,8 @@ async def queue_review(
         if stale:
             existing.status = "failed"
             existing.error_code = INTERNAL_ERROR
+            # Its job is gone: close its open status too, so the commit never shows two.
+            await _report_cancelled(progress, existing, full_name, number, status="failed", error_code=INTERNAL_ERROR)
             await session.flush()
         elif not force:
             # Check for B->A case: if ownership changed back and another owner has a
@@ -202,6 +214,8 @@ async def queue_review(
         summary["installation_id"] = installation_id
     if route_reason is not None:
         summary["route_reason"] = route_reason
+    if not report_new_run:
+        summary[PROGRESS_OPT_OUT] = True
 
     run = ReviewRun(
         id=uuid.uuid4(),
@@ -223,7 +237,7 @@ async def queue_review(
         raise
     run.arq_job_id = job_id
     await session.commit()
-    if progress is not None and head_sha:
+    if progress is not None and head_sha and report_new_run:
         await _report_queued(session, progress, run, full_name)
     logger.info(
         "queued review_run=%s %s#%s sha=%s trigger=%s owner=%s",
@@ -280,13 +294,21 @@ async def _report_queued(session: AsyncSession, progress: ProgressReporter, run:
             )
 
 
-async def _report_cancelled(progress: ProgressReporter | None, run: ReviewRun, full_name: str, number: int) -> None:
+async def _report_cancelled(
+    progress: ProgressReporter | None,
+    run: ReviewRun,
+    full_name: str,
+    number: int,
+    *,
+    status: str = "cancelled",
+    error_code: str | None = None,
+) -> None:
     state = run.progress_status
     if progress is None or not state or state.get("state") == "completed":
         return
     outcome = final_outcome(
-        status="cancelled",
-        error_code=None,
+        status=status,
+        error_code=error_code,
         skip_reason=None,
         summary=None,
         comment_url=None,

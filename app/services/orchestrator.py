@@ -64,7 +64,13 @@ from app.services.pr_description import (
     without_managed_block,
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
-from app.services.progress_status import ProgressReporter, final_outcome, locked_state
+from app.services.progress_status import (
+    PROGRESS_OPT_OUT,
+    PROGRESS_TRIGGERS,
+    ProgressReporter,
+    final_outcome,
+    locked_state,
+)
 from app.services.publisher import Publisher, empty_verified
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
@@ -189,6 +195,10 @@ async def _finalize_progress(session: AsyncSession, tracking: _ProgressTracking,
             # The session may be unusable after a crash: start a fresh transaction.
             await session.rollback()
         tracking.state = await _current_state(session, tracking)
+        if _closed(tracking.state):
+            # Already final, e.g. cancelled by a newer run on the same commit: never overwrite it.
+            await session.commit()
+            return
         if crashed is None and tracking.run is not None:
             run = tracking.run
             outcome = final_outcome(
@@ -236,6 +246,10 @@ async def _finalize_progress(session: AsyncSession, tracking: _ProgressTracking,
             await session.commit()
     except Exception as exc:
         logger.warning("could not store progress status for run %s (ignored): %s", tracking.run_id, exc)
+
+
+def _closed(state: dict | None) -> bool:
+    return bool(state) and state.get("state") == "completed"
 
 
 async def _current_state(session: AsyncSession, tracking: _ProgressTracking) -> dict | None:
@@ -291,9 +305,10 @@ async def _run_review(
     owner_id = run.owner_id
     ctx = registry.get(owner_id)
 
-    if ctx is not None and run.trigger == "webhook":
+    tracked = run.trigger in PROGRESS_TRIGGERS and not (run.summary or {}).get(PROGRESS_OPT_OUT)
+    if ctx is not None and tracked:
         _start_tracking(tracking, run, pr, ctx, github=github, config=config or ctx.config)
-    elif ctx is None and run.trigger == "webhook" and registry.is_disabled(owner_id):
+    elif ctx is None and tracked and registry.is_disabled(owner_id):
         # Close the disabled owner's queued status as skipped, with that owner's own credentials only.
         disabled_ctx = registry.disabled_status_context(owner_id)
         if disabled_ctx is not None:
@@ -390,7 +405,8 @@ async def _run_review(
     progress.event(f"running owner={owner_id}")
     if tracking.reporter is not None:
         run.progress_status = await _current_state(session, tracking)
-        await tracking.reporter.in_progress(run, pr.repository.full_name, pr.number)
+        if not _closed(run.progress_status):
+            await tracking.reporter.in_progress(run, pr.repository.full_name, pr.number)
         tracking.state = run.progress_status
         await session.commit()
 

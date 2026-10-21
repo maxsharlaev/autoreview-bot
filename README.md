@@ -182,7 +182,7 @@ When a private visibility recheck fails or reports a public repository, publicat
 
 ## Review progress status
 
-Webhook-triggered reviews report progress on the PR head commit, so the author can see whether the bot is queued, working, skipped or broken without an extra comment. The default needs no config change:
+Webhook-triggered and manual (`POST /api/v1/reviews`) reviews report progress on the PR head commit, so the author can see whether the bot is queued, working, skipped or broken without an extra comment. The default needs no config change:
 
 ```yaml
 progress_status:
@@ -202,7 +202,9 @@ progress_status:
 - Owner disabled after the webhook (`owner_disabled`): the worker, or the cleanup job for a stale status, closes the status as `skipped` with that owner's own credentials. The registry keeps a disabled owner's credentials for this purpose only; if they can't be loaded, the status is closed only in the database.
 - Owner removed from config (`owner_not_configured`): **its open statuses can't be closed on GitHub.** No credentials exist for it, and the bot never uses another owner's or the global credentials for it, so the check run stays `queued` / `in_progress` (or the commit status `pending`) on that commit. The cleanup job closes it in the database and logs a warning. To avoid this, disable an owner (`enabled: false`) and let its queued runs drain before removing the block, or close the check runs by hand.
 - Summaries contain only the state, the skip reason or error code, finding counts and the comment link. They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
-- Manual (`/api/v1/reviews`) and scheduled digest runs don't report a status.
+- **Manual runs** (`POST /api/v1/reviews`) report exactly like webhook runs: the same owner credentials and mode, write order, skips, cancellation and disclosure rules. Send `"report_status": false` to start a run without a status. A previous open status is still closed in that case. Request errors (unknown owner, repository not allowed, GitHub unavailable) are returned as HTTP errors and create no status.
+- **Same commit, two triggers.** At most one status per commit is open at a time. A manual run with `force: true` (the default) replaces an open run on the same SHA, including a webhook run: the old run's status is closed as `cancelled` and the new run gets its own. A webhook (or `force: false`) on a SHA with an open run reuses that run and its status. A worker whose status was already closed by a newer run never writes to it again. An open run whose job was lost is closed as `failure` when it is replaced.
+- Scheduled digest runs don't report a status: they review no PR head. No scheduled job reviews a concrete PR.
 - An owner can override any of these fields in its `owners.<id>.progress_status` block, for example `mode: off` for an owner whose credentials lack the permission.
 
 Each review run also records `comment_url` and `has_sensitive_content`: whether the review comment it published, before the public repository policy is applied, would contain security finding details or Jira text (unmet acceptance criteria, or any review text written with Jira context in the prompt). `NULL` means unknown: runs from before migration `008_review_run_progress` and runs that published no review comment. The flag is groundwork for a later admin view; nothing acts on it yet.
