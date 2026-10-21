@@ -1071,3 +1071,67 @@ async def test_unrecorded_queued_check_run_is_closed() -> None:
     assert fake.calls[1][1] == 101
     assert fake.calls[1][2]["status"] == "completed" and fake.calls[1][2]["conclusion"] == "cancelled"
     session.rollback.assert_awaited()
+
+
+# --- Bounded Redis waits while enqueueing ---
+
+
+@pytest.mark.asyncio
+async def test_abort_job_is_bounded_and_never_raises(monkeypatch) -> None:
+    from app import queue
+
+    class HungJob:
+        def __init__(self, job_id, redis):
+            pass
+
+        async def abort(self, *, timeout=None, poll_delay=0.5):
+            await asyncio.sleep(30)
+
+        async def status(self):
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(queue, "Job", HungJob)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await queue.abort_job(MagicMock(), "job-1", timeout=0.2)
+    assert loop.time() - started < 2
+    monkeypatch.setattr(queue, "JOB_STATUS_TIMEOUT_SECONDS", 0.2)
+    started = loop.time()
+    assert await queue.job_is_active(MagicMock(), "job-1") is False
+    assert loop.time() - started < 2
+
+
+def test_worker_allows_aborting_superseded_jobs() -> None:
+    from app.workers.settings import WorkerSettings
+
+    assert WorkerSettings.allow_abort_jobs is True
+
+
+def test_webhook_answers_503_when_pr_lock_is_busy() -> None:
+    from app.services.review_enqueue import QueueBusyError
+
+    secret = "owner-webhook-secret-123"
+    ctx = SimpleNamespace(
+        id="org-a",
+        config=AppConfig(),
+        github=SimpleNamespace(kind="pat"),
+        webhook_secret=secret,
+        webhook_enabled=lambda: True,
+    )
+    registry = MagicMock()
+    registry.get.return_value = ctx
+    registry.canonicalize.return_value = "org-a"
+    registry.resolve.return_value = RouteResult("org-a", "explicit")
+    body = json.dumps(_webhook_payload()).encode()
+    with (
+        patch("app.api.v1.pull_request.get_owner_registry", return_value=registry),
+        patch("app.adapters.github.GitHubAppClient.from_credentials", return_value=FakeGitHub()),
+        patch("app.api.v1.pull_request.queue_review", AsyncMock(side_effect=QueueBusyError("org/repo#7"))),
+    ):
+        response = _webhook_client().post(
+            "/pull-request/org-a",
+            content=body,
+            headers={"X-Hub-Signature-256": _sign(secret, body), "X-GitHub-Event": "pull_request"},
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"] == {"code": "pr_queue_busy"}

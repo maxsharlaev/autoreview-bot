@@ -863,3 +863,89 @@ async def test_per_pr_lock_serializes_head_recheck_and_webhook(session_factory) 
     assert by_sha[OLDER].status == "cancelled"
     assert by_sha[HEAD].status == "cancelled"  # superseded by the newer webhook, in order
     assert by_sha[NEW_HEAD].status == "pending"
+
+
+# --- Bounded waits around the per-PR lock (review finding on #15) ---
+
+
+@pytest.mark.asyncio
+async def test_hung_abort_runs_after_unlock_and_does_not_block_the_next_request(session_factory, monkeypatch) -> None:
+    from app.config import AppConfig
+    from app.services import review_enqueue
+    from app.services.progress_status import ProgressReporter
+
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, "check_run", AppConfig())
+    await _queue_trigger_sha(session_factory, reporter, OLDER)  # open run with a job id
+    abort_started, release = asyncio.Event(), asyncio.Event()
+
+    async def hung_abort(redis, job_id, timeout=None):
+        abort_started.set()
+        await release.wait()
+
+    monkeypatch.setattr(review_enqueue, "abort_job", hung_abort)
+    monkeypatch.setattr(review_enqueue, "job_is_active", AsyncMock(return_value=True))
+    first = asyncio.create_task(_queue_trigger_sha(session_factory, reporter, HEAD, trigger="manual", force=True))
+    try:
+        await asyncio.wait_for(abort_started.wait(), timeout=5)
+        # The superseding run is already committed and the old one cancelled while abort hangs.
+        by_sha = {r.head_sha: r for r in await _runs(session_factory)}
+        assert by_sha[OLDER].status == "cancelled" and by_sha[HEAD].status == "pending"
+        # A second request for the same PR is not blocked by the hung abort.
+        second = await asyncio.wait_for(_queue_trigger_sha(session_factory, reporter, HEAD), timeout=5)
+        assert second.id == by_sha[HEAD].id  # reuses the open run on the same SHA
+        assert not first.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(first, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_lock_wait_is_bounded_and_changes_nothing(session_factory, monkeypatch) -> None:
+    from app.config import AppConfig
+    from app.services import review_enqueue
+    from app.services.progress_status import ProgressReporter
+    from app.services.review_enqueue import QueueBusyError
+    from sqlalchemy import func, select
+
+    fake = FakeGitHub()
+    reporter = ProgressReporter(fake, "check_run", AppConfig())
+    await _queue_trigger_sha(session_factory, reporter, OLDER)
+    snapshot, calls = await _snapshot(session_factory), list(fake.calls)
+    monkeypatch.setattr(review_enqueue, "LOCK_WAIT_SECONDS", 0.5)
+    loop = asyncio.get_running_loop()
+    async with session_factory() as holder:
+        key = func.hashtextextended("review:org/repo#7", 0)
+        assert (await holder.execute(select(func.pg_try_advisory_xact_lock(key)))).scalar()
+        started = loop.time()
+        with pytest.raises(QueueBusyError):
+            await _queue_trigger_sha(session_factory, reporter, HEAD, trigger="manual", force=True)
+        waited = loop.time() - started
+        await holder.rollback()
+    assert 0.4 <= waited < 3
+    assert await _snapshot(session_factory) == snapshot
+    assert fake.calls == calls
+    # Once the lock is free the same request goes through.
+    run = await _queue_trigger_sha(session_factory, reporter, HEAD, trigger="manual", force=True)
+    assert run.head_sha == HEAD
+
+
+@pytest.mark.asyncio
+async def test_manual_endpoint_answers_503_when_pr_lock_is_busy(session_factory, monkeypatch) -> None:
+    from app.services import review_enqueue
+    from sqlalchemy import func, select
+
+    monkeypatch.setattr(review_enqueue, "LOCK_WAIT_SECONDS", 0.3)
+    fake = FakeGitHub()
+    fake.get_pull_request = AsyncMock(return_value=_info_at(HEAD))
+    client, redis, patches = _manual_client(session_factory, fake, "app")
+    async with session_factory() as holder:
+        await holder.execute(select(func.pg_try_advisory_xact_lock(func.hashtextextended("review:org/repo#7", 0))))
+        response = await _post_manual(client, patches)
+        await holder.rollback()
+    assert response.status_code == 503
+    assert response.json()["detail"] == {"code": "pr_queue_busy"}
+    assert response.headers["retry-after"] == "5"
+    assert await _runs(session_factory) == []
+    redis.enqueue_job.assert_not_awaited()
+    assert fake.calls == []

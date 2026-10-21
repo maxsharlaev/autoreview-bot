@@ -21,7 +21,7 @@ from app.owners.registry import (
 from app.services.constants import SKIP_REPO
 from app.services.manual_review import ManualReviewRequest, pr_payload_from_request
 from app.services.progress_status import reporter_for_owner
-from app.services.review_enqueue import HeadCheckError, StaleHeadError, queue_review
+from app.services.review_enqueue import HeadCheckError, QueueBusyError, StaleHeadError, queue_review
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,8 @@ async def start_review(
         )
     except StaleHeadError as exc:
         raise HTTPException(status_code=409, detail=_stale(body.head_sha or head_sha, exc.current_head_sha)) from exc
+    except QueueBusyError as exc:
+        raise HTTPException(status_code=503, detail={"code": "pr_queue_busy"}, headers={"Retry-After": "5"}) from exc
     except HeadCheckError as exc:
         raise HTTPException(status_code=502, detail=f"github: {exc}") from exc
     return {

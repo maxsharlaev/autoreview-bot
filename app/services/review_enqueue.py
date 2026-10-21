@@ -39,6 +39,16 @@ class StaleHeadError(Exception):
         self.current_head_sha = current_head_sha
 
 
+class QueueBusyError(Exception):
+    """The per-PR lock could not be acquired within LOCK_WAIT_SECONDS; nothing was changed."""
+
+
+# Longest wait for the per-PR lock. It must exceed the work done under the lock: the head
+# re-read (HEAD_CHECK_TIMEOUT_SECONDS) plus bounded status writes and Redis status checks.
+LOCK_WAIT_SECONDS = 20.0
+_LOCK_POLL_SECONDS = 0.1
+
+
 class HeadCheckError(Exception):
     """The PR head could not be re-read from GitHub; nothing was changed."""
 
@@ -82,9 +92,8 @@ async def queue_review(
     fails or exceeds HEAD_CHECK_TIMEOUT_SECONDS, HeadCheckError. In both cases the transaction
     is rolled back and nothing is cancelled, stored, enqueued or reported.
     """
-    await session.execute(
-        select(func.pg_advisory_xact_lock(func.hashtextextended(f"review:{full_name.lower()}#{number}", 0)))
-    )
+    await _lock_pr(session, full_name, number)
+    to_abort: list[str] = []
     repo = (await session.execute(select(Repository).where(Repository.full_name == full_name))).scalar_one_or_none()
     if repo is None:
         repo = Repository(full_name=full_name, enabled=True, owner_id=owner_id)
@@ -209,7 +218,7 @@ async def queue_review(
                 record_enqueue("reused", owner=owner_id)
                 return existing
         elif existing.status in IN_FLIGHT_STATUSES:
-            await abort_job(redis, existing.arq_job_id)
+            to_abort.append(existing.arq_job_id)
             existing.status = "cancelled"
             await _report_cancelled(progress, existing, full_name, number)
             await session.flush()
@@ -230,7 +239,7 @@ async def queue_review(
         .all()
     )
     for old in in_flight:
-        await abort_job(redis, old.arq_job_id)
+        to_abort.append(old.arq_job_id)
         old.status = "cancelled"
         await _report_cancelled(progress, old, full_name, number)
 
@@ -258,17 +267,23 @@ async def queue_review(
         owner_id=owner_id,
     )
     session.add(run)
-    await session.commit()
+    await session.commit()  # releases the per-PR lock
     try:
-        job_id = await enqueue_review(redis, str(run.id))
-    except Exception:
-        logger.exception("enqueue failed review_run=%s %s#%s owner=%s", run.id, full_name, number, owner_id)
-        await _mark_enqueue_failed(session, run)
-        raise
-    run.arq_job_id = job_id
-    await session.commit()
-    if progress is not None and head_sha and report_new_run:
-        await _report_queued(session, progress, run, full_name)
+        try:
+            job_id = await enqueue_review(redis, str(run.id))
+        except Exception:
+            logger.exception("enqueue failed review_run=%s %s#%s owner=%s", run.id, full_name, number, owner_id)
+            await _mark_enqueue_failed(session, run)
+            raise
+        run.arq_job_id = job_id
+        await session.commit()
+        if progress is not None and head_sha and report_new_run:
+            await _report_queued(session, progress, run, full_name)
+    finally:
+        # Superseded runs are already cancelled in the DB; aborting their jobs is best effort,
+        # bounded, and done outside the lock so a slow Redis or worker never blocks this PR.
+        for job in to_abort:
+            await abort_job(redis, job)
     logger.info(
         "queued review_run=%s %s#%s sha=%s trigger=%s owner=%s",
         run.id,
@@ -280,6 +295,20 @@ async def queue_review(
     )
     record_enqueue("queued", owner=owner_id)
     return run
+
+
+async def _lock_pr(session: AsyncSession, full_name: str, number: int) -> None:
+    """Transaction-scoped advisory lock for one PR, waiting at most LOCK_WAIT_SECONDS."""
+    key = func.hashtextextended(f"review:{full_name.lower()}#{number}", 0)
+    deadline = asyncio.get_running_loop().time() + LOCK_WAIT_SECONDS
+    while True:
+        if (await session.execute(select(func.pg_try_advisory_xact_lock(key)))).scalar():
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            await session.rollback()
+            logger.warning("per-PR enqueue lock busy %s#%s after %ss", full_name, number, LOCK_WAIT_SECONDS)
+            raise QueueBusyError(f"{full_name}#{number}")
+        await asyncio.sleep(_LOCK_POLL_SECONDS)
 
 
 async def _verify_head_before_superseding(

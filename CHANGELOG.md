@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request cancels an open run on a different SHA, it re-reads the PR head under
   the lock (10 s timeout): `409 stale_head_sha` if the head moved, `502` if the
   read fails, and nothing changes in either case.
+- Waits around enqueueing are bounded. The per-PR lock is acquired within
+  20 s, otherwise the webhook and manual endpoints answer `503 pr_queue_busy`
+  (`Retry-After: 5`). Superseded jobs are aborted after the lock is released,
+  best effort with a 2 s cap, and the worker now sets `allow_abort_jobs`.
+  Redis job status checks are capped at 2 s.
 - Migration `008_review_run_progress`: `review_runs.progress_status`,
   `comment_url` and `has_sensitive_content` (NULL for existing rows).
 - **Multiple GitHub owners** ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)): one deployment can
