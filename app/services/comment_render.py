@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from app.config import LanguageYaml, PublicReposYaml
 from app.services.constants import REVIEW_MARKER
 from app.services.issue_key import remove_issue_key
+from app.services.review_time import reviewed_text
 from app.services.verifier import FindingView, VerifiedReview
 from app.services.visibility import Visibility
 
@@ -44,6 +46,8 @@ class RenderInput:
     private_channels_configured: bool = False
     public_alignment: str | None = None
     redacted_prior_ids: set[str] = field(default_factory=set)
+    # When the analysis finished (UTC); rendered with head_sha and duration_ms.
+    analysed_at: datetime | None = None
 
 
 _LABELS = {
@@ -65,6 +69,7 @@ _LABELS = {
         "alignment": "Task alignment",
         "coverage": "Coverage",
         "run": "Run",
+        "reviewed": "Reviewed",
         "error": "Error",
         "files": "files",
         "model": "model",
@@ -91,6 +96,7 @@ _LABELS = {
         "alignment": "Соответствие задаче",
         "coverage": "Покрытие",
         "run": "Запуск",
+        "reviewed": "Проверено",
         "error": "Ошибка",
         "files": "файлов",
         "model": "модель",
@@ -375,7 +381,8 @@ def _transition_table(transitions: list[FindingTransitionView], labels: dict[str
 
 
 def render_sticky_comment(data: RenderInput) -> str:
-    labels = _LABELS[(data.language or LanguageYaml()).details]
+    language = (data.language or LanguageYaml()).details
+    labels = _LABELS[language]
     verified = data.verified
     public = data.visibility != "private"
     policy = data.public_repos or PublicReposYaml()
@@ -404,6 +411,11 @@ def render_sticky_comment(data: RenderInput) -> str:
         "",
         f"**{labels['verdict']}:** {verdict}",
         f"**SHA:** `{data.head_sha}`",
+        *(
+            [f"**{labels['reviewed']}:** {reviewed_text(data.head_sha, data.analysed_at, data.duration_ms, language)}"]
+            if data.analysed_at is not None
+            else []
+        ),
         f"**{labels['mode']}:** `{data.mode}`",
         f"**{labels['alignment']}:** `{alignment}` (`{issue}`)",
         f"**{labels['findings']}:** P0={p0} · P1={p1} · P2={p2} · P3={p3}",

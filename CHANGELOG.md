@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Review time in the comment**: the sticky review comment shows the reviewed
+  commit and when the analysis finished, always in UTC, with its duration, for
+  example `Reviewed: commit abc1234 at 2026-10-24 09:25:40 UTC (took 3m 12s)`
+  (Russian labels with `language.details: ru`). The check run / commit status
+  summary of a published review ends with the same line. The values are stored
+  in `review_runs.summary["analysis"]`, so both show the same time. No migration.
+
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
   valid `X-Hub-Signature-256` HMAC signature; the API key (`REVIEW_API_KEY`) is
   no longer checked on this endpoint. This allows standard GitHub webhooks

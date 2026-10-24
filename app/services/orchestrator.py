@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Literal
 
 import jsonschema
@@ -72,6 +73,7 @@ from app.services.progress_status import (
     locked_state,
 )
 from app.services.publisher import Publisher, empty_verified
+from app.services.review_time import analysis_record
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
 from app.services.verifier import FindingView, PreviousFindingView, VerifiedReview, parse_json_payload, verify_review
@@ -1554,6 +1556,12 @@ async def _publish(
         unredacted_transitions if unredacted_transitions is not None else transitions,
         jira_in_context=jira_in_context,
     )
+    analysed_at = datetime.now(UTC)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    run.summary = {
+        **(getattr(run, "summary", None) or {}),
+        "analysis": analysis_record(pr.head_sha, analysed_at, duration_ms),
+    }
     render = RenderInput(
         repository=pr.repository.full_name,
         pr_number=pr.number,
@@ -1564,7 +1572,8 @@ async def _publish(
         jira_warning=jira_warning,
         verified=verified,
         transitions=transitions,
-        duration_ms=int((time.monotonic() - started) * 1000),
+        duration_ms=duration_ms,
+        analysed_at=analysed_at,
         model=config.codex.model,
         language=config.language,
         error_code=error_code,
@@ -1615,7 +1624,9 @@ async def _complete(
     run.model_version = config.codex.model
     run.prompt_version = prompt_version
     run.policy_version = POLICY_VERSION
+    analysis = (run.summary or {}).get("analysis")
     run.summary = {
+        **({"analysis": analysis} if analysis else {}),
         "text": verified.summary,
         "task_alignment": verified.task_alignment_status,
         "coverage": verified.coverage,

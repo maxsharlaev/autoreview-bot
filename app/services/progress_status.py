@@ -34,6 +34,7 @@ from app.services.constants import (
     SKIP_REPO,
     SKIP_TOO_LARGE,
 )
+from app.services.review_time import status_line
 
 if TYPE_CHECKING:
     from app.adapters.github import GitHubAppClient
@@ -149,6 +150,9 @@ def final_outcome(
         )
         if task:
             lines.append(task)
+        reviewed = status_line(summary)
+        if reviewed:
+            lines.append(reviewed)
         conclusion: Conclusion = "neutral" if _needs_attention(counts) else "success"
         title = "Review published with findings" if conclusion == "neutral" else "Review published"
         return Outcome("completed", conclusion, title, "\n".join(lines) + link, comment_url)
