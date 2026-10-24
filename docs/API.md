@@ -133,7 +133,8 @@ Subscribe to the **Pull request** event. Handled actions: `opened`, `synchronize
 | HTTP | Body | Meaning |
 | --- | --- | --- |
 | 202 | `{"status": "pending", "review_run_id": "…", "owner": "…"}` | Queued, or an existing run for this SHA reused (its status is returned). |
-| 202 | `{"status": "ok", "event": "ping"}` | Ping or no event header. |
+| 202 | `{"status": "ok", "event": "ping"}` | Ping event. |
+| 202 | `{"status": "ok", "event": "unknown"}` | No `X-GitHub-Event` header. |
 | 202 | `{"status": "skipped", "reason": "…"}` | `ignored_event`, `ignored_action`, `ignored_label`, `draft_pr`, `fork_pr`, `repo_not_allowed`, `unknown_owner`, `owner_not_configured`, `owner_disabled`. Draft and fork skips also report the commit's progress status as skipped. |
 | 401 | `invalid signature` | Missing or wrong `X-Hub-Signature-256`. On a disabled owner's URL a correct signature gets `202 owner_disabled`. |
 | 403 | `owner_signature_mismatch` | Signed with another owner's secret. |

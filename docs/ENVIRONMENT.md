@@ -69,11 +69,11 @@ For each named owner, `<ID>` is the owner id upper-cased with `-` replaced by `_
 | `OWNER_<ID>_GITHUB_APP_PRIVATE_KEY` | `github.private_key_env` (or `github.private_key_file`) | yes, with `auth: app` | api, worker | PEM or path to it. |
 | `OWNER_<ID>_GITHUB_WEBHOOK_SECRET` | `github.webhook_secret_env` | no | api | Webhook secret (16+ characters). Missing: webhooks off for this owner. |
 | `OWNER_<ID>_REVIEW_API_KEY` | `api.key_env` | no | api | API key scoped to this owner. |
-| `OWNER_<ID>_JIRA_API_TOKEN` | `jira.api_token_env` | with a `jira` block | worker | Jira token. |
-| `OWNER_<ID>_SLACK_BOT_TOKEN` | `slack.bot_token_env` | with an enabled `slack` block | worker | Slack token. |
+| `OWNER_<ID>_JIRA_API_TOKEN` | `jira.api_token_env` | no | worker | Jira token. Missing with a `jira` block: startup warning, Jira off for this owner. |
+| `OWNER_<ID>_SLACK_BOT_TOKEN` | `slack.bot_token_env` | no | worker | Slack token. Missing with an enabled `slack` block: startup warning, Slack off for this owner. |
 | `OWNER_<ID>_OPENAI_API_KEY` | `codex.api_key_env` (then required) | no | worker | Model key; falls back to `OPENAI_API_KEY`. |
 
-A required variable that is missing stops the API and the worker at startup with an error naming it.
+A missing variable marked required, or a missing variable named explicitly in `codex.api_key_env`, stops the API and the worker at startup with an error naming it. Other missing variables only log a startup warning.
 
 ## Passed through to subprocesses
 

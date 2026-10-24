@@ -54,7 +54,7 @@ Details: [GITHUB_SETUP.md](docs/GITHUB_SETUP.md).
 Secret handling:
 
 - Keep secrets in `.env` (git-ignored) or a secrets manager; `config.yaml` names env variables (`*_env`) and never holds secret values.
-- Each owner's secrets are `OWNER_<ID>_*` variables ([ENVIRONMENT.md](docs/ENVIRONMENT.md#per-owner-variables-owner_id_)). An owner's run uses only that owner's credentials; it never falls back to the global ones or another owner's.
+- Each owner's secrets are `OWNER_<ID>_*` variables ([ENVIRONMENT.md](docs/ENVIRONMENT.md#per-owner-variables-owner_id_)). A named owner's GitHub, webhook, API, Jira and Slack credentials are its own; they never fall back to the global ones or another owner's. The **model key is the exception**: without `codex.api_key_env` or `OWNER_<ID>_OPENAI_API_KEY`, the owner's runs use the shared `OPENAI_API_KEY`, so its code is processed and billed under the shared model account. Give each owner its own model key when that matters.
 - Owner credential objects hide secret values in their representation, and secrets are not written to logs on purpose. If a secret appears in a log, treat it as exposed and rotate it.
 - Rotate keys after any suspected exposure, and when people with server access leave.
 
