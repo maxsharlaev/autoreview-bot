@@ -354,7 +354,13 @@ def _finding_card(
     badge: str | None = None,
 ) -> list[str]:
     loc = f"{path}:{line}" if line else path
-    heading = f"#### [{badge}] {title}" if badge else f"#### [{severity}] {title}"
+    if badge:
+        # Still-open card: severity marker (with traffic light) before the status badge.
+        marker = severity_cell(severity, badge)
+        prefix = f"[{marker}] " if severity else ""
+        heading = f"#### {prefix}[{badge}] {title}"
+    else:
+        heading = f"#### [{severity}] {title}"
     meta = f"`{stable_id}` · `{category}` · `{loc}`" if category else f"`{stable_id}` · `{loc}`"
     return [
         heading,
@@ -516,11 +522,13 @@ def render_sticky_comment(data: RenderInput) -> str:
     if leftover_open:
         lines.extend([f"### {labels['previous_open']}", ""])
         for item in leftover_open:
+            # Same severity marker as the transitions table; not sensitive, so redacted cards keep it.
+            marker = severity_cell(item.severity, item.status)
             if item.stable_id in prior_ids:
-                lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
+                lines.extend(_redacted_prior_card(marker, item.path, item.line, labels))
                 continue
             if redact_all or (redact_security and _transition_is_security(item)):
-                lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
+                lines.extend(_redacted_security_card(marker, item.path, item.line, labels))
                 continue
             lines.extend(
                 _finding_card(

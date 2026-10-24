@@ -175,6 +175,8 @@ With `language.details: ru` the labels are in Russian (`Проверено: ко
 
 Findings that are still open (`still_open`, `regressed`, `needs_human`) get a traffic light before the severity: 🔴 P0, 🟠 P1, 🟡 P2, 🟢 P3. Fixed findings (`resolved`, `obsolete`) show only the severity. Under the public repository policy a redacted row keeps its severity and light; only the title is replaced with a generic label.
 
+The cards under **Still open from previous review** use the same marker before the status, for example `#### [🟠 P1] [regressed] Token is not validated`; a redacted card keeps it too (`#### [🟠 P1] Potential security issue.`).
+
 ## Optional PR description draft
 
 Set `pr_description.enabled: true` in `config.yaml` to draft a description from the PR title, branch, commit messages, changed-file summary and an available Jira issue. The feature is off by default. `pr_description.mode` selects `comment` (a separate sticky suggestion), `fill_empty` (an empty body or unchanged default repository template), or `append` (a marked block below the author's text). Only an intact generated block is updated on later runs; edits by the author cause the update to be skipped. The model runs in the read-only sandbox and cannot write to GitHub directly. The review is published and saved before this optional step starts; `pr_description.timeout_seconds` sets its budget. Draft and fork PRs are skipped: they are not part of the bot's trusted review flow. Without Jira, the linked-task section is omitted. See [PR description configuration](docs/PR_DESCRIPTION.md).

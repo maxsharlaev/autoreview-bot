@@ -325,3 +325,58 @@ def test_redacted_transition_rows_keep_severity_and_light() -> None:
         assert "Token leak" not in text
         assert "SQL injection" not in text
         assert "Old private" not in text
+
+
+def _leftover(stable_id: str, status: str, severity: str, title: str, **kwargs) -> FindingTransitionView:
+    return FindingTransitionView(
+        stable_id=stable_id, status=status, path=f"{stable_id}.py", line=1, severity=severity, title=title, **kwargs
+    )
+
+
+def test_still_open_card_headings_show_light_and_severity() -> None:
+    text = render_sticky_comment(
+        _render(
+            transitions=[
+                _leftover("a", "still_open", "P0", "A"),
+                _leftover("b", "regressed", "P1", "B"),
+                _leftover("c", "needs_human", "P2", "C"),
+                _leftover("d", "still_open", "P3", "D"),
+                _leftover("e", "still_open", "", "E"),
+            ]
+        )
+    )
+    assert "#### [🔴 P0] [still_open] A" in text
+    assert "#### [🟠 P1] [regressed] B" in text
+    assert "#### [🟡 P2] [needs_human] C" in text
+    assert "#### [🟢 P3] [still_open] D" in text
+    assert "#### [still_open] E" in text
+
+
+def test_still_open_card_heading_russian_same_marker() -> None:
+    text = render_sticky_comment(
+        _render(transitions=[_leftover("b", "regressed", "P1", "B")], language=LanguageYaml(summary="ru", details="ru"))
+    )
+    assert "### Ещё открыто с прошлого ревью" in text
+    assert "#### [🟠 P1] [regressed] B" in text
+
+
+def test_redacted_still_open_cards_keep_light_and_severity() -> None:
+    from app.config import PublicReposYaml
+
+    transitions = [
+        _leftover("sec", "still_open", "P1", "Token leak in logs", category="security"),
+        _leftover("prior", "regressed", "P0", "Old private"),
+    ]
+    for policy in ("redact", "redact_all"):
+        text = render_sticky_comment(
+            _render(
+                transitions=transitions,
+                visibility="public",
+                public_repos=PublicReposYaml(security_findings=policy),
+                redacted_prior_ids={"prior"},
+            )
+        )
+        assert "#### [🟠 P1] Potential security issue." in text
+        assert "#### [🔴 P0] Previously reported issue." in text
+        assert "Token leak" not in text
+        assert "Old private" not in text

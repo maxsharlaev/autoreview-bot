@@ -77,6 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traffic light before it: 🔴 P0, 🟠 P1, 🟡 P2, 🟢 P3; fixed findings
   (`resolved`, `obsolete`) show only the severity.
   Rows redacted by the public repository policy keep their severity and light.
+  The "Still open from previous review" card headings show the same marker
+  before the status, e.g. `[🟠 P1] [regressed] Title`; redacted cards keep it.
 
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
   valid `X-Hub-Signature-256` HMAC signature; the API key (`REVIEW_API_KEY`) is
