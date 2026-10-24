@@ -1,52 +1,93 @@
 # Architecture
 
-Open PR Review is an advisory service: GitHub PR event → queue → Codex CLI → verified JSON → one updated PR comment. It does not block merges or create Jira issues. See the [roadmap](ROADMAP.md) and [Russian translation](ru/ARCHITECTURE.md).
+Autoreview-bot is an advisory service: GitHub PR event → queue → Codex CLI → verified JSON → one updated PR comment. It does not block merges or create Jira issues. See the [roadmap](ROADMAP.md) and the [Russian translation](ru/ARCHITECTURE.md).
 
 ## Pipeline
 
 ```text
-GitHub Actions (API key) or PR webhook (HMAC signature) → Redis/ARQ
-  → worker → GitHub PR and diff → optional Jira issue snapshot
-  → bounded, untrusted-marked prompt → clone at head SHA
-  → Codex CLI in read-only sandbox → JSON verifier
-  → Postgres runs/findings/transitions → sticky GitHub comment
-  → optional Jira comment/status transition and Slack notification
-Scheduler → digest of open PRs → optional Slack message
+GitHub PR event or Actions job
+  -> POST /api/v1/pull-request (HMAC signature, no API key)
+     or POST /api/v1/reviews (API key)
+  -> Redis / ARQ (up to WORKER_MAX_JOBS jobs in parallel)
+  -> Review worker
+       -> GitHub API (PR, diff, author permission)
+       -> Jira read (key from branch, title or body)
+       -> Context builder (limits, untrusted blocks)
+       -> git clone at head SHA (PAT or installation token via GIT_ASKPASS)
+       -> codex exec --sandbox read-only --output-schema
+       -> JSON verifier
+       -> Postgres (runs / findings / transitions)
+       -> Publisher: sticky comment, progress status
+       -> Jira comment and status transition (P0/P1)
+       -> Slack (if enabled)
+Scheduler
+  -> digest of open PRs
+  -> Slack, or only a database record
 ```
 
 ## Components
 
 | Component | Responsibility |
 | --- | --- |
-| `app/api/v1/pull_request.py` | Webhook ingress, sequential deduplication, cancellation request for an older SHA |
-| `app/adapters/github.py` | GitHub App/PAT access, PRs, diffs and comments |
+| `app/api/v1/pull_request.py` | Webhook ingress, signature check, owner routing |
+| `app/api/v1/reviews.py` | Manual review API and run status |
+| `app/services/review_enqueue.py` | Run creation, deduplication, cancellation of older SHAs |
+| `app/adapters/github.py` | GitHub App JWT, installation token or PAT; PRs, diffs, comments, statuses |
 | `app/adapters/jira.py` | Issue read, comment and status transition |
 | `app/adapters/slack.py` | Optional notifications; disabled by default |
+| `app/owners/` | Owner registry, routing, per-owner credentials and config |
 | `app/services/orchestrator.py` | One review run |
-| `app/services/codex_runner.py` | Codex subprocess with restricted environment |
-| `app/services/verifier.py` | Schema, finding location and count validation |
-| `app/services/publisher.py` | GitHub, Jira and Slack publication |
-| `app/workers` | ARQ jobs, digest and worker metrics |
+| `app/services/codex_runner.py` | Codex subprocess with a restricted environment |
+| `app/services/verifier.py` | JSON Schema, finding paths, count cap |
+| `app/services/publisher.py` | Sticky comment, Jira write, Slack |
+| `app/services/progress_status.py` | Check run / commit status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |
+| `app/workers` | ARQ jobs, digest, status cleanup, worker metrics on `:9100` |
+| `GET /metrics`, `GET /api/v1/ops/status` | Prometheus and a queue/failure snapshot |
 
-## State and deduplication
+## Observability
 
-The sequential deduplication key is `{repository}:{pr_number}:{head_sha}`. A repeated webhook can reuse a pending, running or completed run. A new SHA requests cancellation of the previous job. Manual reviews default to `force: true`. Atomic deduplication and a final head SHA check before publication remain [roadmap work](ROADMAP.md).
+Prometheus endpoints: API `:8000/metrics`, worker `:9100/metrics`. Grafana, Prometheus and Loki are **not** part of this Compose file; your Prometheus scrapes the endpoints. Import artifacts live in `observability/`. See [OBSERVABILITY.md](OBSERVABILITY.md) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-Postgres stores repositories, pull requests, review runs, findings, finding transitions, Jira task snapshots and digest runs. Raw PR diffs are not stored in the database.
+## Deduplication and concurrency
 
-## Security and failure handling
+The key is `{repository}:{pr_number}:{head_sha}`. A repeated delivery for the same SHA reuses a `pending`, `running` or `completed` run; a `failed` one can be retried. A new SHA cancels the previous run. Manual `POST /api/v1/reviews` defaults to `force: true`, a new run on the same SHA. Different PRs run in parallel (`WORKER_MAX_JOBS`).
 
-The webhook, diff, PR fields and Jira text are untrusted. `REVIEW_API_KEY` protects review and operations endpoints. The webhook endpoint requires a valid `X-Hub-Signature-256` HMAC signature and takes no API key; without a valid webhook secret it returns 503, and the Actions workflow and manual API remain available. `/metrics` is intended for internal scraping. See [GitHub setup](GITHUB_SETUP.md).
+Requests for one PR are serialized with a Postgres advisory lock, ARQ job ids are deterministic per run, and the worker claims a run with a conditional update, so concurrent deliveries do not produce duplicate runs. The worker re-reads the PR head before it starts and closes the run as `HEAD_CHANGED` if it moved; for private repositories it checks again before publishing. Details: [API.md](API.md#concurrency-guarantees).
 
-Forks, drafts and unauthorized authors are skipped. An empty repository allowlist currently allows all repos. Large PRs produce `PR_TOO_LARGE_FOR_AI_REVIEW`; unavailable Jira context produces a warning; invalid model JSON gets one retry before `AI_OUTPUT_INVALID`.
+## API authentication
 
-Prometheus endpoints are API `:8000/metrics` and worker `:9100/metrics`. See [observability](OBSERVABILITY.md) and [operations](OPERATIONS.md).
+`POST /api/v1/reviews`, `GET /api/v1/reviews/{id}` and `GET /api/v1/ops/status` need an API key. `GET /metrics` is for internal scraping; do not expose it. `POST /api/v1/pull-request` accepts only requests with a valid `X-Hub-Signature-256` (no API key); without a valid webhook secret it returns 503, while Actions and the manual API keep working. See [API.md](API.md), [GITHUB_SETUP.md](GITHUB_SETUP.md) and [SECURITY.md](../SECURITY.md).
 
-Output defaults to English. `language.summary` controls summary and finding titles; `language.details` controls finding details and comment labels. Both currently support `en` and `ru`.
+## Data model
+
+- `repositories` — GitHub full name, enabled, owner, comment authors
+- `pull_requests` — number, SHAs, issue key, author, assignee, state, bot title
+- `review_runs` — trigger, SHAs, status, versions, duration, error/skip code, progress status
+- `findings` — stable id, severity, location, evidence, visibility
+- `finding_transitions` — new / resolved / still_open / regressed / obsolete / needs_human
+- `task_snapshots` — Jira key and whether a comment/transition was done
+- `digest_runs` — digest snapshot
+
+Raw diffs are not stored. More: [DATA_HANDLING.md](DATA_HANDLING.md).
+
+## Skips and errors
+
+- Fork and draft PRs: `skipped`.
+- Author without write access: `skipped`.
+- Repository outside a non-empty allowlist: `repo_not_allowed`. An empty list allows any repository.
+- Too large a PR: comment `PR_TOO_LARGE_FOR_AI_REVIEW`.
+- No Jira key: warning, the code is still reviewed. Jira unavailable: `ISSUE_CONTEXT_UNAVAILABLE`.
+- Invalid Codex JSON: one retry, then `AI_OUTPUT_INVALID`.
+
+All codes: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#error-and-skip-codes).
+
+## Comment language
+
+Output defaults to English. `language.summary` controls the summary and finding titles; `language.details` the scenario, evidence, recommendation and comment labels. Both support `en` and `ru`.
 
 ## Multiple owners
 
-`app/owners/` holds the owner model. `OwnerRegistry.build()` reads the env and `config.yaml` once at startup (API and worker), validates everything and builds a frozen `OwnerContext` per active owner: GitHub credentials, webhook secret, API key, Jira and Slack bindings, model key and the owner's effective config. Global settings are read for credentials only there; adapters (`GitHubAppClient.from_credentials`, `JiraClient.from_binding`, `SlackClient.from_binding`, `Publisher.from_context`) take the owner's bindings. A config without `owners:` yields one owner, `default`, whose effective config is the global config (modes A-D are described in the [README](../README.md#multiple-owners)).
+`app/owners/` holds the owner model. `OwnerRegistry.build()` reads the env and `config.yaml` once at startup (API and worker), validates everything and builds a frozen `OwnerContext` per active owner: GitHub credentials, webhook secret, API key, Jira and Slack bindings, model key and the owner's effective config. Global settings are read for credentials only there; adapters (`GitHubAppClient.from_credentials`, `JiraClient.from_binding`, `SlackClient.from_binding`, `Publisher.from_context`) take the owner's bindings. A config without `owners:` yields one owner, `default`, whose effective config is the global config (modes A–D: [MULTI_OWNER.md](MULTI_OWNER.md#modes)).
 
 - **Routing.** `resolve()` picks an explicit owner, then an exact `org/repo` claim, an `org/*` claim, the webhook installation id and finally `routing.unclaimed`; the chosen owner's allowlist then applies. The root webhook verifies the signature against every owner's secret and rejects a repo of another owner with `owner_signature_mismatch`; `/api/v1/pull-request/<id>` verifies only that owner's secret.
 - **Effective config.** Integrations (`jira`, `slack`) come only from the owner's own blocks. Policy sections (`public_repos`, `language`, `features`, `pr_description`, `size_guard`, `progress_status`, `codex.model`/`reasoning_effort`) are deep-merged over the global sections. The worker, publisher, size guard, PR description, webhook label check and digest read the run owner's effective config.
