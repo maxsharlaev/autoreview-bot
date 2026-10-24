@@ -25,6 +25,26 @@ Keys and ranges: [CONFIGURATION.md](CONFIGURATION.md#progress_status). Every fie
 - One-line description and a `target_url` pointing to the review comment.
 - A fine-grained PAT needs **Commit statuses: Read and write**; a classic PAT needs `repo:status` (included in `repo`).
 
+## Review phases
+
+While a run is open, the check run summary and the commit status description show the current phase and when it started, in UTC (same format as the review comment):
+
+| Phase | Text | Check run | Commit status |
+| --- | --- | --- | --- |
+| queued | `[2026-10-24 21:20:01 UTC] Queued, waiting for a worker…` | `queued` | `pending` |
+| fetching | `[2026-10-24 21:20:05 UTC] Fetching pull request and diff…` | `in_progress` | `pending` |
+| context | `[2026-10-24 21:20:07 UTC] Reading repository context…` (Jira issue, clone) | `in_progress` | `pending` |
+| analyzing | `[2026-10-24 21:20:12 UTC] Running model analysis…` | `in_progress` | `pending` |
+| publishing | `[2026-10-24 21:23:24 UTC] Publishing results…` | `in_progress` | `pending` |
+
+- The status is written once per phase change, never on a timer: at most five writes before the final one, so GitHub rate limits are not a concern. A repeated phase writes nothing.
+- Each phase line fits the 140-character commit status limit; the timestamp is always kept.
+- Phase writes are best effort like every other status write: a failure is logged and the review goes on.
+- Status texts are English only; `language.*` affects the review comment, not the status.
+- The final commit status description has no review time, so it always fits 140 characters with the findings and the Jira task. The check run summary and the review comment keep the full time and duration.
+
+**Spotting a hung review:** the phase timestamp stops advancing. Model analysis normally takes the longest (up to `codex.timeout_seconds` per attempt, two attempts); a phase older than that, or any phase older than `WORKER_JOB_TIMEOUT`, means the run is stuck. The job timeout and the cleanup job below close such statuses as failed.
+
 ## Reliability
 
 - Each status is written with the run owner's own credentials; `auto` picks the mode per owner from its credential type.
@@ -75,7 +95,7 @@ The cards under **Still open from previous review** use the same marker before t
 
 ## What a status discloses
 
-Summaries contain only the state, the skip reason or error code, finding counts and the comment link; a published review's summary ends with the review time in English, for example `Reviewed commit abc1234 at 2026-10-24 09:25:40 UTC (took 3m 12s).` They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
+Summaries contain only the state, the skip reason or error code, finding counts and the comment link; a published review's check run summary ends with the review time in English, for example `Reviewed commit abc1234 at 2026-10-24 09:25:40 UTC (took 3m 12s).` (the commit status description leaves it out). While a run is open they show only the current phase and its start time. They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
 
 ## `has_sensitive_content`
 

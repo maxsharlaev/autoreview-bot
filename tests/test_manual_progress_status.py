@@ -30,12 +30,12 @@ async def test_manual_run_reports_full_lifecycle(monkeypatch, tmp_path, kind) ->
 
     assert result.status == "completed"
     if kind == "app":
-        assert h.github.check_states() == ["queued", "in_progress", "completed"]
+        assert h.github.check_states() == ["queued", *["in_progress"] * 4, "completed"]
         final = h.github.calls[-1][2]
         assert final["conclusion"] == "neutral" and final["details_url"] == COMMENT_URL
     else:
         statuses = h.github.payloads("status")
-        assert [p["state"] for p in statuses] == ["pending", "pending", "success"]
+        assert [p["state"] for p in statuses] == [*["pending"] * 5, "success"]
         assert statuses[-1]["target_url"] == COMMENT_URL
     assert h.run.progress_status["state"] == "completed"
 

@@ -66,6 +66,9 @@ from app.services.pr_description import (
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
 from app.services.progress_status import (
+    PHASE_ANALYZING,
+    PHASE_CONTEXT,
+    PHASE_PUBLISHING,
     PROGRESS_OPT_OUT,
     PROGRESS_TRIGGERS,
     ProgressReporter,
@@ -266,6 +269,20 @@ async def _current_state(session: AsyncSession, tracking: _ProgressTracking) -> 
         logger.warning("could not read progress status for run %s (ignored): %s", tracking.run_id, exc)
         return tracking.state
     return state if found else tracking.state
+
+
+async def _advance_phase(session: AsyncSession, tracking: _ProgressTracking, run: ReviewRun, phase: str) -> None:
+    """Best effort: show the review's new phase on its progress status; never raises."""
+    if tracking.reporter is None:
+        return
+    try:
+        run.progress_status = await _current_state(session, tracking)
+        if not _closed(run.progress_status):
+            await tracking.reporter.phase(run, tracking.full_name, phase)
+        tracking.state = run.progress_status
+        await session.commit()
+    except Exception as exc:
+        logger.warning("progress phase %s for run %s failed (ignored): %s", phase, tracking.run_id, exc)
 
 
 async def _run_review(
@@ -518,6 +535,7 @@ async def _run_review(
     pr.issue_key = issue_key
     tracking.issue_key = issue_key
     progress.event(f"diff files={len(files)} issue_key={issue_key or 'none'}")
+    await _advance_phase(session, tracking, run, PHASE_CONTEXT)
 
     jira_text = None
     jira_issue: JiraIssue | None = None
@@ -658,6 +676,7 @@ async def _run_review(
         schema_copy = checkout / ".open-pr-review-schema.json"
         output_path = checkout / ".open-pr-review-out.json"
         shutil.copyfile(data_file("schemas", "review_output.json"), schema_copy)
+        await _advance_phase(session, tracking, run, PHASE_ANALYZING)
         for attempt in range(2):
             progress.event(
                 f"codex attempt {attempt + 1}/2 model={config.codex.model} effort={config.codex.reasoning_effort}"
@@ -747,6 +766,7 @@ async def _run_review(
         if checkout is not None:
             cleanup_checkout(checkout)
 
+    await _advance_phase(session, tracking, run, PHASE_PUBLISHING)
     verified.coverage["files_total"] = context.files_total
     verified.coverage["files_reviewed"] = context.files_reviewed
     verified.coverage["skipped_paths"] = context.skipped_paths

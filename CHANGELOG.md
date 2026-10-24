@@ -83,9 +83,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Review time in the comment**: the sticky review comment shows the reviewed
   commit and when the analysis finished, always in UTC, with its duration, for
   example `Reviewed: commit abc1234 at 2026-10-24 09:25:40 UTC (took 3m 12s)`
-  (Russian labels with `language.details: ru`). The check run / commit status
+  (Russian labels with `language.details: ru`). The check run
   summary of a published review ends with the same line. The values are stored
   in `review_runs.summary["analysis"]`, so both show the same time. No migration.
+  The final PAT commit status description leaves the time out so it always
+  fits GitHub's 140-character limit; the check run summary keeps it.
+
+- **Review phases in the progress status**: while a review runs, the check run
+  summary and the commit status description show the current phase and when it
+  started, e.g. `[2026-10-24 21:20:05 UTC] Running model analysis…` (queued,
+  fetching PR and diff, reading repository context, running model analysis,
+  publishing results). Written once per phase change, best effort, always within
+  140 characters. A phase timestamp that stops advancing shows a hung review.
+  See [docs/PROGRESS_STATUS.md](docs/PROGRESS_STATUS.md#review-phases).
 
 - **Severity in the transitions table**: the "Previous finding transitions"
   table of the review comment has a Severity column (`Важность` in Russian).

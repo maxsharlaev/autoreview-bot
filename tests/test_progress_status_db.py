@@ -198,7 +198,7 @@ async def test_review_persists_sensitive_flag_comment_url_and_final_status(
         assert stored.progress_status["state"] == "completed"
         assert stored.progress_status["conclusion"] == "neutral"
         assert stored.progress_status["check_run_id"] == 101
-    assert h.github.check_states() == ["queued", "in_progress", "completed"]
+    assert h.github.check_states() == ["queued", *["in_progress"] * 4, "completed"]
 
 
 @pytest.mark.asyncio
@@ -360,10 +360,10 @@ async def test_worker_finishing_before_queued_write_is_not_clobbered(
     assert run.progress_status["state"] == "completed"
     assert run.arq_job_id == "job-fast"
     if mode == "check_run":
-        assert h.github.check_states() == ["in_progress", "completed"]
+        assert h.github.check_states() == [*["in_progress"] * 4, "completed"]
     else:
-        assert [p["state"] for p in h.github.payloads("status")] == ["pending", "success"]
-        assert not any(p["description"].startswith("The review is waiting") for p in h.github.payloads("status"))
+        assert [p["state"] for p in h.github.payloads("status")] == [*["pending"] * 4, "success"]
+        assert not any(p["description"].endswith("Queued, waiting for a worker…") for p in h.github.payloads("status"))
 
 
 class _SlowQueuedGitHub(FakeGitHub):
@@ -376,7 +376,7 @@ class _SlowQueuedGitHub(FakeGitHub):
         return 101 + len(self.payloads("create"))
 
     async def create_commit_status(self, owner, repo, sha, payload):
-        if payload["description"].startswith("The review is waiting"):
+        if payload["description"].endswith("Queued, waiting for a worker…"):
             await asyncio.sleep(0.5)
         self.calls.append(("status", sha, payload))
 
@@ -408,11 +408,11 @@ async def test_worker_racing_the_queued_write_waits_and_reuses_it(session_factor
     assert run.progress_status["state"] == "completed"
     if mode == "check_run":
         assert len(slow.payloads("create")) == 1  # one check run, never a second queued one
-        assert slow.check_states() == ["queued", "in_progress", "completed"]
+        assert slow.check_states() == ["queued", *["in_progress"] * 4, "completed"]
         assert run.progress_status["check_run_id"] == 102
     else:
-        assert [p["state"] for p in slow.payloads("status")] == ["pending", "pending", "success"]
-        assert slow.payloads("status")[0]["description"].startswith("The review is waiting")
+        assert [p["state"] for p in slow.payloads("status")] == [*["pending"] * 5, "success"]
+        assert slow.payloads("status")[0]["description"].endswith("Queued, waiting for a worker…")
 
 
 # --- Manual runs (API-triggered) ---
@@ -603,10 +603,14 @@ async def test_manual_worker_racing_queued_write_reuses_it(session_factory, monk
     assert len(await _runs(session_factory)) == 1
     if mode == "check_run":
         assert len(slow.payloads("create")) == 1  # one check run, reused by the worker
-        expected = ["queued", "in_progress", "completed"] if order == "api_first" else ["in_progress", "completed"]
+        expected = (
+            ["queued", *["in_progress"] * 4, "completed"]
+            if order == "api_first"
+            else [*["in_progress"] * 4, "completed"]
+        )
         assert slow.check_states() == expected
     else:
-        expected = ["pending", "pending", "success"] if order == "api_first" else ["pending", "success"]
+        expected = [*["pending"] * 5, "success"] if order == "api_first" else [*["pending"] * 4, "success"]
         assert [p["state"] for p in slow.payloads("status")] == expected
 
 
