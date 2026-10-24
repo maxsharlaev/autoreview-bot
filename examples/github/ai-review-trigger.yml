@@ -19,6 +19,9 @@ on:
     #   - develop
     #   - "release/**"
     # Which changed files enqueue a review. Omit = every path.
+    # Use EITHER paths OR paths-ignore: GitHub rejects both on one event.
+    # To combine, use paths with "!" patterns; later patterns override earlier
+    # ones, e.g. "**", "!docs/**", "!**/*.md".
     # paths:
     #   - "src/**"
     #   - "apps/**"

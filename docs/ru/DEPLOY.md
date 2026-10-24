@@ -153,7 +153,7 @@ App можно использовать только для получения i
 3. Variable `AI_REVIEW_URL` = `https://review.example.com` (без `/` в конце).
 4. Скопировать [examples/github/ai-review-trigger.yml](../../examples/github/ai-review-trigger.yml) в продуктовый репо как `.github/workflows/ai-review.yml`.
 5. Пример уже ссылается на `maxsharlaev/autoreview-bot/.github/workflows/ai-review-trigger.yml@main`. Если Actions не видит этот репозиторий — вставить `steps` из `.github/workflows/ai-review-trigger.yml` вместо `uses:`.
-6. Раскомментировать и выставить `on.pull_request.branches` / `paths` / `paths-ignore` под продукт.
+6. Раскомментировать и выставить `on.pull_request.branches` и `paths` или `paths-ignore` (не оба сразу) под продукт.
 
 CI **этого** репозитория (`ci.yml`) ревью не запускает — только тесты сервиса.
 
@@ -191,7 +191,7 @@ CI **этого** репозитория (`ci.yml`) ревью не запуск
 
 ## Несколько owner'ов
 
-Чтобы обслуживать ещё одну организацию GitHub тем же деплоем, добавьте блок `owners:` в `config.yaml` и переменные `OWNER_<ID>_*` в `.env`, затем пересоздайте `api` и `worker`. До этого ничего не меняется: обновлённый деплой без `owners:` работает с одним owner'ом `default` и пишет в логи `owner=default`. Режимы A–D, маршрутизация, имена секретов, Jira/Slack и политики на owner'а, ключи модели, а также пошаговое обновление и откат описаны в [README](../../README.md#multiple-owners); подключение второй организации — в [GITHUB_SETUP.md](GITHUB_SETUP.md).
+Чтобы обслуживать ещё одну организацию GitHub тем же деплоем, добавьте блок `owners:` в `config.yaml` и переменные `OWNER_<ID>_*` в `.env`, затем пересоздайте `api` и `worker`. До этого ничего не меняется: обновлённый деплой без `owners:` работает с одним owner'ом `default` и пишет в логи `owner=default`. Режимы A–D, маршрутизация, имена секретов, Jira/Slack и политики на owner'а, ключи модели, а также пошаговое обновление и откат описаны в [README](../MULTI_OWNER.md); подключение второй организации — в [GITHUB_SETUP.md](GITHUB_SETUP.md).
 
 Откат: если убрать блок `owners.<id>` и перезапустить сервис, работа этого owner'а останавливается, его записи в БД сохраняются. Чтобы вернуться к образу без поддержки нескольких owner'ов, сначала выполните новым образом `alembic downgrade 004_finding_details_visibility`. Откат `007_findings_owner_id` отказывается выполняться, пока у findings разных owner'ов совпадает stable id в одном PR; с `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` остаётся строка owner'а репозитория (или самая старая), остальные удаляются вместе с переходами. Перед любым откатом схемы сделайте бэкап volume Postgres.
 

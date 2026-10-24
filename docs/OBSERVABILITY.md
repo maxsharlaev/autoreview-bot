@@ -58,4 +58,4 @@ Ship container stdout with **your** agent. Compose sets `OPEN_PR_REVIEW_SERVICE=
 
 `CODEX_QUOTA` while you retry PRs is empty OpenAI credits: API still returns 202, the worker fails fast. That is not a hang.
 
-On-call steps: [OPERATIONS.md](OPERATIONS.md).
+On-call steps: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
