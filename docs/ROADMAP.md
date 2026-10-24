@@ -75,6 +75,54 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 **Exit:** a public beta with documented limits, reproducible setup and a tested recovery path.
 
+## Planned follow-ups
+
+Smaller items already agreed, independent of the monthly plan:
+
+- **Webhook delivery deduplication:** remember `X-GitHub-Delivery` ids so a redelivered event is recognized before any GitHub call.
+- **Narrower installation tokens:** request App installation tokens scoped to the reviewed repository and only the permissions a step needs.
+- **Grafana per owner:** an `owner` dimension in dashboards and alerts, so each owner's queue, failures and cost are visible separately.
+- **Admin panel with sensitive-comment cleanup:** list runs whose published comment had sensitive content (`has_sensitive_content`) and let an operator redact or delete those comments, for example before a repository becomes public ([PROGRESS_STATUS.md](PROGRESS_STATUS.md#has_sensitive_content)).
+
+## Future directions
+
+Ideas beyond the plan above, in priority order. Sizes are rough engineering estimates for one developer.
+
+### 1. Fix verification
+
+- **Goal:** show whether the bot's findings actually get fixed, and close them automatically when they are.
+- **Sketch:** on a new push, run a focused check on only the bot's open findings from earlier runs (location, evidence, the new diff) and mark each one `resolved`, `still_open` or `needs_human`. Resolved findings are collapsed in the sticky comment. A metric counts findings fixed per severity and category, plus time to fix.
+- **Risks:** the model may mark a finding resolved when the code only moved; an extra model call per push adds cost. Mitigations: require evidence of the change, and make the check cheaper than a full review.
+- **Size:** about 1 week.
+
+### 2. Team rules in the repository
+
+- **Goal:** review against the team's own conventions, not only general best practice.
+- **Sketch:** an optional `.autoreview/rules.md` in the reviewed repository, read from the PR's **base** branch (so a PR can't change its own rules), size-limited and passed to the model as untrusted review criteria. Findings can cite the rule they apply. Per-owner config can turn the feature on or off.
+- **Risks:** prompt injection through the rules file (it stays in an untrusted block, and its rules can't change output format or publication); long files add tokens; vague rules cause noise.
+- **Size:** 3–5 days.
+
+### 3. Local check before push
+
+- **Goal:** let a developer get a review in the terminal before pushing.
+- **Sketch:** a small CLI and an optional git `pre-push` hook. It sends the staged changes, a commit or the branch diff against its base to the API in a **no-publish** mode: nothing is posted to GitHub, Jira or Slack, and the result comes back to the terminal. Each developer gets their own key with a cost limit and rate limit, scoped to an owner.
+- **Data handling:** code leaves the developer's machine and goes to the service and the model provider. The CLI applies an ignore list before sending (secrets, `.env*`, keys, generated and vendored files), shows what will be sent, and the server applies the same skip rules. Results are not stored as PR findings.
+- **Risks:** secret leakage from a local diff; cost abuse; results differing from the PR review.
+- **Size:** about 1 week.
+
+### 4. Repository engineering health report
+
+- **Goal:** a periodic picture of a repository's engineering health, beyond single PRs.
+- **Sketch:** a scheduled audit built mostly from non-LLM tools: outdated and vulnerable dependencies; test coverage and flaky tests; hotspots by churn × findings; complexity and dead code; CI duration and failure rate; docs drift against code (for example config keys or env vars missing from docs). It uses the owner's findings history. An LLM only synthesizes a short prioritized summary. Output goes to the future admin panel and optionally to Slack.
+- **Risks:** tools differ by language and ecosystem; report noise; access to CI data needs extra permissions; cost on large repositories.
+- **Size:** 2–3 weeks for an MVP.
+
+### Smaller ideas (unordered)
+
+- **Feedback on findings:** reactions on findings (useful / false positive) collected into false-positive statistics per category and severity, used to tune policies and prompts.
+- **Strict profile for migrations and infrastructure:** stricter criteria when a PR changes Alembic migrations, Dockerfiles, Compose files or CI configs (downgrade paths, data loss, secrets, permissions).
+- **Dependency check in PRs:** when lock files change, check new or updated packages for known CVEs and typosquatting, and report them as findings.
+
 ## Rules throughout
 
 - A new integration passes contract, failure/retry and permission tests before it enters the sample configuration.
