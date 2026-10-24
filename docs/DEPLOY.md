@@ -25,9 +25,9 @@ Compose from the repository root (`docker-compose.yml`):
 | `redis` | ARQ queue | 6379 | **No** |
 | `migrate` | One-shot `alembic upgrade head` | — | No |
 | `api` | FastAPI | 8000 | `127.0.0.1:8000` → HTTPS reverse proxy |
-| `worker` | Clone, Codex, publication, metrics | 9100 | `127.0.0.1:9100` for a local scrape; internal network for a remote one |
+| `worker` | Clone, Codex, publication, metrics | 9100 | **No**: Docker network only (`expose`), so replicas can scale |
 
-Compose publishes no Postgres or Redis ports. The API and worker metrics listen on `127.0.0.1` only; use a reverse proxy or a private network for external HTTPS and a remote Prometheus.
+Compose publishes no Postgres or Redis ports. The API is published on `127.0.0.1:8000` only, and worker metrics are not published at all; use a reverse proxy or a private network for external HTTPS and a remote Prometheus.
 
 The worker **must** run with `security_opt: seccomp:unconfined` and `apparmor:unconfined` (already in Compose) so Codex's inner bubblewrap sandbox can start. Do not remove them without testing on the target host.
 
@@ -112,14 +112,14 @@ Custom review instructions: copy `prompts/review.md` to `prompts/local/review.md
 ## Deployment steps
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
-2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only by a local or internal Prometheus.
+2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only inside the Docker network.
 3. `docker compose up -d --build`. Wait for `migrate` (exit 0), then `api` and `worker` Up.
 4. Checks from the host or internal network:
 
    ```bash
    curl -sS https://review.example.com/health
    curl -sS https://review.example.com/is-ready    # "ready", otherwise Postgres/Redis
-   curl -sS http://<worker>:9100/metrics | grep open_pr_review
+   docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
    ```
 
 5. Reverse proxy and TLS. Check that `/metrics` is **not** reachable from outside.

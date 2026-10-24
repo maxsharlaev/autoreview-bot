@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Worker metrics port**: Compose no longer publishes the worker's `:9100` on
+  the host; it is exposed on the Docker network only, so
+  `docker compose up --scale worker=N` works. The bundled Prometheus job finds
+  every replica through `dns_sd_configs` on the `worker` service name. If you
+  scraped `127.0.0.1:9100`, switch to the Docker network (see
+  `docs/UPGRADE.md`).
+
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
   valid `X-Hub-Signature-256` HMAC signature; the API key (`REVIEW_API_KEY`) is
   no longer checked on this endpoint. This allows standard GitHub webhooks
