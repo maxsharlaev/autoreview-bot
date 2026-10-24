@@ -10,7 +10,7 @@ Model calls go through the Codex CLI with the API key of the run's owner (`OPENA
 
 **PR title/description** (when `pr_description.enabled`): PR title and body, branch name, up to `pr_description.max_commit_messages` commit messages, a diff summary, and the Jira issue text.
 
-Not sent: tokens and keys (the sandbox gets a minimal environment, see [ENVIRONMENT.md](ENVIRONMENT.md)), Slack data, other owners' data. The digest does not call the model.
+Not sent: GitHub, Jira, Slack and database credentials are not passed to the review agent (the sandbox gets a minimal environment, see [ENVIRONMENT.md](ENVIRONMENT.md)), and neither are Slack data or other owners' data. The model key is present in the agent's environment, because the agent needs it to call the model; see [SECURITY.md](../SECURITY.md). The digest does not call the model.
 
 For a public repository the review and PR text models do not receive Jira issue text; a separate read-only alignment check does, and publishes only a fixed result ([PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md#jira-jira_disclosure)). Retention on the provider side is governed by your agreement with it.
 

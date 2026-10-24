@@ -135,7 +135,7 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 | `codex.sandbox` | string | `read-only` | — | Codex `--sandbox` value. Keep `read-only`. |
 | `codex.approval_policy` | string | `never` | — | Codex approval policy. Keep `never`: nobody answers prompts in a worker. |
 | `codex.timeout_seconds` | int | `600` | — | Timeout of one Codex call. Keep it below `WORKER_JOB_TIMEOUT`. |
-| `codex.max_files` | int | `100` | — | More reviewable changed files than this: no model call, the PR gets the `PR_TOO_LARGE_FOR_AI_REVIEW` comment. |
+| `codex.max_files` | int | `100` | — | More changed files in the PR than this, counting skipped files too (lockfiles, binaries and other files not sent to the model): no model call, the PR gets the `PR_TOO_LARGE_FOR_AI_REVIEW` comment. |
 | `codex.max_diff_lines` | int | `20000` | — | More diff lines than this: same as `max_files`. |
 | `codex.max_findings` | int | `20` | — | Maximum findings kept from one review. |
 | `codex.max_file_bytes` | int | `524288` | — | Per-file patch bytes sent to the model; longer patches are truncated. |

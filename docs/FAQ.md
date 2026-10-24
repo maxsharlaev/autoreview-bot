@@ -40,7 +40,7 @@ Yes: `codex.prompt_file` (and `pr_description.prompt_file`), see [DEPLOY.md](DEP
 No. It only comments on a linked issue and, when enabled, moves it to `rework_status` on P0/P1 findings.
 
 **Large PRs?**
-Above `size_guard.hard` or `codex.max_files` / `max_diff_lines` the run is skipped with `PR_TOO_LARGE_FOR_AI_REVIEW`. The `autoreview:force` label bypasses the size guard ([PR_DESCRIPTION.md](PR_DESCRIPTION.md#size-guard)).
+Above `size_guard.hard` or `codex.max_files` (all changed files, skipped ones included) / `max_diff_lines` the run is skipped with `PR_TOO_LARGE_FOR_AI_REVIEW`. The `autoreview:force` label bypasses the size guard ([PR_DESCRIPTION.md](PR_DESCRIPTION.md#size-guard)).
 
 **How do I delete stored data?**
 See [DATA_HANDLING.md](DATA_HANDLING.md#retention-and-deletion).
