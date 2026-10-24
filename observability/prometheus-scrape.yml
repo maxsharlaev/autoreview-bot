@@ -1,6 +1,10 @@
 # Snippets for an *existing* Prometheus. Do not run Prometheus from this repo.
 # Merge `scrape_configs` and load `alerts.yml` as a rule file.
-# Replace targets with localhost:8000 / localhost:9100 if you scrape published host ports.
+# Prometheus must be on the same Docker network as the stack (or reach it another way).
+# The API port is published on 127.0.0.1:8000, so a Prometheus on the host can use localhost:8000.
+# The worker port is not published: the worker job resolves the `worker` service name, which
+# returns one address per replica, so `docker compose up --scale worker=N` is scraped fully.
+# Docker Swarm: use `tasks.worker` instead of `worker`.
 
 scrape_configs:
   - job_name: open-pr-review-api
@@ -12,7 +16,10 @@ scrape_configs:
 
   - job_name: open-pr-review-worker
     metrics_path: /metrics
-    static_configs:
-      - targets: ["worker:9100"]
-        labels:
-          service: worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100
+    relabel_configs:
+      - target_label: service
+        replacement: worker

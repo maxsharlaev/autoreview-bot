@@ -59,7 +59,8 @@ Changing filters is a commit to the reviewed repository; the worker needs no res
 ```bash
 curl -fsS http://localhost:8000/health
 curl -fsS http://localhost:8000/is-ready
-curl -fsS http://localhost:9100/metrics | grep open_pr_review
+curl -fsS http://localhost:8000/metrics | grep open_pr_review
+docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
 docker compose ps
 docker compose logs -f worker
 ```

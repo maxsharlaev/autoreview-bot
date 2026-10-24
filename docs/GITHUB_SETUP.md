@@ -106,7 +106,7 @@ After `docker compose up` and public HTTPS (or a tunnel):
 
 Each run is a separate queue job. The ARQ worker takes up to `WORKER_MAX_JOBS` jobs at once (default **4**); different PRs run in parallel. Repeating the same `head_sha` reuses the run, a new SHA cancels the unfinished one, and concurrent deliveries for one PR are serialized ([API.md](API.md#concurrency-guarantees)).
 
-To scale on one host, raise `WORKER_MAX_JOBS`. The shipped Compose file publishes the worker metrics port on the host (`127.0.0.1:9100`), so `docker compose up --scale worker=N` does not work as is; to run several workers, run them on separate hosts, or remove the host port mapping and scrape each replica over the Docker network. The limits are the model quota and cloning, not FastAPI.
+To scale: raise `WORKER_MAX_JOBS`, and/or run more worker replicas with `docker compose up -d --scale worker=N`. Worker metrics are not published on the host, and the bundled scrape job finds every replica by its service name ([OBSERVABILITY.md](OBSERVABILITY.md)). The limits are the model quota and cloning, not FastAPI.
 
 ## Several owners
 

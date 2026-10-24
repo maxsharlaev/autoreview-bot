@@ -40,6 +40,10 @@ Always back up the Postgres volume before a downgrade.
 
 Step-by-step upgrade to an `owners:` block, keeping history with `aliases: [default]`, and rollback: [MULTI_OWNER.md](MULTI_OWNER.md#upgrade-and-rollback).
 
+## Worker metrics port no longer published
+
+The Compose file no longer maps the worker's metrics port to `127.0.0.1:9100` on the host; it is exposed only on the Docker network, so `docker compose up --scale worker=N` works. If your Prometheus scraped `127.0.0.1:9100` / `localhost:9100`, switch it to the Docker network: attach Prometheus to the stack's network and use the bundled `dns_sd_configs` job from [`observability/prometheus-scrape.yml`](../observability/prometheus-scrape.yml), which scrapes every replica. To keep a host port for a single worker, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (then it can't be scaled).
+
 ## New GitHub permissions
 
 Progress status (from `008_review_run_progress`) uses **Checks: Read and write** (App) or **Commit statuses: Read and write** (PAT). Without them reviews keep working without a status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)).
