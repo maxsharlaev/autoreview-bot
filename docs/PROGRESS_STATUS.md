@@ -25,6 +25,26 @@ Keys and ranges: [CONFIGURATION.md](CONFIGURATION.md#progress_status). Every fie
 - One-line description and a `target_url` pointing to the review comment.
 - A fine-grained PAT needs **Commit statuses: Read and write**; a classic PAT needs `repo:status` (included in `repo`).
 
+## Review phases
+
+While a run is open, the check run summary and the commit status description show the current phase and when it started, in UTC (same format as the review comment):
+
+| Phase | Text | Check run | Commit status |
+| --- | --- | --- | --- |
+| queued | `[2026-10-24 21:20:01 UTC] Queued, waiting for a worker…` | `queued` | `pending` |
+| fetching | `[2026-10-24 21:20:05 UTC] Fetching pull request and diff…` | `in_progress` | `pending` |
+| context | `[2026-10-24 21:20:07 UTC] Reading repository context…` (Jira issue, clone) | `in_progress` | `pending` |
+| analyzing | `[2026-10-24 21:20:12 UTC] Running model analysis…` | `in_progress` | `pending` |
+| publishing | `[2026-10-24 21:23:24 UTC] Publishing results…` | `in_progress` | `pending` |
+
+- The status is written once per phase change, never on a timer: at most five writes before the final one, so GitHub rate limits are not a concern. A repeated phase writes nothing.
+- Each phase line fits the 140-character commit status limit; the timestamp is always kept.
+- Phase writes are best effort like every other status write: a failure is logged and the review goes on. The phase is stored in its own short database transaction (run row locked, waiting at most 2 s), separate from the review's own transaction, so a failed phase write cannot affect the review.
+- Status texts are English only; `language.*` affects the review comment, not the status.
+- The final commit status description has no review time, so it always fits 140 characters with the findings and the Jira task. The check run summary and the review comment keep the full time and duration.
+
+**Spotting a hung review:** the phase timestamp stops advancing. Model analysis normally takes the longest (up to `codex.timeout_seconds` per attempt, two attempts); a phase older than that, or any phase older than `WORKER_JOB_TIMEOUT`, means the run is stuck. The job timeout and the cleanup job below close such statuses as failed.
+
 ## Reliability
 
 - Each status is written with the run owner's own credentials; `auto` picks the mode per owner from its credential type.
@@ -54,9 +74,28 @@ Scheduled digest runs report no status: they review no PR head.
 - **Owner disabled** after the webhook (`owner_disabled`): the worker, or the cleanup job for a stale status, closes the status as `skipped` with that owner's own credentials. The registry keeps a disabled owner's credentials for this purpose only; if they can't be loaded, the status is closed only in the database.
 - **Owner removed** from the config (`owner_not_configured`): **its open statuses can't be closed on GitHub.** No credentials exist for it, and the bot never uses another owner's or the global credentials, so the check run stays `queued` / `in_progress` (or the commit status `pending`). The cleanup job closes it in the database and logs a warning. To avoid this, disable the owner first (`enabled: false`), let its queued runs drain, then remove the block; or close the check runs by hand.
 
+## Review comment
+
+The sticky PR comment starts with the verdict, the reviewed commit and when the analysis finished, always in UTC, with its duration:
+
+```text
+**Reviewed:** commit `abc1234` at 2026-10-24 09:25:40 UTC (took 3m 12s)
+```
+
+With `language.details: ru` the labels are in Russian (`Проверено: коммит abc1234 в 2026-10-24 09:25:40 UTC (заняло 3 мин 12 с)`). Then come the summary, the finding cards and, after a re-review, the **Previous finding transitions** table with a severity column:
+
+| Status | Severity | Finding | Path |
+| --- | --- | --- | --- |
+| `still_open` | 🟠 P1 | Token is not validated | `app/auth.py:12` |
+| `resolved` | P2 | Missing timeout | `app/client.py:40` |
+
+Findings that are still open (`still_open`, `regressed`, `needs_human`) get a traffic light before the severity: 🔴 P0, 🟠 P1, 🟡 P2, 🟢 P3. Fixed findings (`resolved`, `obsolete`) show only the severity. Under the [public repository policy](PUBLIC_DISCLOSURE.md#security-findings-security_findings) a redacted row keeps its severity and light; only the title is replaced with a generic label.
+
+The cards under **Still open from previous review** use the same marker before the status, for example `#### [🟠 P1] [regressed] Token is not validated`; a redacted card keeps it too (`#### [🟠 P1] Potential security issue.`).
+
 ## What a status discloses
 
-Summaries contain only the state, the skip reason or error code, finding counts and the comment link. They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
+Summaries contain only the state, the skip reason or error code, finding counts and the comment link; a published review's check run summary ends with the review time in English, for example `Reviewed commit abc1234 at 2026-10-24 09:25:40 UTC (took 3m 12s).` (the commit status description leaves it out). While a run is open they show only the current phase and its start time. They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
 
 ## `has_sensitive_content`
 

@@ -34,6 +34,7 @@ from app.services.constants import (
     SKIP_REPO,
     SKIP_TOO_LARGE,
 )
+from app.services.review_time import format_utc, status_line
 
 if TYPE_CHECKING:
     from app.adapters.github import GitHubAppClient
@@ -49,6 +50,21 @@ PROGRESS_TRIGGERS = frozenset({"webhook", "manual"})
 PROGRESS_OPT_OUT = "progress_status_opt_out"
 STALE_MARGIN_SECONDS = 300
 _DESCRIPTION_LIMIT = 140
+
+# Review phases shown while a run is open, in pipeline order. The status is written once per
+# phase change (never per tick), so a phase timestamp that stops advancing points to a hung run.
+PHASE_QUEUED = "queued"
+PHASE_FETCHING = "fetching"
+PHASE_CONTEXT = "context"
+PHASE_ANALYZING = "analyzing"
+PHASE_PUBLISHING = "publishing"
+PHASE_TEXT = {
+    PHASE_QUEUED: "Queued, waiting for a worker…",
+    PHASE_FETCHING: "Fetching pull request and diff…",
+    PHASE_CONTEXT: "Reading repository context…",
+    PHASE_ANALYZING: "Running model analysis…",
+    PHASE_PUBLISHING: "Publishing results…",
+}
 
 Mode = Literal["check_run", "commit_status"]
 Conclusion = Literal["success", "neutral", "skipped", "cancelled", "failure"]
@@ -78,6 +94,25 @@ class Outcome:
     title: str
     summary: str
     details_url: str | None = None
+    # One-line commit status description; None derives it from the summary.
+    description: str | None = None
+
+
+def phase_line(phase: str, started: datetime) -> str:
+    """`[2026-10-24 21:20:05 UTC] Running model analysis…`, always within the commit status limit."""
+    prefix = f"[{format_utc(started)}] "
+    text = PHASE_TEXT.get(phase, phase)
+    room = _DESCRIPTION_LIMIT - len(prefix)
+    if len(text) > room:
+        text = text[: room - 1] + "…"
+    return prefix + text
+
+
+def phase_outcome(phase: str, started: datetime) -> Outcome:
+    line = phase_line(phase, started)
+    if phase == PHASE_QUEUED:
+        return Outcome("queued", None, "Review queued", line)
+    return Outcome("in_progress", None, "Review in progress", line)
 
 
 def resolve_mode(config: AppConfig, credentials_kind: str | None) -> Mode | None:
@@ -149,9 +184,15 @@ def final_outcome(
         )
         if task:
             lines.append(task)
+        # The commit status description (140 chars) leaves the review time out; the check run
+        # summary and the review comment carry it in full.
+        description = " ".join(lines)
+        reviewed = status_line(summary)
+        if reviewed:
+            lines.append(reviewed)
         conclusion: Conclusion = "neutral" if _needs_attention(counts) else "success"
         title = "Review published with findings" if conclusion == "neutral" else "Review published"
-        return Outcome("completed", conclusion, title, "\n".join(lines) + link, comment_url)
+        return Outcome("completed", conclusion, title, "\n".join(lines) + link, comment_url, description)
     if status == "skipped":
         reason = skip_reason or "unknown"
         return Outcome("completed", "skipped", "Review skipped", f"Skipped: {skip_text(reason)}.{link}", comment_url)
@@ -167,7 +208,8 @@ def final_outcome(
 
 
 def _one_line(outcome: Outcome) -> str:
-    text = outcome.summary.split("\n\n[")[0].replace("\n", " ").strip()
+    source = outcome.description if outcome.description is not None else outcome.summary.split("\n\n[")[0]
+    text = source.replace("\n", " ").strip()
     return text if len(text) <= _DESCRIPTION_LIMIT else text[: _DESCRIPTION_LIMIT - 1] + "…"
 
 
@@ -240,14 +282,37 @@ class ProgressReporter:
             state["check_run_id"] = int(created)
         return state
 
+    async def _write_phase(
+        self, full_name: str, sha: str, phase: str, state: dict[str, Any] | None, external_id: str | None
+    ) -> dict[str, Any]:
+        started = datetime.now(UTC)
+        state = await self._write(full_name, sha, phase_outcome(phase, started), state, external_id)
+        state["phase"] = phase
+        state["phase_started_at"] = started.isoformat()
+        return state
+
     async def queued(self, run: Any, full_name: str) -> None:
-        outcome = Outcome("queued", None, "Review queued", "The review is waiting for a worker.")
-        run.progress_status = await self._write(full_name, run.head_sha, outcome, None, str(run.id))
+        run.progress_status = await self._write_phase(full_name, run.head_sha, PHASE_QUEUED, None, str(run.id))
+
+    async def phase_state(
+        self, full_name: str, sha: str, run_id: str, state: dict[str, Any] | None, phase: str
+    ) -> dict[str, Any] | None:
+        """Report a new phase of a running review and return the new state; None for a repeated phase."""
+        if state and state.get("phase") == phase:
+            return None
+        return await self._write_phase(full_name, sha, phase, state, run_id)
+
+    async def phase(self, run: Any, full_name: str, phase: str) -> None:
+        """Report a new phase on `run.progress_status`; a repeated phase writes nothing."""
+        state = await self.phase_state(
+            full_name, run.head_sha, str(run.id), getattr(run, "progress_status", None), phase
+        )
+        if state is not None:
+            run.progress_status = state
 
     async def in_progress(self, run: Any, full_name: str, number: int) -> None:
         state = getattr(run, "progress_status", None)
-        outcome = Outcome("in_progress", None, "Review in progress", "A worker is reviewing this commit.")
-        state = await self._write(full_name, run.head_sha, outcome, state, str(run.id))
+        state = await self._write_phase(full_name, run.head_sha, PHASE_FETCHING, state, str(run.id))
         if self.config.progress_status.reaction and not state.get("reaction_id"):
             owner, repo = full_name.split("/", 1)
             reaction_id = await self._call("reaction", self.github.add_issue_reaction(owner, repo, number, "eyes"))

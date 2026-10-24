@@ -16,7 +16,7 @@ English documents are primary; [docs/ru](ru/README.md) is a Russian mirror.
 - [Multiple owners](MULTI_OWNER.md): several GitHub organizations in one deployment.
 - [Architecture](ARCHITECTURE.md): pipeline, components, data model.
 - [PR description drafts](PR_DESCRIPTION.md) and size guard.
-- [Progress status](PROGRESS_STATUS.md): check run / commit status.
+- [Progress status](PROGRESS_STATUS.md): check run / commit status, and the [review comment](PROGRESS_STATUS.md#review-comment) format (review time, severity lights).
 - [Public repository disclosure](PUBLIC_DISCLOSURE.md).
 
 ## Operations

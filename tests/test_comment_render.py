@@ -101,7 +101,7 @@ def test_sticky_comment_transition_table() -> None:
         )
     )
     assert "### Previous finding transitions" in text
-    assert "| Status | Finding | Path |" in text
+    assert "| Status | Severity | Finding | Path |" in text
     assert "`still_open`" in text
     assert "`resolved`" in text
     assert "Portuguese blog URLs still indexed" in text
@@ -238,3 +238,145 @@ def test_carry_rehydrates_open_blocker() -> None:
     assert verified.findings[0].title == "Portuguese blog URLs still indexed"
     assert "Открыл /pt/blog" in verified.findings[0].scenario
     assert "At this SHA: still indexed" in verified.findings[0].evidence
+
+
+def _severity_transitions() -> list[FindingTransitionView]:
+    return [
+        FindingTransitionView(stable_id="a", status="still_open", path="a.py", line=1, severity="P0", title="A"),
+        FindingTransitionView(stable_id="b", status="regressed", path="b.py", line=2, severity="P1", title="B"),
+        FindingTransitionView(stable_id="c", status="needs_human", path="c.py", line=3, severity="P2", title="C"),
+        FindingTransitionView(stable_id="d", status="still_open", path="d.py", line=4, severity="P3", title="D"),
+        FindingTransitionView(stable_id="e", status="resolved", path="e.py", line=5, severity="P1", title="E"),
+        FindingTransitionView(stable_id="f", status="obsolete", path="f.py", line=6, severity="P2", title="F"),
+    ]
+
+
+def test_transition_table_shows_severity_with_light_only_for_open_findings() -> None:
+    text = render_sticky_comment(_render(transitions=_severity_transitions()))
+    assert "| `still_open` | 🔴 P0 | A | `a.py:1` |" in text
+    assert "| `regressed` | 🟠 P1 | B | `b.py:2` |" in text
+    assert "| `needs_human` | 🟡 P2 | C | `c.py:3` |" in text
+    assert "| `still_open` | 🟢 P3 | D | `d.py:4` |" in text
+    assert "| `resolved` | P1 | E | `e.py:5` |" in text
+    assert "| `obsolete` | P2 | F | `f.py:6` |" in text
+
+
+def test_transition_table_russian_header_same_cells() -> None:
+    text = render_sticky_comment(
+        _render(transitions=_severity_transitions(), language=LanguageYaml(summary="ru", details="ru"))
+    )
+    assert "| Статус | Важность | Замечание | Путь |" in text
+    assert "| `regressed` | 🟠 P1 | B | `b.py:2` |" in text
+    assert "| `resolved` | P1 | E | `e.py:5` |" in text
+
+
+def test_transition_table_missing_or_unknown_severity() -> None:
+    text = render_sticky_comment(
+        _render(
+            transitions=[
+                FindingTransitionView(stable_id="x", status="still_open", path="x.py", title="X"),
+                FindingTransitionView(stable_id="y", status="still_open", path="y.py", severity="P9", title="Y"),
+            ]
+        )
+    )
+    assert "| `still_open` | — | X | `x.py` |" in text
+    assert "| `still_open` | P9 | Y | `y.py` |" in text
+
+
+def test_redacted_transition_rows_keep_severity_and_light() -> None:
+    from app.config import PublicReposYaml
+
+    transitions = [
+        FindingTransitionView(
+            stable_id="sec",
+            status="still_open",
+            path="app/auth.py",
+            line=12,
+            severity="P1",
+            title="Token leak in logs",
+            category="security",
+            evidence="logs the token",
+        ),
+        FindingTransitionView(
+            stable_id="sec-fixed",
+            status="resolved",
+            path="app/auth.py",
+            line=30,
+            severity="P0",
+            title="SQL injection",
+            category="security",
+        ),
+        FindingTransitionView(
+            stable_id="prior", status="still_open", path="app/old.py", line=3, severity="P2", title="Old private"
+        ),
+    ]
+    for policy in ("redact", "redact_all"):
+        text = render_sticky_comment(
+            _render(
+                transitions=transitions,
+                visibility="public",
+                public_repos=PublicReposYaml(security_findings=policy),
+                redacted_prior_ids={"prior"},
+            )
+        )
+        assert "| `still_open` | 🟠 P1 | Potential security issue. | `app/auth.py:12` |" in text
+        assert "| `resolved` | P0 | Potential security issue. | `app/auth.py:30` |" in text
+        assert "| `still_open` | 🟡 P2 | Previously reported issue. | `app/old.py:3` |" in text
+        assert "Token leak" not in text
+        assert "SQL injection" not in text
+        assert "Old private" not in text
+
+
+def _leftover(stable_id: str, status: str, severity: str, title: str, **kwargs) -> FindingTransitionView:
+    return FindingTransitionView(
+        stable_id=stable_id, status=status, path=f"{stable_id}.py", line=1, severity=severity, title=title, **kwargs
+    )
+
+
+def test_still_open_card_headings_show_light_and_severity() -> None:
+    text = render_sticky_comment(
+        _render(
+            transitions=[
+                _leftover("a", "still_open", "P0", "A"),
+                _leftover("b", "regressed", "P1", "B"),
+                _leftover("c", "needs_human", "P2", "C"),
+                _leftover("d", "still_open", "P3", "D"),
+                _leftover("e", "still_open", "", "E"),
+            ]
+        )
+    )
+    assert "#### [🔴 P0] [still_open] A" in text
+    assert "#### [🟠 P1] [regressed] B" in text
+    assert "#### [🟡 P2] [needs_human] C" in text
+    assert "#### [🟢 P3] [still_open] D" in text
+    assert "#### [still_open] E" in text
+
+
+def test_still_open_card_heading_russian_same_marker() -> None:
+    text = render_sticky_comment(
+        _render(transitions=[_leftover("b", "regressed", "P1", "B")], language=LanguageYaml(summary="ru", details="ru"))
+    )
+    assert "### Ещё открыто с прошлого ревью" in text
+    assert "#### [🟠 P1] [regressed] B" in text
+
+
+def test_redacted_still_open_cards_keep_light_and_severity() -> None:
+    from app.config import PublicReposYaml
+
+    transitions = [
+        _leftover("sec", "still_open", "P1", "Token leak in logs", category="security"),
+        _leftover("prior", "regressed", "P0", "Old private"),
+    ]
+    for policy in ("redact", "redact_all"):
+        text = render_sticky_comment(
+            _render(
+                transitions=transitions,
+                visibility="public",
+                public_repos=PublicReposYaml(security_findings=policy),
+                redacted_prior_ids={"prior"},
+            )
+        )
+        assert "#### [🟠 P1] Potential security issue." in text
+        assert "#### [🔴 P0] Previously reported issue." in text
+        assert "Token leak" not in text
+        assert "Old private" not in text

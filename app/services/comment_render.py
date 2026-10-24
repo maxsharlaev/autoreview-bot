@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from app.config import LanguageYaml, PublicReposYaml
 from app.services.constants import REVIEW_MARKER
 from app.services.issue_key import remove_issue_key
+from app.services.review_time import reviewed_text
 from app.services.verifier import FindingView, VerifiedReview
 from app.services.visibility import Visibility
 
@@ -44,6 +46,8 @@ class RenderInput:
     private_channels_configured: bool = False
     public_alignment: str | None = None
     redacted_prior_ids: set[str] = field(default_factory=set)
+    # When the analysis finished (UTC); rendered with head_sha and duration_ms.
+    analysed_at: datetime | None = None
 
 
 _LABELS = {
@@ -54,6 +58,7 @@ _LABELS = {
         "transitions": "Previous finding transitions",
         "status": "Status",
         "finding": "Finding",
+        "severity": "Severity",
         "path": "Path",
         "findings": "Findings",
         "clean": "No blocking findings.",
@@ -65,6 +70,7 @@ _LABELS = {
         "alignment": "Task alignment",
         "coverage": "Coverage",
         "run": "Run",
+        "reviewed": "Reviewed",
         "error": "Error",
         "files": "files",
         "model": "model",
@@ -80,6 +86,7 @@ _LABELS = {
         "transitions": "Переходы прошлых замечаний",
         "status": "Статус",
         "finding": "Замечание",
+        "severity": "Важность",
         "path": "Путь",
         "findings": "Замечания",
         "clean": "Критических замечаний нет.",
@@ -91,6 +98,7 @@ _LABELS = {
         "alignment": "Соответствие задаче",
         "coverage": "Покрытие",
         "run": "Запуск",
+        "reviewed": "Проверено",
         "error": "Ошибка",
         "files": "файлов",
         "model": "модель",
@@ -346,7 +354,13 @@ def _finding_card(
     badge: str | None = None,
 ) -> list[str]:
     loc = f"{path}:{line}" if line else path
-    heading = f"#### [{badge}] {title}" if badge else f"#### [{severity}] {title}"
+    if badge:
+        # Still-open card: severity marker (with traffic light) before the status badge.
+        marker = severity_cell(severity, badge)
+        prefix = f"[{marker}] " if severity else ""
+        heading = f"#### {prefix}[{badge}] {title}"
+    else:
+        heading = f"#### [{severity}] {title}"
     meta = f"`{stable_id}` · `{category}` · `{loc}`" if category else f"`{stable_id}` · `{loc}`"
     return [
         heading,
@@ -359,23 +373,41 @@ def _finding_card(
     ]
 
 
+# Traffic light shown before the severity of findings that are still open.
+SEVERITY_LIGHTS = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "🟢"}
+# Transition statuses of findings that are no longer open: severity only, no light.
+CLOSED_TRANSITION_STATUSES = frozenset({"resolved", "obsolete"})
+
+
+def severity_cell(severity: str, status: str) -> str:
+    """Severity marker for the transitions table: `🟠 P1` while open, `P1` once fixed."""
+    if not severity:
+        return "—"
+    light = SEVERITY_LIGHTS.get(severity)
+    if light is None or status in CLOSED_TRANSITION_STATUSES:
+        return severity
+    return f"{light} {severity}"
+
+
 def _transition_table(transitions: list[FindingTransitionView], labels: dict[str, str]) -> list[str]:
     lines = [
         f"### {labels['transitions']}",
         "",
-        f"| {labels['status']} | {labels['finding']} | {labels['path']} |",
-        "| --- | --- | --- |",
+        f"| {labels['status']} | {labels['severity']} | {labels['finding']} | {labels['path']} |",
+        "| --- | --- | --- | --- |",
     ]
     for item in transitions:
         loc = f"{item.path}:{item.line}" if item.line else item.path
         title = item.title or item.stable_id
-        lines.append(f"| `{item.status}` | {title} | `{loc}` |")
+        severity = severity_cell(item.severity, item.status)
+        lines.append(f"| `{item.status}` | {severity} | {title} | `{loc}` |")
     lines.append("")
     return lines
 
 
 def render_sticky_comment(data: RenderInput) -> str:
-    labels = _LABELS[(data.language or LanguageYaml()).details]
+    language = (data.language or LanguageYaml()).details
+    labels = _LABELS[language]
     verified = data.verified
     public = data.visibility != "private"
     policy = data.public_repos or PublicReposYaml()
@@ -404,6 +436,11 @@ def render_sticky_comment(data: RenderInput) -> str:
         "",
         f"**{labels['verdict']}:** {verdict}",
         f"**SHA:** `{data.head_sha}`",
+        *(
+            [f"**{labels['reviewed']}:** {reviewed_text(data.head_sha, data.analysed_at, data.duration_ms, language)}"]
+            if data.analysed_at is not None
+            else []
+        ),
         f"**{labels['mode']}:** `{data.mode}`",
         f"**{labels['alignment']}:** `{alignment}` (`{issue}`)",
         f"**{labels['findings']}:** P0={p0} · P1={p1} · P2={p2} · P3={p3}",
@@ -461,6 +498,8 @@ def render_sticky_comment(data: RenderInput) -> str:
                 status=item.status,
                 path=item.path,
                 line=item.line,
+                # Severity is not sensitive: redacted rows keep it.
+                severity=item.severity,
                 title=(
                     labels["prior_issue"]
                     if item.stable_id in prior_ids
@@ -483,11 +522,13 @@ def render_sticky_comment(data: RenderInput) -> str:
     if leftover_open:
         lines.extend([f"### {labels['previous_open']}", ""])
         for item in leftover_open:
+            # Same severity marker as the transitions table; not sensitive, so redacted cards keep it.
+            marker = severity_cell(item.severity, item.status)
             if item.stable_id in prior_ids:
-                lines.extend(_redacted_prior_card(item.severity, item.path, item.line, labels))
+                lines.extend(_redacted_prior_card(marker, item.path, item.line, labels))
                 continue
             if redact_all or (redact_security and _transition_is_security(item)):
-                lines.extend(_redacted_security_card(item.severity, item.path, item.line, labels))
+                lines.extend(_redacted_security_card(marker, item.path, item.line, labels))
                 continue
             lines.extend(
                 _finding_card(
