@@ -1255,3 +1255,50 @@ async def test_owner_skip_of_pending_run_still_skips(session_factory, monkeypatc
         # The disabled owner's queued status is closed as skipped with its own credentials.
         assert h.github.check_states() == ["queued", "completed"]
         assert h.github.calls[-1][2]["conclusion"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_failed_phase_commit_does_not_poison_the_review_session(session_factory, monkeypatch, tmp_path) -> None:
+    from app.config import AppConfig
+    from app.models import PullRequest, ReviewRun
+    from app.services import orchestrator
+    from app.services.progress_status import ProgressReporter
+    from sqlalchemy import select
+
+    real_factory = orchestrator._isolated_factory
+    failures = {"left": 1}
+
+    def failing_factory(session):
+        factory = real_factory(session)
+        assert factory is not None  # a real AsyncSession on Postgres
+
+        def make():
+            phase_session = factory()
+            if failures["left"]:
+                failures["left"] -= 1
+
+                async def broken_commit():
+                    raise RuntimeError("database rejected the phase write")
+
+                phase_session.commit = broken_commit
+            return phase_session
+
+        return make
+
+    monkeypatch.setattr(orchestrator, "_isolated_factory", failing_factory)
+    h = Harness(monkeypatch, tmp_path, kind="pat", verified=_verified([_finding("P2")]))
+    queued = await _queue(session_factory, ProgressReporter(h.github, "commit_status", AppConfig()), HEAD)
+    result = await _worker(session_factory, h)(queued.id)
+
+    assert result.status == "completed"
+    assert failures["left"] == 0
+    h.publisher.publish.assert_awaited_once()
+    async with session_factory() as session:
+        run = (await session.execute(select(ReviewRun).where(ReviewRun.id == queued.id))).scalar_one()
+        pr = (await session.execute(select(PullRequest))).scalar_one()
+    assert run.status == "completed"
+    assert run.progress_status["state"] == "completed"
+    assert pr.issue_key == "ABC-12"
+    descriptions = [p["description"] for p in h.github.payloads("status")]
+    assert any(d.endswith("Running model analysis…") for d in descriptions)
+    assert h.github.payloads("status")[-1]["state"] == "success"

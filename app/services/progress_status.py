@@ -294,12 +294,21 @@ class ProgressReporter:
     async def queued(self, run: Any, full_name: str) -> None:
         run.progress_status = await self._write_phase(full_name, run.head_sha, PHASE_QUEUED, None, str(run.id))
 
-    async def phase(self, run: Any, full_name: str, phase: str) -> None:
-        """Report a new phase of a running review; a repeated phase writes nothing."""
-        state = getattr(run, "progress_status", None)
+    async def phase_state(
+        self, full_name: str, sha: str, run_id: str, state: dict[str, Any] | None, phase: str
+    ) -> dict[str, Any] | None:
+        """Report a new phase of a running review and return the new state; None for a repeated phase."""
         if state and state.get("phase") == phase:
-            return
-        run.progress_status = await self._write_phase(full_name, run.head_sha, phase, state, str(run.id))
+            return None
+        return await self._write_phase(full_name, sha, phase, state, run_id)
+
+    async def phase(self, run: Any, full_name: str, phase: str) -> None:
+        """Report a new phase on `run.progress_status`; a repeated phase writes nothing."""
+        state = await self.phase_state(
+            full_name, run.head_sha, str(run.id), getattr(run, "progress_status", None), phase
+        )
+        if state is not None:
+            run.progress_status = state
 
     async def in_progress(self, run: Any, full_name: str, number: int) -> None:
         state = getattr(run, "progress_status", None)

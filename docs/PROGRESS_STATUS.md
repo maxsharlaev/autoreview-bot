@@ -39,7 +39,7 @@ While a run is open, the check run summary and the commit status description sho
 
 - The status is written once per phase change, never on a timer: at most five writes before the final one, so GitHub rate limits are not a concern. A repeated phase writes nothing.
 - Each phase line fits the 140-character commit status limit; the timestamp is always kept.
-- Phase writes are best effort like every other status write: a failure is logged and the review goes on.
+- Phase writes are best effort like every other status write: a failure is logged and the review goes on. The phase is stored in its own short database transaction (run row locked, waiting at most 2 s), separate from the review's own transaction, so a failed phase write cannot affect the review.
 - Status texts are English only; `language.*` affects the review comment, not the status.
 - The final commit status description has no review time, so it always fits 140 characters with the findings and the Jira task. The check run summary and the review comment keep the full time and duration.
 

@@ -12,9 +12,10 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import jsonschema
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.adapters.github import ChangedFile, GitHubAppClient, GitHubError, PullRequestInfo
 from app.adapters.jira import JiraClient, JiraError, JiraIssue
@@ -271,16 +272,71 @@ async def _current_state(session: AsyncSession, tracking: _ProgressTracking) -> 
     return state if found else tracking.state
 
 
+# A phase write waits at most this long for the run row lock, then gives up (best effort).
+PHASE_LOCK_TIMEOUT_MS = 2000
+
+
+def _isolated_factory(session: AsyncSession) -> async_sessionmaker[AsyncSession] | None:
+    """Factory for short sessions on the main session's engine; None when there is no engine (unit fakes)."""
+    bind = getattr(session, "bind", None) if isinstance(session, AsyncSession) else None
+    if bind is None:
+        return None
+    return async_sessionmaker(bind, expire_on_commit=False)
+
+
+def _keep_in_memory(run: ReviewRun, state: dict | None) -> None:
+    """Show the phase state on the run object without making the main session write it."""
+    if isinstance(run, ReviewRun):
+        set_committed_value(run, "progress_status", state)
+    else:
+        run.progress_status = state
+
+
+async def _write_phase_isolated(
+    factory: async_sessionmaker[AsyncSession], tracking: _ProgressTracking, phase: str
+) -> dict | None:
+    """Lock the run row in a separate short transaction, report the phase, store it and commit."""
+    assert tracking.reporter is not None
+    run_id = uuid.UUID(tracking.run_id)
+    async with factory() as phase_session:
+        if phase_session.bind.dialect.name == "postgresql":
+            await phase_session.execute(text(f"SET LOCAL lock_timeout = {PHASE_LOCK_TIMEOUT_MS}"))
+        found, _status, stored = await locked_state(phase_session, run_id)
+        state = stored if found else tracking.state
+        if _closed(state):
+            await phase_session.rollback()
+            return state
+        new_state = await tracking.reporter.phase_state(tracking.full_name, tracking.sha, tracking.run_id, state, phase)
+        if new_state is None:
+            await phase_session.rollback()
+            return state
+        await phase_session.execute(update(ReviewRun).where(ReviewRun.id == run_id).values(progress_status=new_state))
+        await phase_session.commit()
+        return new_state
+
+
 async def _advance_phase(session: AsyncSession, tracking: _ProgressTracking, run: ReviewRun, phase: str) -> None:
-    """Best effort: show the review's new phase on its progress status; never raises."""
+    """Best effort: show the review's new phase on its progress status; never raises.
+
+    The phase state is written in its own short transaction. The main review session is never
+    committed or rolled back here, so a failed phase write cannot poison it or drop its pending
+    changes; the new state is only mirrored on the run object in memory.
+    """
     if tracking.reporter is None:
         return
     try:
-        run.progress_status = await _current_state(session, tracking)
-        if not _closed(run.progress_status):
-            await tracking.reporter.phase(run, tracking.full_name, phase)
-        tracking.state = run.progress_status
-        await session.commit()
+        factory = _isolated_factory(session)
+        if factory is not None:
+            state = await _write_phase_isolated(factory, tracking, phase)
+        elif _closed(tracking.state):
+            state = tracking.state
+        else:
+            new_state = await tracking.reporter.phase_state(
+                tracking.full_name, tracking.sha, tracking.run_id, tracking.state, phase
+            )
+            state = new_state if new_state is not None else tracking.state
+        tracking.state = state
+        _keep_in_memory(run, state)
     except Exception as exc:
         logger.warning("progress phase %s for run %s failed (ignored): %s", phase, tracking.run_id, exc)
 

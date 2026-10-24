@@ -2,6 +2,7 @@
 
 import re
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from app.config import AppConfig
@@ -121,13 +122,79 @@ def test_final_commit_status_drops_time_and_fits_with_jira_task() -> None:
 
 @pytest.mark.asyncio
 async def test_failed_phase_update_does_not_break_review(monkeypatch, tmp_path) -> None:
-    async def boom(self, run, full_name, phase):
+    async def boom(self, full_name, sha, run_id, state, phase):
         raise RuntimeError("status write exploded")
 
-    monkeypatch.setattr(progress_status.ProgressReporter, "phase", boom)
+    monkeypatch.setattr(progress_status.ProgressReporter, "phase_state", boom)
     h = Harness(monkeypatch, tmp_path, kind="pat", verified=_verified([_finding("P2")]))
     await h.queue()
     result = await h.review()
     assert result.status == "completed"
     h.publisher.publish.assert_awaited_once()
     assert h.github.payloads("status")[-1]["state"] == "success"
+
+
+class _PhaseSession:
+    """Isolated phase session fake: the first commit fails, later ones store the state."""
+
+    def __init__(self, store: dict) -> None:
+        self.store = store
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, statement, *args, **kwargs):
+        if getattr(statement, "is_update", False) or str(statement).lstrip().upper().startswith("UPDATE"):
+            self.store["pending"] = statement.compile().params.get("progress_status")
+        return SimpleNamespace(first=lambda: ("running", self.store.get("state")))
+
+    async def commit(self):
+        self.store["commits"] += 1
+        if self.store["commits"] == 1:
+            raise RuntimeError("database rejected the phase write")
+        self.store["state"] = self.store.pop("pending", self.store.get("state"))
+
+    async def rollback(self):
+        self.store.pop("pending", None)
+
+
+@pytest.mark.asyncio
+async def test_failed_phase_commit_keeps_main_session_and_pending_changes(monkeypatch, tmp_path) -> None:
+    from app.services import orchestrator
+
+    h = Harness(monkeypatch, tmp_path, kind="pat", verified=_verified([_finding("P2")]))
+    store: dict = {"commits": 0, "state": None}
+    monkeypatch.setattr(orchestrator, "_isolated_factory", lambda session: lambda: _PhaseSession(store))
+    await h.queue()
+    store["state"] = dict(h.run.progress_status)
+    main_commits_before = h.session.commit.await_count
+
+    result = await h.review()
+
+    assert result.status == "completed"
+    h.publisher.publish.assert_awaited_once()
+    assert h.run.comment_url is not None
+    assert h.pr.issue_key == "ABC-12"  # set before the first phase, kept after the failed phase commit
+    h.session.rollback.assert_not_awaited()
+    assert store["commits"] == 3  # context (failed), analyzing, publishing
+    assert store["state"]["phase"] == "publishing"
+    # The main session is committed only by the review itself, never by the phase path.
+    assert h.session.commit.await_count > main_commits_before
+    assert h.github.payloads("status")[-1]["state"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_phase_not_written_over_a_closed_status(monkeypatch, tmp_path) -> None:
+    from app.services import orchestrator
+
+    h = Harness(monkeypatch, tmp_path, kind="pat", verified=_verified([_finding("P2")]))
+    store: dict = {"commits": 1, "state": {"state": "completed", "conclusion": "cancelled"}}
+    monkeypatch.setattr(orchestrator, "_isolated_factory", lambda session: lambda: _PhaseSession(store))
+    await h.queue()
+    await h.review()
+    texts = [item["description"] for item in h.github.payloads("status")]
+    assert not any("Reading repository context" in t or "Running model analysis" in t for t in texts)
