@@ -4,7 +4,7 @@
 No. Reviews are advisory. The progress check run never reports `failure` for findings, only for bot errors ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)).
 
 **Does it run the PR's code?**
-No. It clones the PR head and runs Codex in a read-only sandbox without network access; nothing is built, installed or executed ([SECURITY.md](../SECURITY.md#threat-model-and-trust-boundaries)).
+It doesn't build or install it. Codex runs in the cloned checkout in a read-only sandbox without network access and is instructed not to execute repository code; that instruction is not yet technically enforced ([SECURITY.md](../SECURITY.md#threat-model-and-trust-boundaries)).
 
 **What is sent to the model provider?**
 The PR's metadata, diffs, earlier findings, optional Jira text, and whatever files of the checkout the agent reads. Details: [DATA_HANDLING.md](DATA_HANDLING.md).

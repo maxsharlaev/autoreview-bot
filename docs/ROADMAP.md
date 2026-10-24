@@ -82,6 +82,7 @@ Smaller items already agreed, independent of the monthly plan:
 - **Webhook delivery deduplication:** remember `X-GitHub-Delivery` ids so a redelivered event is recognized before any GitHub call.
 - **Narrower installation tokens:** request App installation tokens scoped to the reviewed repository and only the permissions a step needs.
 - **Grafana per owner:** an `owner` dimension in dashboards and alerts, so each owner's queue, failures and cost are visible separately.
+- **Enforced execution policy for the review agent:** a deterministic allowlist of the tool actions the review agent may take, model credentials not inherited by processes the agent starts, and secret scanning of model output before it is stored or published as a last line of defense.
 - **Human approval for model-driven Jira actions:** Jira transitions and comments triggered by model-assigned severity (P0/P1) are proposed instead of applied, and a person confirms them through a PR label, a reaction or the admin panel. Configurable per owner (apply automatically, require approval, or off).
 - **Admin panel with sensitive-comment cleanup:** list runs whose published comment had sensitive content (`has_sensitive_content`) and let an operator redact or delete those comments, for example before a repository becomes public ([PROGRESS_STATUS.md](PROGRESS_STATUS.md#has_sensitive_content)).
 

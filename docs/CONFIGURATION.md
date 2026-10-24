@@ -130,7 +130,7 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 | --- | --- | --- | --- | --- |
 | `codex.model` | string | `gpt-5.6-sol` | yes | Model passed to Codex CLI. |
 | `codex.reasoning_effort` | string | `medium` | yes | Codex reasoning effort. |
-| `codex.api_key_env` | env var name | — | **owner only** | Model key variable for this owner (required when set). Without it: `OWNER_<ID>_OPENAI_API_KEY`, else the shared `OPENAI_API_KEY`. |
+| `codex.api_key_env` | env var name | — | **owner only** | Model key variable for this owner (required when set, in both the API and the worker). Without it: `OWNER_<ID>_OPENAI_API_KEY`, else the shared `OPENAI_API_KEY`. |
 | `codex.prompt_file` | path | `""` | — | Replacement review prompt, e.g. `prompts/local/review.md`. Empty uses [`prompts/review.md`](../prompts/review.md). Relative to the working directory (`/app` in Docker). A missing file fails the review. `{{summary_language}}` and `{{details_language}}` are substituted. |
 | `codex.sandbox` | string | `read-only` | — | Codex `--sandbox` value. Keep `read-only`. |
 | `codex.approval_policy` | string | `never` | — | Codex approval policy. Keep `never`: nobody answers prompts in a worker. |
