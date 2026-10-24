@@ -58,6 +58,7 @@ _LABELS = {
         "transitions": "Previous finding transitions",
         "status": "Status",
         "finding": "Finding",
+        "severity": "Severity",
         "path": "Path",
         "findings": "Findings",
         "clean": "No blocking findings.",
@@ -85,6 +86,7 @@ _LABELS = {
         "transitions": "Переходы прошлых замечаний",
         "status": "Статус",
         "finding": "Замечание",
+        "severity": "Важность",
         "path": "Путь",
         "findings": "Замечания",
         "clean": "Критических замечаний нет.",
@@ -365,17 +367,34 @@ def _finding_card(
     ]
 
 
+# Traffic light shown before the severity of findings that are still open.
+SEVERITY_LIGHTS = {"P0": "🔴", "P1": "🟠", "P2": "🟡", "P3": "🟢"}
+# Transition statuses of findings that are no longer open: severity only, no light.
+CLOSED_TRANSITION_STATUSES = frozenset({"resolved", "obsolete"})
+
+
+def severity_cell(severity: str, status: str) -> str:
+    """Severity marker for the transitions table: `🟠 P1` while open, `P1` once fixed."""
+    if not severity:
+        return "—"
+    light = SEVERITY_LIGHTS.get(severity)
+    if light is None or status in CLOSED_TRANSITION_STATUSES:
+        return severity
+    return f"{light} {severity}"
+
+
 def _transition_table(transitions: list[FindingTransitionView], labels: dict[str, str]) -> list[str]:
     lines = [
         f"### {labels['transitions']}",
         "",
-        f"| {labels['status']} | {labels['finding']} | {labels['path']} |",
-        "| --- | --- | --- |",
+        f"| {labels['status']} | {labels['severity']} | {labels['finding']} | {labels['path']} |",
+        "| --- | --- | --- | --- |",
     ]
     for item in transitions:
         loc = f"{item.path}:{item.line}" if item.line else item.path
         title = item.title or item.stable_id
-        lines.append(f"| `{item.status}` | {title} | `{loc}` |")
+        severity = severity_cell(item.severity, item.status)
+        lines.append(f"| `{item.status}` | {severity} | {title} | `{loc}` |")
     lines.append("")
     return lines
 
@@ -473,6 +492,8 @@ def render_sticky_comment(data: RenderInput) -> str:
                 status=item.status,
                 path=item.path,
                 line=item.line,
+                # Severity is not sensitive: redacted rows keep it.
+                severity=item.severity,
                 title=(
                     labels["prior_issue"]
                     if item.stable_id in prior_ids

@@ -71,6 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summary of a published review ends with the same line. The values are stored
   in `review_runs.summary["analysis"]`, so both show the same time. No migration.
 
+- **Severity in the transitions table**: the "Previous finding transitions"
+  table of the review comment has a Severity column (`Важность` in Russian).
+  Findings that are still open (`still_open`, `regressed`, `needs_human`) show a
+  traffic light before it: 🔴 P0, 🟠 P1, 🟡 P2, 🟢 P3; fixed findings
+  (`resolved`, `obsolete`) show only the severity.
+  Rows redacted by the public repository policy keep their severity and light.
+
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
   valid `X-Hub-Signature-256` HMAC signature; the API key (`REVIEW_API_KEY`) is
   no longer checked on this endpoint. This allows standard GitHub webhooks
