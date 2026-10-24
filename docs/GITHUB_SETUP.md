@@ -33,7 +33,7 @@ GITHUB_WEBHOOK_SECRET=<repository webhook secret, if you use a webhook>
 Repository permissions:
 
 - **Pull requests**: Read and write (sticky comment, PR title/description).
-- **Contents**: access for `git clone`. GitHub often requires **Read and write** for HTTPS clone of a fine-grained PAT, even though the bot only reads.
+- **Contents**: Read-only (for `git clone`). The bot never writes repository contents.
 - **Commit statuses**: Read and write for the `autoreview` progress status (classic PAT: `repo:status`). Optional; without it the review runs without a status.
 
 Leave the App fields (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) empty; with a PAT the App JWT is not used. PR comments appear under the token owner's account. Test on one repository first and verify both clone and comment.
@@ -106,7 +106,7 @@ After `docker compose up` and public HTTPS (or a tunnel):
 
 Each run is a separate queue job. The ARQ worker takes up to `WORKER_MAX_JOBS` jobs at once (default **4**); different PRs run in parallel. Repeating the same `head_sha` reuses the run, a new SHA cancels the unfinished one, and concurrent deliveries for one PR are serialized ([API.md](API.md#concurrency-guarantees)).
 
-To scale: raise `WORKER_MAX_JOBS` and/or the number of `worker` containers. The limits are the model quota and cloning, not FastAPI.
+To scale on one host, raise `WORKER_MAX_JOBS`. The shipped Compose file publishes the worker metrics port on the host (`127.0.0.1:9100`), so `docker compose up --scale worker=N` does not work as is; to run several workers, run them on separate hosts, or remove the host port mapping and scrape each replica over the Docker network. The limits are the model quota and cloning, not FastAPI.
 
 ## Several owners
 
@@ -121,5 +121,5 @@ Each owner in `owners:` has its own GitHub credentials, webhook secret and optio
 | `401` on `/api/v1/reviews` | `REVIEW_API_KEY` missing or wrong |
 | `repo_not_allowed` | A non-empty `github.allowed_repos` must contain the exact `owner/repo` (or `owner/*`) |
 | Webhook `202`, no comment | Worker running; repository allowed; PR not draft/fork; author has write access ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)) |
-| Clone or comment `403` | Clone and REST are different: a fine-grained PAT often needs Contents **Read and write** for clone; commenting needs Pull requests **write** |
+| Clone or comment `403` | Clone needs Contents read and the token's repository access must include the repository (for an organization, the fine-grained PAT may need owner approval); commenting needs Pull requests **write** |
 | No progress status | Checks (App) or Commit statuses (PAT) permission ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |

@@ -34,16 +34,16 @@ What the service does about untrusted content:
 - **It never builds, installs or runs PR code.** The worker clones the PR head and runs the Codex CLI in that checkout with `--sandbox read-only` and `--ask-for-approval never`. The sandbox environment contains only the model key and a short list of system variables; GitHub, Jira, Slack and database credentials are not passed ([ENVIRONMENT.md](docs/ENVIRONMENT.md)).
 - Inside the sandbox, reads in the checkout run automatically; writes, network access and escaping the sandbox are rejected, and with `never` there is nobody to approve a prompt. The worker container relaxes Docker seccomp/AppArmor only so Codex's inner bubblewrap sandbox can create user namespaces; Codex does not run with `--yolo`.
 - PR content is never interpolated into shell commands. Git clones use `GIT_ASKPASS` (user `x-access-token`, password the token); the token is not kept in the remote URL after checkout.
-- **Prompt injection.** PR and Jira text is placed inside `<untrusted_…>` blocks, boundary tags inside it are stripped, and the prompts tell the model to treat it as data. Injection can't be ruled out, so the model's output has no privileges: it must match a JSON schema, findings are normalized (unknown severities become P2, findings for paths outside the PR's changed files and earlier findings are dropped, the count is capped), and the only thing published is a comment, title/description and status on that PR.
+- **Prompt injection.** PR and Jira text is placed inside `<untrusted_…>` blocks, boundary tags inside it are stripped, and the prompts tell the model to treat it as data. Injection can't be ruled out, so the model's output is constrained: it must match a JSON schema, and findings are normalized (unknown severities become P2, findings for paths outside the PR's changed files and earlier findings are dropped, the count is capped). Its effects are limited to the outputs listed below. Note that P0/P1 findings come from the model, so when `features.jira_transition` is on, model output can move the linked Jira issue to `rework_status`, and with `features.jira_comment` it can comment on it. Turn these off, or limit `jira.projects`, if that is not acceptable.
 - **What is published.** Sticky PR comment, optional PR title/description, progress check run or commit status, optional Jira comment/transition and Slack digest. The bot does not push code, merge, approve or change repository settings.
-- **Reviewed PRs.** Drafts, forks and authors without write access are skipped by default, and only allowlisted repositories are reviewed.
+- **Reviewed PRs.** Drafts, forks and authors without write access are skipped by default, and only allowlisted repositories are reviewed **when an allowlist is set**. An empty `github.allowed_repos` (or owner `allowed_repos`) accepts every repository the credentials can reach, with a startup warning; set it explicitly.
 
 ## Credentials and minimal permissions
 
 | Mode | Permissions |
 | --- | --- |
 | GitHub App | Contents: Read, Pull requests: Read and write, Metadata: Read, Checks: Read and write (optional, progress status). Subscribe to Pull request events only if you use webhooks. |
-| Fine-grained PAT | Only the reviewed repositories. Pull requests: Read and write, Contents (clone; GitHub may require Read and write for clone), Commit statuses: Read and write (optional). Prefer an App: a PAT acts as a person. |
+| Fine-grained PAT | Only the reviewed repositories. Pull requests: Read and write, Contents: Read (clone), Commit statuses: Read and write (optional). Prefer an App: a PAT acts as a person. |
 | Actions trigger | `AI_REVIEW_API_KEY` as a repository/org secret. Prefer an owner's scoped key over the operator key. |
 | Model key | A dedicated project key with a spending limit. |
 | Jira | A service account with browse, comment and transition on the listed projects only. The service never creates issues. |

@@ -111,6 +111,26 @@ def test_env_example_is_documented() -> None:
         assert f"`{documented}`" in ENVIRONMENT, f"{name} from .env.example missing from docs/ENVIRONMENT.md"
 
 
+def _owner_env_required_in_code() -> dict[str, bool]:
+    """OWNER_<ID>_* suffix -> whether the registry loads it with required=True (within a few lines)."""
+    lines = (ROOT / "app" / "owners" / "registry.py").read_text(encoding="utf-8").splitlines()
+    out: dict[str, bool] = {}
+    for i, line in enumerate(lines):
+        match = re.search(r"_env_name_for_owner\([^,]+,\s*\"([A-Z_]+)\"", line)
+        if match:
+            out[match.group(1)] = "required=True" in "\n".join(lines[i : i + 8])
+    return out
+
+
+@pytest.mark.parametrize(("suffix", "required"), sorted(_owner_env_required_in_code().items()))
+def test_owner_env_required_column_matches_code(suffix: str, required: bool) -> None:
+    name = f"OWNER_<ID>_{suffix}"
+    row = next((line for line in ENVIRONMENT.splitlines() if line.startswith(f"| `{name}` |")), None)
+    assert row is not None, f"{name} missing from the per-owner table"
+    cell = re.split(r"(?<!\\)\|", row.strip().strip("|"))[2].strip()
+    assert cell.startswith("yes") == required, f"{name}: Required column '{cell}' does not match the code"
+
+
 # --- links -----------------------------------------------------------------
 
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)\)")
