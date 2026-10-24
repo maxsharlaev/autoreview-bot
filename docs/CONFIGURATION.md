@@ -140,7 +140,7 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 | `codex.max_findings` | int | `20` | — | Maximum findings kept from one review. |
 | `codex.max_file_bytes` | int | `524288` | — | Per-file patch bytes sent to the model; longer patches are truncated. |
 
-Binary files (images, archives, fonts, binaries) and common lockfiles are left out of the model context.
+Common lockfiles, `.env*` files and files with image, PDF, archive, font or compiled-binary suffixes are left out of the model context. Other generated, minified or vendored files (for example `.min.js` or `.map`) are not detected and are sent like source. Full list: [DATA_HANDLING.md](DATA_HANDLING.md#sent-to-the-model-provider).
 
 ## `routing`
 

@@ -6,7 +6,15 @@ What the service sends to the model provider, what it stores, and how to delete 
 
 Model calls go through the Codex CLI with the API key of the run's owner (`OPENAI_API_KEY` or `OWNER_<ID>_OPENAI_API_KEY`).
 
-**Code review** (`prompts/review.md`): the prompt contains the repository name, PR number, branch, base/head SHA, PR title and body, the changed files' diffs (lockfiles, `.env*` files and binary/generated suffixes are skipped; each file is clipped at `codex.max_file_bytes`), findings from earlier runs on this PR, and the Jira issue text when one is linked and readable. Codex runs **in the cloned checkout** with a read-only sandbox, so the agent can read any file of the PR head and include it in its model context.
+**Code review** (`prompts/review.md`): the prompt contains the repository name, PR number, branch, base/head SHA, PR title and body, the changed files' diffs (each file is clipped at `codex.max_file_bytes`), findings from earlier runs on this PR, and the Jira issue text when one is linked and readable. Codex runs **in the cloned checkout** with a read-only sandbox, so the agent can read any file of the PR head and include it in its model context.
+
+Diffs left out of the prompt:
+
+- lockfiles: `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `Cargo.lock`, `composer.lock`, `go.sum`;
+- `.env*` files;
+- by suffix: images (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.ico`), PDFs, archives (`.zip`, `.gz`, `.tgz`), fonts (`.woff`, `.woff2`) and compiled binaries (`.exe`, `.dll`, `.so`, `.dylib`).
+
+Other generated, minified or vendored files (for example `.min.js` or `.map`) are not detected and are sent like source.
 
 **PR title/description** (when `pr_description.enabled`): PR title and body, branch name, up to `pr_description.max_commit_messages` commit messages, a diff summary, and the Jira issue text.
 
