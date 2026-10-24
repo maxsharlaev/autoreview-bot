@@ -1,4 +1,9 @@
+# Sample config.yaml. Every key, type, default and per-owner override:
+# docs/CONFIGURATION.md. Secrets never go here; they live in .env (docs/ENVIRONMENT.md).
+# Restart the API and worker after changes.
+
 github:
+  # Not used for credentials; set GITHUB_APP_ID / GITHUB_INSTALLATION_ID in .env.
   app_id: 0
   installation_id: 0
   # Required for production: configure an explicit allowlist. An empty list accepts
@@ -7,6 +12,7 @@ github:
     - example-org/example-repo
     # - example-org/another-repo
 
+# Jira (credentials in .env). Turn off features.jira_* when Jira is not used.
 jira:
   base_url: https://example.atlassian.net
   email: ai-review@example.com
@@ -21,17 +27,18 @@ slack:
 schedule:
   review_digest:
     enabled: true
-    cron: "0 * * * *"
+    cron: "0 * * * *" # only numeric minute/hour fields; see docs/CONFIGURATION.md#schedule
 
 features:
   jira_comment: true
   jira_transition: true
   digest_enabled: true
 
-language:
+language: # en | ru
   summary: en
   details: en
 
+# docs/PR_DESCRIPTION.md
 pr_description:
   enabled: false
   mode: comment # comment | fill_empty | append
@@ -51,11 +58,12 @@ size_guard:
     changed_lines: 20000
   override_label: autoreview:force
 
+# docs/PUBLIC_DISCLOSURE.md
 public_repos:
   jira_disclosure: key_only # none | key_only | full
   security_findings: redact # redact | redact_all | full
 
-# Progress on the PR head commit (webhook runs). Best effort: without the permission the review still runs.
+# Progress on the PR head commit (docs/PROGRESS_STATUS.md). Best effort: without the permission the review still runs.
 # GitHub App: check run "autoreview", needs Checks: Read and write.
 # PAT: commit status "autoreview", needs Commit statuses: Read and write (classic PAT: repo:status).
 progress_status:
@@ -77,8 +85,8 @@ codex:
   max_file_bytes: 524288
 
 # Multiple owners (optional). Without this block the service runs exactly as a
-# single owner ('default', built from the env and the sections above). See the
-# README section "Multiple owners" for modes A-D, routing and upgrade/rollback.
+# single owner ('default', built from the env and the sections above). See
+# docs/MULTI_OWNER.md for modes A-D, routing and upgrade/rollback.
 #
 # routing:
 #   unclaimed: default # default | reject: repos no owner claims go to the default owner or are rejected

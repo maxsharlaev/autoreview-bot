@@ -1,82 +1,84 @@
 # Roadmap: autoreview-bot
 
-This is a five-month sequence of verifiable milestones, not fixed release dates. The service is intended for any self-hosting team. GitHub, Jira and Codex are the first implementations. See the [Russian translation](ru/ROADMAP.md); the English roadmap is canonical.
+A five-month sequence of verifiable milestones, not fixed release dates: each stage ends with a checkable result. The service is meant for any self-hosting team. GitHub, Jira and Codex are the first implementations but do not define the internal interfaces of future integrations. The English roadmap is canonical; see the [Russian translation](ru/ROADMAP.md).
 
 ## Current state
 
 | Area | Available | Gap |
 | --- | --- | --- |
-| Review | GitHub PR → ARQ → Codex CLI → JSON → sticky comment; optional PR description drafts | Final review SHA guard, stronger validation and end-to-end tests |
-| Issues | Jira read, optional comment and P0/P1 status transition | Update policy, audit and contract tests |
-| Code hosts | GitHub App or PAT | Common interface and second adapter |
-| Reviewers | Codex CLI | Runner interface, second CLI and independent validation |
+| Review | GitHub PR → ARQ → Codex CLI → JSON → sticky comment; optional PR description drafts; progress status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) | Head SHA recheck before publication for public repositories, stronger output validation, end-to-end tests |
+| Concurrency | Per-PR advisory lock, deterministic job ids, conditional run claim, `HEAD_CHANGED` at pickup ([API.md](API.md#concurrency-guarantees)) | Queue recovery and publish-failure scenarios in end-to-end tests |
+| Issues | Jira read, optional comment and P0/P1 status transition | Update policy, decision log and contract tests |
+| Code hosts | GitHub App or PAT | Common interface and a second adapter |
+| Reviewers | One Codex CLI run | Runner interface, second CLI and independent validation |
 | Observability | API/worker metrics, alerts, dashboard, logs | Stage correlation, SLOs, alert exercise and data exposure review |
 | Operations | Run status API and queue snapshot | Optional authenticated task dashboard |
-| Language and prompts | English defaults; `en`/`ru` fields and comment labels; configurable prompt file | Channel templates, locale catalog, per-repository settings and full translation tests |
-| Owners | Several GitHub owners in one deployment: routing, per-owner GitHub credentials, webhook secrets, API keys, Jira, Slack, policies and model key ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9)) | Owners in the database or an admin UI, hot reload, per-owner quotas |
-| Quality | Unit tests and CI lint/format/test/image build | Database/queue/contract tests and local pre-commit hooks |
+| Language and prompts | English defaults; `en`/`ru` fields and comment labels; configurable prompt files | Locale catalog, channel templates, per-repository language |
+| Owners | Several GitHub owners in one deployment: routing, per-owner GitHub credentials, webhook secrets, API keys, Jira, Slack, policies and model key ([#9](https://github.com/maxsharlaev/autoreview-bot/issues/9), [MULTI_OWNER.md](MULTI_OWNER.md)) | Owners in the database or an admin UI, hot reload, per-owner quotas |
+| Security | Mandatory webhook signatures, scoped API keys, public-repository redaction ([SECURITY.md](../SECURITY.md)) | Deny-by-default for an empty allowlist |
+| Quality | Unit tests; Postgres migration and isolation tests in CI; lint/format/image build; docs coverage test | Redis/ARQ and external contract tests, local pre-commit hooks |
 
-## Month 0 — prepare public repository (1–2 weeks)
+## Month 0 — prepare the public repository (1–2 weeks)
 
 1. Check licenses of dependencies and bundled assets, including Grafana templates, alongside the Apache-2.0 license.
-2. Review release files, examples, documentation and CI for credentials and organization-specific data.
-3. Add `CONTRIBUTING.md`, `SECURITY.md`, version support policy and neutral sample configuration.
-4. Check that README describes actual behavior, especially webhook authorization, integrations and current limits.
+2. Review published files, examples, documentation and CI for credentials and organization-specific data.
+3. Public `CONTRIBUTING.md`, `SECURITY.md`, version support policy and a neutral sample configuration (done; keep current).
+4. Check that the docs describe actual behaviour: capabilities, limits, webhook security, how to run, integration state. Record the base architecture and event flow.
 
-**Exit:** an independent user can deploy to a test repository; an audit of the repository to be published finds no internal data.
+**Exit:** an independent user can read the docs and deploy to a test repository; a repeated audit of the published repository finds no internal data.
 
 ## Month 1 — reliable review
 
-1. Check the current PR head SHA before persistence and publication. Make repeated webhooks and concurrent runs atomic.
-2. Reject model output with a wrong SHA, invalid diff path or line, or inconsistent previous-finding status. Mark incomplete coverage explicitly.
-3. Deny access when the repository allowlist is empty; separate manual API authorization from mandatory GitHub webhook signature validation. Test author permissions, forks and sandbox boundaries.
-4. Add Postgres/Redis/ARQ integration tests and a synthetic PR end-to-end test using fake GitHub/Jira APIs. Cover a changed SHA, duplicate webhook, publish failure and queue recovery.
-5. Add pre-commit and matching CI checks for Ruff lint/format, YAML/JSON/TOML validity, secrets, large files, conflict markers and whitespace.
-6. Separate structured findings from published text. English prompt and comment defaults are available; remove remaining hardcoded output text and define compatibility for existing mixed-language deployments.
+1. Recheck the current PR head before persistence and publication for every repository; a cancelled or stale run must not change the comment or Jira. (Atomic deduplication of repeated and concurrent deliveries and the pickup check are done; the pre-publication check exists for private repositories.)
+2. Reject model output with a wrong SHA, a path outside the diff, an impossible line or an inconsistent previous-finding status. Mark incomplete coverage explicitly.
+3. Deny by default when the repository allowlist is empty. Test author permissions, forks and sandbox boundaries. (Manual API authorization and mandatory webhook signatures are already separate.)
+4. Tests: unit tests for finding transitions and the verifier; Postgres/Redis/ARQ integration; an end-to-end synthetic PR through fake GitHub/Jira APIs; a new SHA during review, a duplicate webhook, a publish failure and queue recovery.
+5. Local pre-commit hooks and matching CI checks: Ruff lint/format, YAML/JSON/TOML validity, secrets, large files, conflict markers and whitespace.
+6. Separate structured findings and statuses from published text. English prompt and comment defaults exist; remove remaining hardcoded output text and define compatibility with older mixed-language output.
 
-**Exit:** a PR SHA has predictable state, stale runs do not publish, and local and CI checks agree.
+**Exit:** one PR and one SHA give a predictable state; a stale run does not publish; the test pipeline reproduces locally and in CI.
 
 ## Month 2 — issue tracker and observability
 
-1. Define `IssueTracker` operations for key lookup, issue/acceptance-criteria read, comment and allowed status transition; adapt Jira first.
-2. Specify when Jira updates are allowed, including closed issues, permission failures, project mismatches and repeated delivery. Record each decision and result. Treat issue creation as a separate product decision.
-3. Add anonymized Jira contract tests, an end-to-end PR → issue → review → update test and a no-write preview mode.
-4. Review metric names, units and cardinality. Correlate `review_run_id` across stages and logs. Measure queue, model and publication time; connector errors and incomplete coverage. Set SLOs, exercise alerts and check logs and dashboards for tokens, PR code and issue text.
-5. Build a locale catalog and versioned output templates for PR, Jira, Slack and digest. Support installation or repository locale, English fallback, preview and safe escaping. Test clean, blocked, failed and partial reviews in each language.
+1. Define `IssueTracker`: key lookup, fields and acceptance criteria, comment and an allowed status transition. Jira is the first implementation.
+2. Specify when Jira updates are allowed: which results need a comment, when a transition is allowed, missing permissions, closed issues, project mismatches and repeated delivery. Record each operation and its reason. Issue creation is a separate product decision.
+3. Anonymized Jira contract tests, an end-to-end `PR → issue → review → comment/transition` scenario and a no-write preview mode.
+4. Observability review: metric names, units and cardinality; correlate `review_run_id` across stages and logs; measure queue, model and publication time, connector errors and incomplete coverage. Set SLOs, exercise alerts with injected failures, and check that logs and dashboards expose no tokens, PR code or issue text.
+5. A locale catalog and versioned output templates for PR, Jira, Slack and digest: installation or repository language, English fallback, template preview and safe escaping of untrusted text. Render tests for a clean PR, P0/P1, failures and partial coverage in each language.
 
-**Exit:** operators can explain issue updates and failures; localized channel templates are tested.
+**Exit:** operators see issue state and the reasons for actions; Jira can be checked without side effects; alerts point to the failing stage; English works without configuration and localized templates pass snapshot tests.
 
 ## Month 3 — interchangeable hosts and CLIs
 
-1. Define a `CodeHost` contract for PR/MR events, diff/revision access, clone/auth, permissions, publication and duplicate delivery. Adapt GitHub without public behavior changes.
-2. Add a second host, such as GitLab, based on demand and available permissions. Run the same contract tests against both.
-3. Define `ReviewerRunner` inputs, model version, limits, cancellation, timeout, token/cost reporting and structured output. Adapt Codex and add a second CLI with a capability matrix.
-4. Version normalized findings and run events independently of vendor schemas.
+1. A `CodeHost` contract: PR/MR events, diff and revisions, clone/auth, permissions, publication and duplicate delivery. Move the GitHub adapter onto it without public behaviour changes.
+2. A second host, such as GitLab, based on demand and available permissions, with the same contract tests for both.
+3. A `ReviewerRunner` contract: model version, input context, limits, cancellation, timeout, cost/tokens and structured output. Move Codex onto it; add a second CLI with its own tests and a capability matrix.
+4. Version the normalized finding format and run events independently of one vendor's schema.
 
-**Exit:** equivalent reviews run through two code hosts and two reviewer CLIs; unsupported features are explicit.
+**Exit:** the same review runs through two code hosts and two reviewer CLIs; unsupported features are explicit in the configuration.
 
-## Month 4 — independent validation and optional admin UI
+## Month 4 — independent validation and an optional admin UI
 
-1. Add cross-validation: a second runner receives code, diff and the first verdict and confirms, disputes or refers each finding to a human. Grok is a candidate after checking API/CLI availability, data terms and cost.
-2. Store separate responses, model versions and disagreement reasons. Escalate ambiguous P0/P1 findings to people. Cap cost, runtime and concurrency.
-3. Add an admin UI behind `ADMIN_UI_ENABLED=false`: queue, runs, filters, stage detail, safe retry and audit log. Use separate authentication and roles; limit exposure of source, issues and secrets. Keep the status API usable without the UI.
-4. Evaluate P0/P1 precision, false positives, coverage, model agreement, latency and cost on anonymized PRs before enabling validation broadly.
+1. Cross-validation: the main runner produces a verdict and evidence; a second runner gets the code, diff and verdict and confirms, disputes or refers each finding to a human. Grok is a candidate second provider after checking API/CLI availability, data terms and cost.
+2. Store separate responses, model versions, disagreement reasons and the final decision. A validator never confirms its own output; ambiguous P0/P1 go to a human. Cap cost, runtime and concurrency.
+3. An optional admin UI (`ADMIN_UI_ENABLED=false` by default): queue and runs, filters by host/repository/status, stage details, safe retry and an audit log. Separate authentication and roles; limit exposure of code, issues and secrets. The status API keeps working without the UI. English first, using the same locale catalog.
+4. Evaluate on anonymized PRs: P0/P1 precision, false positives, coverage, model agreement, latency and cost, before enabling validation broadly.
 
-**Exit:** operators can inspect tasks in an optional UI, and independent validation has a measurable benefit and cost.
+**Exit:** operators follow the task lifecycle in a UI that can be switched off; independent validation adds an explainable result at a measurable cost.
 
 ## Month 5 — public beta
 
-1. Test installation from a clean machine with a new project, GitHub/Jira and then the second host/runner. Publish compatibility and migration guidance.
-2. Test load, cancellation, queue recovery, backups, schema upgrades, token rotation and disabling integrations.
-3. Publish deployment examples with closed database/Redis ports, protected metrics, TLS and minimal integration permissions.
-4. Decide separately, using quality data, whether a blocking check is justified. Until then reviews remain advisory.
+1. Install from a clean machine with a new project: GitHub and Jira, then the second host and runner. Publish a compatibility matrix and configuration migration guidance.
+2. Test load, cancellation and queue recovery, database backups, schema upgrades, token rotation and disabling integrations.
+3. Deployment examples with closed database/Redis ports, protected metrics, TLS and minimal integration permissions.
+4. Decide separately, using quality data, whether a blocking check is justified. Until then reviews stay advisory.
 
-**Exit:** a public beta with reproducible setup, documented limits and a tested recovery path.
+**Exit:** a public beta with documented limits, reproducible setup and a tested recovery path.
 
 ## Rules throughout
 
-- Each integration needs contract, failure/retry and permission tests before entering the sample configuration.
-- Fixtures use fictional organizations, repos, issues and tokens. Raw PR diffs and issues stay out of public logs and telemetry.
-- Automatic Jira/code-host writes need an idempotency key, audit record and enable switch.
-- Public docs distinguish shipped, experimental and planned behavior.
-- The model output schema stays independent of display language; translations never change severity, IDs, paths or machine statuses.
+- A new integration passes contract, failure/retry and permission tests before it enters the sample configuration.
+- Fixtures use fictional organizations, repositories, issues and tokens. PR diffs and issues stay out of public logs and telemetry.
+- Every automatic Jira or code-host write has an idempotency key, an audit record and an enable switch.
+- Public docs distinguish shipped, experimental and planned behaviour.
+- The model output schema is independent of display language; translations and templates never change severity, ids, paths or machine statuses.

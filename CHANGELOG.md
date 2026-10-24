@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Documentation restructure** (English primary, Russian mirror): a short
+  README with a docs index (`docs/README.md`), and new reference pages
+  `docs/CONFIGURATION.md` (every `config.yaml` key with type, default, range and
+  per-owner override), `docs/ENVIRONMENT.md` (every environment variable and the
+  service that reads it), `docs/API.md` (endpoints, fields and error codes),
+  `docs/MULTI_OWNER.md`, `docs/UPGRADE.md`, `docs/DATA_HANDLING.md`,
+  `docs/FAQ.md`, and English `docs/PROGRESS_STATUS.md` and
+  `docs/PUBLIC_DISCLOSURE.md`. `docs/OPERATIONS.md` is now
+  `docs/TROUBLESHOOTING.md` with a table of all error and skip codes.
+  `SECURITY.md` gained a threat model, minimal permissions, secret handling and
+  a hardening checklist; `CONTRIBUTING.md` covers database tests and migration
+  rules. `tests/test_docs.py` checks that every config key and environment
+  variable is documented and that relative links and anchors resolve.
+  `.env.example` lists every variable; `RUN_MIGRATIONS`, which no code reads,
+  is no longer set there.
+
 - **Review progress status** (#7): webhook runs report progress on the PR head
   as an `autoreview` check run (GitHub App, needs Checks: Read and write) or
   commit status (PAT, needs Commit statuses: Read and write). On by default

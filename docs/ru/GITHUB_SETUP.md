@@ -115,7 +115,7 @@ curl -H "Authorization: Bearer $AI_REVIEW_API_KEY" \
 
 ## Несколько owner'ов
 
-У каждого owner'а в блоке `owners:` файла `config.yaml` свои креды GitHub и webhook-секрет; в YAML указываются только имена переменных (см. [README](../../README.md#multiple-owners)). Без явных `*_env` имена такие: `OWNER_<ID>_GITHUB_TOKEN` (PAT) или `OWNER_<ID>_GITHUB_APP_ID` и `OWNER_<ID>_GITHUB_APP_PRIVATE_KEY` (App), `OWNER_<ID>_GITHUB_WEBHOOK_SECRET` и `OWNER_<ID>_REVIEW_API_KEY`; `<ID>` в верхнем регистре, `-` заменяется на `_`.
+У каждого owner'а в блоке `owners:` файла `config.yaml` свои креды GitHub и webhook-секрет; в YAML указываются только имена переменных (см. [README](../MULTI_OWNER.md)). Без явных `*_env` имена такие: `OWNER_<ID>_GITHUB_TOKEN` (PAT) или `OWNER_<ID>_GITHUB_APP_ID` и `OWNER_<ID>_GITHUB_APP_PRIVATE_KEY` (App), `OWNER_<ID>_GITHUB_WEBHOOK_SECRET` и `OWNER_<ID>_REVIEW_API_KEY`; `<ID>` в верхнем регистре, `-` заменяется на `_`.
 
 Два способа подключить ещё одну организацию:
 
