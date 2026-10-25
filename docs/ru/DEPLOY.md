@@ -27,7 +27,7 @@ Compose из корня репозитория (`docker-compose.yml`):
 | `api` | FastAPI | 8000 | `127.0.0.1:8000` → HTTPS reverse proxy |
 | `worker` | Codex + clone + комментарий | 9100 | **Нет**: только Docker-сеть (`expose`), поэтому реплики можно масштабировать |
 
-Compose не публикует порты Postgres и Redis на хост. API и метрики worker доступны только через `127.0.0.1`; для внешнего HTTPS и удалённого Prometheus настройте reverse proxy или закрытую сеть.
+Compose не публикует порты Postgres и Redis на хост. API публикуется только на `127.0.0.1:8000`, метрики worker на хост не публикуются вовсе; для внешнего HTTPS и удалённого Prometheus настройте reverse proxy или закрытую сеть.
 
 Worker **обязан** стартовать с `security_opt: seccomp:unconfined` и `apparmor:unconfined` (уже в Compose). Без этого Codex/`bwrap` в Docker падает.
 
@@ -43,7 +43,7 @@ Worker **обязан** стартовать с `security_opt: seccomp:unconfine
 | GitHub: **либо** fine-grained PAT, **либо** доступ создать GitHub App | clone + PR comment |
 | Jira (если нужно): URL, email сервис-аккаунта, API token, проект → `rework_status` | иначе в `config.yaml` выключить `jira_comment` / `jira_transition` |
 | Публичный HTTPS hostname, куда GitHub/Actions достучатся | например `https://review.internal.example.com` |
-| Куда скрейпить метрики | IP/DNS api:8000 и worker:9100 с ноды Prometheus |
+| Куда скрейпить метрики | API: IP/DNS `api:8000` с ноды Prometheus; worker: `worker:9100` только из Docker-сети стека (DNS-обнаружение реплик) |
 
 PAT (если без App), repository permissions:
 
@@ -165,7 +165,7 @@ CI **этого** репозитория (`ci.yml`) ревью не запуск
 
 Приложение **не** шлёт метрики и логи наружу. Скрейпер ходит **к нам**.
 
-1. Prometheus: влить [observability/prometheus-scrape.yml](../../observability/prometheus-scrape.yml). Targets: `api:8000` и `worker:9100` (или host/IP, если scrape снаружи Docker-сети). Prometheus должен быть в Docker-сети стека: job worker находит все реплики через `dns_sd_configs` по имени сервиса `worker`. Job names оставить `open-pr-review-api` / `open-pr-review-worker`.
+1. Prometheus: влить [observability/prometheus-scrape.yml](../../observability/prometheus-scrape.yml). API: `api:8000` (или host/IP, если scrape снаружи Docker-сети). Worker: Prometheus должен быть в Docker-сети стека (или иметь явную маршрутизацию в неё); job worker находит все реплики через `dns_sd_configs` по имени сервиса `worker`. Чтобы скрейпить worker с хоста, добавьте `docker-compose.override.yml` с `ports: ["127.0.0.1:9100:9100"]` для `worker` (см. [UPGRADE.md](../UPGRADE.md)); тогда worker нельзя масштабировать. Job names оставить `open-pr-review-api` / `open-pr-review-worker`.
 2. Rule file: [observability/alerts.yml](../../observability/alerts.yml) — `OpenPrReviewWorkerDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
 3. Grafana: Import [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json). Datasource UID по умолчанию `prometheus` и `loki` — перенаправить на ваши.
 4. Логи: ваш агент (Promtail/Alloy) читает stdout контейнеров `api` и `worker`. Метки: Compose уже ставит `OPEN_PR_REVIEW_SERVICE`. Loki-клиента в сервисе **нет**; панель логов в дашборде пустая, пока агент не пишет в ваш Loki.
