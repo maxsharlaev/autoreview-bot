@@ -703,6 +703,7 @@ async def _run_review(
             error_code=SKIP_TOO_LARGE,
             visibility=visibility,
             force_public_redaction=publication == "public_fallback",
+            tracking=tracking,
         )
         progress.event(f"completed with skip {SKIP_TOO_LARGE}")
         return await _complete(session, run, started, SKIP_TOO_LARGE, verified, config, context.prompt_version)
@@ -805,6 +806,7 @@ async def _run_review(
                 error_code=error_code,
                 visibility=visibility,
                 force_public_redaction=publication == "public_fallback",
+                tracking=tracking,
             )
             return await _fail(session, run, started, error_code)
         public_alignment = "unknown" if visibility == "public" else None
@@ -822,7 +824,6 @@ async def _run_review(
         if checkout is not None:
             cleanup_checkout(checkout)
 
-    await _advance_phase(session, tracking, run, PHASE_PUBLISHING)
     verified.coverage["files_total"] = context.files_total
     verified.coverage["files_reviewed"] = context.files_reviewed
     verified.coverage["skipped_paths"] = context.skipped_paths
@@ -888,6 +889,7 @@ async def _run_review(
         unredacted=verified,
         unredacted_transitions=transitions,
         jira_in_context=bool(jira_text) and context_visibility == "private",
+        tracking=tracking,
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
@@ -1626,7 +1628,11 @@ async def _publish(
     unredacted: VerifiedReview | None = None,
     unredacted_transitions: list[FindingTransitionView] | None = None,
     jira_in_context: bool = False,
+    tracking: _ProgressTracking | None = None,
 ) -> None:
+    # Every publication path goes through here, so the progress status always shows this phase.
+    if tracking is not None and session is not None:
+        await _advance_phase(session, tracking, run, PHASE_PUBLISHING)
     sensitive = review_has_sensitive_content(
         unredacted or verified,
         unredacted_transitions if unredacted_transitions is not None else transitions,

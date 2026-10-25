@@ -198,3 +198,65 @@ async def test_phase_not_written_over_a_closed_status(monkeypatch, tmp_path) -> 
     await h.review()
     texts = [item["description"] for item in h.github.payloads("status")]
     assert not any("Reading repository context" in t or "Running model analysis" in t for t in texts)
+
+
+def _phase_texts(h) -> list[str]:
+    """Phase part of every pending commit status, in order (timestamps stripped)."""
+    return [p["description"].split("] ", 1)[1] for p in h.github.payloads("status") if p["state"] == "pending"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_model_output_reports_publishing_before_final_status(monkeypatch, tmp_path) -> None:
+    import json
+
+    from app.services import orchestrator
+
+    def invalid(_raw):
+        raise json.JSONDecodeError("not json", "", 0)
+
+    h = Harness(monkeypatch, tmp_path, kind="pat")
+    monkeypatch.setattr(orchestrator, "parse_json_payload", invalid)
+    await h.queue()
+    result = await h.review()
+
+    assert result.status == "failed" and result.error_code == "AI_OUTPUT_INVALID"
+    h.publisher.publish.assert_awaited_once()
+    assert _phase_texts(h) == SEQUENCE
+    assert h.github.payloads("status")[-1]["state"] == "failure"
+
+
+@pytest.mark.asyncio
+async def test_context_size_skip_goes_fetching_context_publishing(monkeypatch, tmp_path) -> None:
+    from app.services import orchestrator
+
+    h = Harness(monkeypatch, tmp_path, kind="pat")
+    big = SimpleNamespace(
+        skip_reason="PR_TOO_LARGE_FOR_AI_REVIEW",
+        files_total=500,
+        files_reviewed=0,
+        diff_lines=1,
+        truncated=True,
+        skipped_paths=[],
+        prompt_version="t",
+        prompt="p",
+        changed_paths=set(),
+    )
+    monkeypatch.setattr(orchestrator, "build_context", lambda **_kw: big)
+    await h.queue()
+    await h.review()
+
+    h.publisher.publish.assert_awaited_once()
+    h.codex.assert_not_awaited()
+    assert _phase_texts(h) == [SEQUENCE[0], SEQUENCE[1], SEQUENCE[2], SEQUENCE[4]]
+    assert h.github.payloads("status")[-1]["state"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_normal_path_phase_sequence_unchanged(monkeypatch, tmp_path) -> None:
+    h = Harness(monkeypatch, tmp_path, kind="pat", verified=_verified([_finding("P2")]))
+    await h.queue()
+    await h.review()
+    assert _phase_texts(h) == SEQUENCE
+    # The publishing phase is written before the comment is published.
+    publishing_index = next(i for i, c in enumerate(h.github.calls) if "Publishing results" in str(c))
+    assert publishing_index < len(h.github.calls) - 1
