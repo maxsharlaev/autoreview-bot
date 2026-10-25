@@ -62,8 +62,7 @@ on:
 ```bash
 curl -s http://localhost:8000/health
 curl -s http://localhost:8000/is-ready
-curl -s http://localhost:9100/metrics | findstr open_pr_review
-# Linux: curl -s http://localhost:9100/metrics | grep open_pr_review
+docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
 ```
 
 Снимок очереди и последних падений (тот же `REVIEW_API_KEY`, что для ручного ревью):
@@ -98,7 +97,7 @@ Grafana (ваш инстанс): скрейпить `api:8000/metrics` и `worke
 2. `queue_jobs > 0` и `in_flight.running = 0` → **worker не потребляет очередь**.
    - `docker compose ps` — контейнер worker Up?
    - `docker compose logs worker` — есть `worker ready`? Упал Codex/Python при старте?
-   - Порт `9100` слушается? (`curl localhost:9100/metrics`)
+   - Порт `9100` слушается? (`docker compose exec worker …` из блока «60 секунд без Grafana»; порт worker на хост не публикуется)
 3. `last_failures[].error_code = CODEX_QUOTA` → **квоты OpenAI нет**. Ревью *не висит*: оно падает за ~30–40 с. Пополнить billing организации, к которой привязан `sk-proj-…` в `.env`. Пока кредитов нет, повторные POST только копят `failed`.
 4. `CODEX_AUTH` → в sandbox не уходит ключ. Проверить `OPENAI_API_KEY` в `.env` worker (не только api). После смены — recreate worker.
 5. `status=completed` сразу на том же SHA → **идемпотентность webhook**. Ручной `POST /api/v1/reviews` по умолчанию `force: true`. Action в примере шлёт `force: false`.
