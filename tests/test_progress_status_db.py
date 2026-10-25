@@ -1302,3 +1302,70 @@ async def test_failed_phase_commit_does_not_poison_the_review_session(session_fa
     descriptions = [p["description"] for p in h.github.payloads("status")]
     assert any(d.endswith("Running model analysis…") for d in descriptions)
     assert h.github.payloads("status")[-1]["state"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_publishing_phase_is_written_while_the_review_holds_fk_locks(
+    session_factory, monkeypatch, tmp_path
+) -> None:
+    import time
+
+    from app.config import AppConfig
+    from app.models import ReviewRun, TaskSnapshot
+    from app.services import orchestrator
+    from app.services.progress_status import PHASE_PUBLISHING, ProgressReporter
+    from sqlalchemy import select
+
+    h = Harness(monkeypatch, tmp_path, kind="pat", verified=_verified([_finding("P2")]))
+    reporter = ProgressReporter(h.github, "commit_status", AppConfig())
+    queued = await _queue(session_factory, reporter, HEAD)
+
+    async with session_factory() as session:
+        run = (await session.execute(select(ReviewRun).where(ReviewRun.id == queued.id))).scalar_one()
+        await session.commit()
+        # A row referencing the run, flushed but not committed: the review transaction now holds
+        # a KEY SHARE lock on the run row, as it does just before publication.
+        session.add(TaskSnapshot(review_run_id=run.id, issue_key="ABC-12", jira_status=None, warning=None))
+        await session.flush()
+        tracking = orchestrator._ProgressTracking(
+            reporter=reporter,
+            run=run,
+            run_id=str(run.id),
+            full_name="org/repo",
+            number=7,
+            sha=HEAD,
+            state=run.progress_status,
+        )
+        started = time.monotonic()
+        await orchestrator._advance_phase(session, tracking, run, PHASE_PUBLISHING)
+        elapsed = time.monotonic() - started
+        await session.rollback()
+
+    assert elapsed < orchestrator.PHASE_LOCK_TIMEOUT_MS / 1000 / 2, elapsed
+    async with session_factory() as session:
+        stored = (await session.execute(select(ReviewRun).where(ReviewRun.id == queued.id))).scalar_one()
+    assert stored.progress_status["phase"] == PHASE_PUBLISHING
+    assert h.github.payloads("status")[-1]["description"].endswith("(5/5) Publishing results…")
+
+
+@pytest.mark.asyncio
+async def test_normal_review_reports_the_publishing_phase_on_postgres(session_factory, monkeypatch, tmp_path) -> None:
+    from app.config import AppConfig
+    from app.models import TaskSnapshot
+    from app.services import orchestrator
+    from app.services.progress_status import ProgressReporter
+    from sqlalchemy import select
+
+    real_snapshot = orchestrator._persist_snapshot
+    h = Harness(monkeypatch, tmp_path, kind="pat", verified=_verified([_finding("P2")]))
+    # The real snapshot write: its row references the run, as in production, before publication.
+    monkeypatch.setattr(orchestrator, "_persist_snapshot", real_snapshot)
+    queued = await _queue(session_factory, ProgressReporter(h.github, "commit_status", AppConfig()), HEAD)
+    result = await _worker(session_factory, h)(queued.id)
+
+    assert result.status == "completed"
+    async with session_factory() as session:
+        assert (await session.execute(select(TaskSnapshot))).scalars().all()
+    pending = [p["description"] for p in h.github.payloads("status") if p["state"] == "pending"]
+    assert pending[-1].endswith("(5/5) Publishing results…"), pending
+    assert h.github.payloads("status")[-1]["state"] == "success"

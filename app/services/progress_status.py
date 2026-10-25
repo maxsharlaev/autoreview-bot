@@ -360,6 +360,11 @@ async def locked_state(session: Any, run_id: Any) -> tuple[bool, str | None, dic
 
     The lock serializes the API's queued write with the worker's writes, so neither side
     creates a second check run or overwrites a newer state. Returns (found, status, state).
+
+    FOR NO KEY UPDATE, not FOR UPDATE: status writers still exclude each other, but the lock
+    does not conflict with the KEY SHARE locks that rows referencing the run (task snapshots,
+    finding transitions) hold until the review transaction commits. Writers never change the
+    run's key.
     """
     from sqlalchemy import select
 
@@ -367,7 +372,9 @@ async def locked_state(session: Any, run_id: Any) -> tuple[bool, str | None, dic
 
     row = (
         await session.execute(
-            select(ReviewRun.status, ReviewRun.progress_status).where(ReviewRun.id == run_id).with_for_update()
+            select(ReviewRun.status, ReviewRun.progress_status)
+            .where(ReviewRun.id == run_id)
+            .with_for_update(key_share=True)
         )
     ).first()
     if row is None:
