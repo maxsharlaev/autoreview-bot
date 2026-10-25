@@ -31,14 +31,15 @@ While a run is open, the check run summary and the commit status description sho
 
 | Phase | Text | Check run | Commit status |
 | --- | --- | --- | --- |
-| queued | `[2026-10-24 21:20:01 UTC] Queued, waiting for a worker…` | `queued` | `pending` |
-| fetching | `[2026-10-24 21:20:05 UTC] Fetching pull request and diff…` | `in_progress` | `pending` |
-| context | `[2026-10-24 21:20:07 UTC] Reading repository context…` (Jira issue, clone) | `in_progress` | `pending` |
-| analyzing | `[2026-10-24 21:20:12 UTC] Running model analysis…` | `in_progress` | `pending` |
-| publishing | `[2026-10-24 21:23:24 UTC] Publishing results…` | `in_progress` | `pending` |
+| queued | `[2026-10-24 21:20:01 UTC] (1/5) Queued, waiting for a worker…` | `queued` | `pending` |
+| fetching | `[2026-10-24 21:20:05 UTC] (2/5) Fetching pull request and diff…` | `in_progress` | `pending` |
+| context | `[2026-10-24 21:20:07 UTC] (3/5) Reading repository context…` (Jira issue, clone) | `in_progress` | `pending` |
+| analyzing | `[2026-10-24 21:20:12 UTC] (4/5) Running model analysis…` | `in_progress` | `pending` |
+| publishing | `[2026-10-24 21:23:24 UTC] (5/5) Publishing results…` | `in_progress` | `pending` |
 
 - The status is written once per phase change, never on a timer: at most five writes before the final one, so GitHub rate limits are not a concern. A repeated phase writes nothing.
-- Each phase line fits the 140-character commit status limit; the timestamp is always kept.
+- Each phase has a fixed step number after the timestamp, `(n/5)`. A path that skips a phase keeps the numbers: a PR too large for review goes from `(3/5)` to `(5/5)`.
+- Each phase line fits the 140-character commit status limit; truncation shortens only the phase text, the timestamp and the step are always kept.
 - Phase writes are best effort like every other status write: a failure is logged and the review goes on. The phase is stored in its own short database transaction (run row locked, waiting at most 2 s), separate from the review's own transaction, so a failed phase write cannot affect the review.
 - Status texts are English only; `language.*` affects the review comment, not the status.
 - The final commit status description has no review time, so it always fits 140 characters with the findings and the Jira task. The check run summary and the review comment keep the full time and duration.

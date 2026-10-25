@@ -31,14 +31,15 @@ progress_status:
 
 | Фаза | Текст | Check run | Commit status |
 | --- | --- | --- | --- |
-| queued | `[2026-10-24 21:20:01 UTC] Queued, waiting for a worker…` | `queued` | `pending` |
-| fetching | `[2026-10-24 21:20:05 UTC] Fetching pull request and diff…` | `in_progress` | `pending` |
-| context | `[2026-10-24 21:20:07 UTC] Reading repository context…` (задача Jira, клон) | `in_progress` | `pending` |
-| analyzing | `[2026-10-24 21:20:12 UTC] Running model analysis…` | `in_progress` | `pending` |
-| publishing | `[2026-10-24 21:23:24 UTC] Publishing results…` | `in_progress` | `pending` |
+| queued | `[2026-10-24 21:20:01 UTC] (1/5) Queued, waiting for a worker…` | `queued` | `pending` |
+| fetching | `[2026-10-24 21:20:05 UTC] (2/5) Fetching pull request and diff…` | `in_progress` | `pending` |
+| context | `[2026-10-24 21:20:07 UTC] (3/5) Reading repository context…` (задача Jira, клон) | `in_progress` | `pending` |
+| analyzing | `[2026-10-24 21:20:12 UTC] (4/5) Running model analysis…` | `in_progress` | `pending` |
+| publishing | `[2026-10-24 21:23:24 UTC] (5/5) Publishing results…` | `in_progress` | `pending` |
 
 - Статус пишется только при смене фазы, не по таймеру: не больше пяти записей до финальной, лимиты GitHub не страдают. Повтор той же фазы ничего не пишет.
-- Строка фазы всегда укладывается в лимит commit status 140 символов; время сохраняется.
+- У каждой фазы фиксированный номер шага после времени, `(n/5)`. Если путь пропускает фазу, номера не меняются: слишком большой PR идёт с `(3/5)` сразу на `(5/5)`.
+- Строка фазы всегда укладывается в лимит commit status 140 символов; обрезается только текст фазы, время и номер шага сохраняются.
 - Запись фазы — best effort, как и остальные записи статуса: ошибка пишется в лог, ревью продолжается. Фаза сохраняется в отдельной короткой транзакции БД (строка прогона блокируется, ожидание не больше 2 с), отдельно от транзакции ревью, поэтому сбой записи фазы не влияет на ревью.
 - Тексты статуса только на английском; `language.*` влияет на комментарий ревью, а не на статус.
 - В финальном описании commit status времени ревью нет, поэтому оно всегда укладывается в 140 символов вместе с замечаниями и задачей Jira. Summary check run и комментарий ревью сохраняют полное время и длительность.

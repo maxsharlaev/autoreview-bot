@@ -91,7 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Review phases in the progress status**: while a review runs, the check run
   summary and the commit status description show the current phase and when it
-  started, e.g. `[2026-10-24 21:20:05 UTC] Running model analysis…` (queued,
+  started, with a fixed step number, e.g.
+  `[2026-10-24 21:20:05 UTC] (4/5) Running model analysis…` (queued,
   fetching PR and diff, reading repository context, running model analysis,
   publishing results). Written once per phase change, best effort, always within
   140 characters. A phase timestamp that stops advancing shows a hung review.

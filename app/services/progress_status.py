@@ -65,6 +65,10 @@ PHASE_TEXT = {
     PHASE_ANALYZING: "Running model analysis…",
     PHASE_PUBLISHING: "Publishing results…",
 }
+# Fixed step number per phase, shown as "(4/5)". A path that skips a phase keeps the numbers
+# (a too-large PR goes from 3/5 to 5/5).
+PHASES = tuple(PHASE_TEXT)
+PHASE_STEP = {phase: index for index, phase in enumerate(PHASES, start=1)}
 
 Mode = Literal["check_run", "commit_status"]
 Conclusion = Literal["success", "neutral", "skipped", "cancelled", "failure"]
@@ -99,8 +103,13 @@ class Outcome:
 
 
 def phase_line(phase: str, started: datetime) -> str:
-    """`[2026-10-24 21:20:05 UTC] Running model analysis…`, always within the commit status limit."""
+    """`[2026-10-24 21:20:05 UTC] (4/5) Running model analysis…`, always within the commit status limit.
+
+    Truncation shortens only the phase text; the timestamp and the step are always kept.
+    """
     prefix = f"[{format_utc(started)}] "
+    if phase in PHASE_STEP:
+        prefix += f"({PHASE_STEP[phase]}/{len(PHASES)}) "
     text = PHASE_TEXT.get(phase, phase)
     room = _DESCRIPTION_LIMIT - len(prefix)
     if len(text) > room:

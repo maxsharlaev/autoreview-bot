@@ -19,11 +19,11 @@ from tests.test_progress_status import HEAD, Harness, _finding, _verified
 
 STAMP = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\] "
 SEQUENCE = [
-    "Queued, waiting for a worker…",
-    "Fetching pull request and diff…",
-    "Reading repository context…",
-    "Running model analysis…",
-    "Publishing results…",
+    "(1/5) Queued, waiting for a worker…",
+    "(2/5) Fetching pull request and diff…",
+    "(3/5) Reading repository context…",
+    "(4/5) Running model analysis…",
+    "(5/5) Publishing results…",
 ]
 
 
@@ -33,7 +33,29 @@ def _stamp(text: str) -> datetime:
 
 def test_phase_line_format() -> None:
     moment = datetime(2026, 10, 24, 21, 20, 5, tzinfo=UTC)
-    assert phase_line(PHASE_ANALYZING, moment) == "[2026-10-24 21:20:05 UTC] Running model analysis…"
+    assert phase_line(PHASE_ANALYZING, moment) == "[2026-10-24 21:20:05 UTC] (4/5) Running model analysis…"
+
+
+def test_step_total_comes_from_the_phase_list() -> None:
+    assert progress_status.PHASES == tuple(PHASE_TEXT)
+    assert progress_status.PHASE_STEP == {
+        "queued": 1,
+        "fetching": 2,
+        "context": 3,
+        "analyzing": 4,
+        "publishing": 5,
+    }
+
+
+def test_long_phase_text_truncation_keeps_timestamp_and_step(monkeypatch) -> None:
+    monkeypatch.setitem(PHASE_TEXT, PHASE_ANALYZING, "y" * 500)
+    line = phase_line(PHASE_ANALYZING, datetime(2026, 10, 24, 21, 20, 5, tzinfo=UTC))
+    assert len(line) == 140
+    assert line.startswith("[2026-10-24 21:20:05 UTC] (4/5) y")
+    assert line.endswith("…")
+    for outcome in (phase_outcome(PHASE_ANALYZING, datetime(2026, 10, 24, tzinfo=UTC)),):
+        assert len(progress_status._one_line(outcome)) <= 140
+        assert "(4/5)" in outcome.summary
 
 
 def test_phase_line_long_text_fits_and_keeps_timestamp(monkeypatch) -> None:
@@ -248,6 +270,8 @@ async def test_context_size_skip_goes_fetching_context_publishing(monkeypatch, t
     h.publisher.publish.assert_awaited_once()
     h.codex.assert_not_awaited()
     assert _phase_texts(h) == [SEQUENCE[0], SEQUENCE[1], SEQUENCE[2], SEQUENCE[4]]
+    # Step numbers are fixed per phase: the skipped analysis step is not renumbered.
+    assert [t.split(")", 1)[0] + ")" for t in _phase_texts(h)] == ["(1/5)", "(2/5)", "(3/5)", "(5/5)"]
     assert h.github.payloads("status")[-1]["state"] == "success"
 
 
