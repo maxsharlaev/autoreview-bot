@@ -179,3 +179,28 @@ def test_relative_links_resolve(source: Path, target: str) -> None:
     assert resolved.exists(), f"{source.relative_to(ROOT)}: broken link {target}"
     if anchor and resolved.suffix == ".md":
         assert anchor in _anchors(resolved), f"{source.relative_to(ROOT)}: missing anchor {target}"
+
+
+# --- Russian mirror -----------------------------------------------------------
+
+DOCS = ROOT / "docs"
+RU = DOCS / "ru"
+
+
+def _heading_levels(path: Path) -> list[int]:
+    text = FENCE.sub("", path.read_text(encoding="utf-8"))
+    return [len(m) for m in re.findall(r"^(#{1,6})\s", text, re.MULTILINE)]
+
+
+def test_russian_mirror_has_the_same_files() -> None:
+    english = {p.name for p in DOCS.glob("*.md")}
+    russian = {p.name for p in RU.glob("*.md")}
+    assert english == russian, f"missing in docs/ru: {sorted(english - russian)}; extra: {sorted(russian - english)}"
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in DOCS.glob("*.md")))
+def test_russian_mirror_has_the_same_heading_structure(name: str) -> None:
+    mirror = RU / name
+    if not mirror.exists():
+        pytest.fail(f"docs/ru/{name} is missing")
+    assert _heading_levels(mirror) == _heading_levels(DOCS / name), f"docs/ru/{name}: headings differ from docs/{name}"
