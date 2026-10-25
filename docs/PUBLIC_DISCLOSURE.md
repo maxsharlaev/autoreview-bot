@@ -24,7 +24,7 @@ The review model and the PR description/title generator do not receive issue tex
 
 With `redact` (default) a finding is redacted when its category is `security`, or when its title, scenario, evidence or recommendation matches security keywords (injection, XSS, SSRF, CSRF, RCE, path traversal, deserialization, auth bypass, privilege escalation, secret, token leak, credential and similar) or a CWE reference (`CWE-\d+`). The keyword heuristic cannot guarantee that every mislabeled finding is caught; for strict setups use `redact_all`, which redacts every finding regardless of category.
 
-A redacted finding shows only severity, path/line and a generic label. Full details stay in the database and go to the configured Jira comment or Slack channel. Use a private Slack channel restricted to the intended reviewers. If neither is configured, the PR comment says that details are hidden.
+A redacted finding shows only severity, path/line and a generic label. In the transitions table and the "Still open" card headings a redacted finding keeps its severity and traffic light ([review comment](PROGRESS_STATUS.md#review-comment)). Full details stay in the database and go to the configured Jira comment or Slack channel. Use a private Slack channel restricted to the intended reviewers. If neither is configured, the PR comment says that details are hidden.
 
 `full` explicitly restores detailed findings in GitHub, except details recorded while the repository was private.
 

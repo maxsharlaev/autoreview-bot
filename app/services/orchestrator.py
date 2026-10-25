@@ -8,12 +8,14 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Literal
 
 import jsonschema
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.adapters.github import ChangedFile, GitHubAppClient, GitHubError, PullRequestInfo
 from app.adapters.jira import JiraClient, JiraError, JiraIssue
@@ -65,6 +67,9 @@ from app.services.pr_description import (
 )
 from app.services.pr_text_language import output_language_matches, resolve_pr_language
 from app.services.progress_status import (
+    PHASE_ANALYZING,
+    PHASE_CONTEXT,
+    PHASE_PUBLISHING,
     PROGRESS_OPT_OUT,
     PROGRESS_TRIGGERS,
     ProgressReporter,
@@ -72,6 +77,7 @@ from app.services.progress_status import (
     locked_state,
 )
 from app.services.publisher import Publisher, empty_verified
+from app.services.review_time import analysis_record
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
 from app.services.verifier import FindingView, PreviousFindingView, VerifiedReview, parse_json_payload, verify_review
@@ -264,6 +270,75 @@ async def _current_state(session: AsyncSession, tracking: _ProgressTracking) -> 
         logger.warning("could not read progress status for run %s (ignored): %s", tracking.run_id, exc)
         return tracking.state
     return state if found else tracking.state
+
+
+# A phase write waits at most this long for the run row lock, then gives up (best effort).
+PHASE_LOCK_TIMEOUT_MS = 2000
+
+
+def _isolated_factory(session: AsyncSession) -> async_sessionmaker[AsyncSession] | None:
+    """Factory for short sessions on the main session's engine; None when there is no engine (unit fakes)."""
+    bind = getattr(session, "bind", None) if isinstance(session, AsyncSession) else None
+    if bind is None:
+        return None
+    return async_sessionmaker(bind, expire_on_commit=False)
+
+
+def _keep_in_memory(run: ReviewRun, state: dict | None) -> None:
+    """Show the phase state on the run object without making the main session write it."""
+    if isinstance(run, ReviewRun):
+        set_committed_value(run, "progress_status", state)
+    else:
+        run.progress_status = state
+
+
+async def _write_phase_isolated(
+    factory: async_sessionmaker[AsyncSession], tracking: _ProgressTracking, phase: str
+) -> dict | None:
+    """Lock the run row in a separate short transaction, report the phase, store it and commit."""
+    assert tracking.reporter is not None
+    run_id = uuid.UUID(tracking.run_id)
+    async with factory() as phase_session:
+        if phase_session.bind.dialect.name == "postgresql":
+            await phase_session.execute(text(f"SET LOCAL lock_timeout = {PHASE_LOCK_TIMEOUT_MS}"))
+        found, _status, stored = await locked_state(phase_session, run_id)
+        state = stored if found else tracking.state
+        if _closed(state):
+            await phase_session.rollback()
+            return state
+        new_state = await tracking.reporter.phase_state(tracking.full_name, tracking.sha, tracking.run_id, state, phase)
+        if new_state is None:
+            await phase_session.rollback()
+            return state
+        await phase_session.execute(update(ReviewRun).where(ReviewRun.id == run_id).values(progress_status=new_state))
+        await phase_session.commit()
+        return new_state
+
+
+async def _advance_phase(session: AsyncSession, tracking: _ProgressTracking, run: ReviewRun, phase: str) -> None:
+    """Best effort: show the review's new phase on its progress status; never raises.
+
+    The phase state is written in its own short transaction. The main review session is never
+    committed or rolled back here, so a failed phase write cannot poison it or drop its pending
+    changes; the new state is only mirrored on the run object in memory.
+    """
+    if tracking.reporter is None:
+        return
+    try:
+        factory = _isolated_factory(session)
+        if factory is not None:
+            state = await _write_phase_isolated(factory, tracking, phase)
+        elif _closed(tracking.state):
+            state = tracking.state
+        else:
+            new_state = await tracking.reporter.phase_state(
+                tracking.full_name, tracking.sha, tracking.run_id, tracking.state, phase
+            )
+            state = new_state if new_state is not None else tracking.state
+        tracking.state = state
+        _keep_in_memory(run, state)
+    except Exception as exc:
+        logger.warning("progress phase %s for run %s failed (ignored): %s", phase, tracking.run_id, exc)
 
 
 async def _run_review(
@@ -516,6 +591,7 @@ async def _run_review(
     pr.issue_key = issue_key
     tracking.issue_key = issue_key
     progress.event(f"diff files={len(files)} issue_key={issue_key or 'none'}")
+    await _advance_phase(session, tracking, run, PHASE_CONTEXT)
 
     jira_text = None
     jira_issue: JiraIssue | None = None
@@ -627,6 +703,7 @@ async def _run_review(
             error_code=SKIP_TOO_LARGE,
             visibility=visibility,
             force_public_redaction=publication == "public_fallback",
+            tracking=tracking,
         )
         progress.event(f"completed with skip {SKIP_TOO_LARGE}")
         return await _complete(session, run, started, SKIP_TOO_LARGE, verified, config, context.prompt_version)
@@ -656,6 +733,7 @@ async def _run_review(
         schema_copy = checkout / ".open-pr-review-schema.json"
         output_path = checkout / ".open-pr-review-out.json"
         shutil.copyfile(data_file("schemas", "review_output.json"), schema_copy)
+        await _advance_phase(session, tracking, run, PHASE_ANALYZING)
         for attempt in range(2):
             progress.event(
                 f"codex attempt {attempt + 1}/2 model={config.codex.model} effort={config.codex.reasoning_effort}"
@@ -728,6 +806,7 @@ async def _run_review(
                 error_code=error_code,
                 visibility=visibility,
                 force_public_redaction=publication == "public_fallback",
+                tracking=tracking,
             )
             return await _fail(session, run, started, error_code)
         public_alignment = "unknown" if visibility == "public" else None
@@ -810,6 +889,7 @@ async def _run_review(
         unredacted=verified,
         unredacted_transitions=transitions,
         jira_in_context=bool(jira_text) and context_visibility == "private",
+        tracking=tracking,
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
@@ -1548,12 +1628,22 @@ async def _publish(
     unredacted: VerifiedReview | None = None,
     unredacted_transitions: list[FindingTransitionView] | None = None,
     jira_in_context: bool = False,
+    tracking: _ProgressTracking | None = None,
 ) -> None:
+    # Every publication path goes through here, so the progress status always shows this phase.
+    if tracking is not None and session is not None:
+        await _advance_phase(session, tracking, run, PHASE_PUBLISHING)
     sensitive = review_has_sensitive_content(
         unredacted or verified,
         unredacted_transitions if unredacted_transitions is not None else transitions,
         jira_in_context=jira_in_context,
     )
+    analysed_at = datetime.now(UTC)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    run.summary = {
+        **(getattr(run, "summary", None) or {}),
+        "analysis": analysis_record(pr.head_sha, analysed_at, duration_ms),
+    }
     render = RenderInput(
         repository=pr.repository.full_name,
         pr_number=pr.number,
@@ -1564,7 +1654,8 @@ async def _publish(
         jira_warning=jira_warning,
         verified=verified,
         transitions=transitions,
-        duration_ms=int((time.monotonic() - started) * 1000),
+        duration_ms=duration_ms,
+        analysed_at=analysed_at,
         model=config.codex.model,
         language=config.language,
         error_code=error_code,
@@ -1615,7 +1706,9 @@ async def _complete(
     run.model_version = config.codex.model
     run.prompt_version = prompt_version
     run.policy_version = POLICY_VERSION
+    analysis = (run.summary or {}).get("analysis")
     run.summary = {
+        **({"analysis": analysis} if analysis else {}),
         "text": verified.summary,
         "task_alignment": verified.task_alignment_status,
         "coverage": verified.coverage,

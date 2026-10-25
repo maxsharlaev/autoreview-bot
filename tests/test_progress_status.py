@@ -266,7 +266,7 @@ async def test_app_check_run_goes_queued_in_progress_completed_and_links_comment
     result = await h.review()
 
     assert result.status == "completed"
-    assert h.github.check_states() == ["queued", "in_progress", "completed"]
+    assert h.github.check_states() == ["queued", *["in_progress"] * 4, "completed"]
     created = h.github.payloads("create")[0]
     assert created["name"] == "autoreview" and created["head_sha"] == HEAD
     assert created["external_id"] == str(h.run.id)
@@ -286,7 +286,7 @@ async def test_app_check_run_goes_queued_in_progress_completed_and_links_comment
 async def test_worker_creates_check_run_when_queued_status_is_missing(monkeypatch, tmp_path) -> None:
     h = Harness(monkeypatch, tmp_path)
     await h.review()
-    assert [call[0] for call in h.github.calls] == ["create", "update"]
+    assert [call[0] for call in h.github.calls] == ["create", *["update"] * 4]
     assert h.github.payloads("create")[0]["status"] == "in_progress"
     assert h.github.calls[-1][2]["conclusion"] == "success"
 
@@ -301,7 +301,7 @@ async def test_pat_commit_status_pending_then_final_with_description_and_target_
     await h.review()
 
     statuses = h.github.payloads("status")
-    assert [item["state"] for item in statuses] == ["pending", "pending", "success"]
+    assert [item["state"] for item in statuses] == [*["pending"] * 5, "success"]
     assert all(item["context"] == "autoreview" for item in statuses)
     assert all(call[1] == HEAD for call in h.github.calls if call[0] == "status")
     final = statuses[-1]
@@ -718,7 +718,7 @@ async def test_status_failures_do_not_affect_review(monkeypatch, tmp_path, failu
     h.publisher.publish.assert_awaited_once()
     assert h.run.comment_url == COMMENT_URL
     # Every step was attempted (no check run id came back, so each one tries to create it) and swallowed
-    assert h.github.check_states() == ["queued", "in_progress", "completed"]
+    assert h.github.check_states() == ["queued", *["in_progress"] * 4, "completed"]
     assert [call[0] for call in h.github.calls].count("react") == 1
 
 
@@ -731,9 +731,9 @@ async def test_reaction_added_on_pickup_and_removed_after_publishing(monkeypatch
     h = Harness(monkeypatch, tmp_path, config=config)
     await h.review()
     kinds = [call[0] for call in h.github.calls]
-    assert kinds == ["create", "react", "update", "unreact"]
+    assert kinds == ["create", "react", *["update"] * 4, "unreact"]
     assert h.github.calls[1][1:] == (7, "eyes")
-    assert h.github.calls[3][1:] == (7, 555)
+    assert h.github.calls[-1][1:] == (7, 555)
     assert "reaction_id" not in h.run.progress_status
 
 
@@ -903,7 +903,7 @@ async def test_worker_reads_stored_state_instead_of_creating_a_second_check_run(
     await h.review()
     assert h.github.payloads("create") == []
     assert {call[1] for call in h.github.calls if call[0] == "update"} == {4242}
-    assert h.github.check_states() == ["in_progress", "completed"]
+    assert h.github.check_states() == [*["in_progress"] * 4, "completed"]
     assert h.run.progress_status["check_run_id"] == 4242
 
 

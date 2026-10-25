@@ -8,6 +8,8 @@ build/
 venv/
 .env
 config.yaml
+config.*.yaml
+!config.example.yaml
 prompts/local/
 *.pem
 .pytest_cache/
