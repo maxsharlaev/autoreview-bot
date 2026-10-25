@@ -2,13 +2,14 @@ groups:
   - name: open-pr-review
     rules:
       - alert: OpenPrReviewWorkerDown
-        expr: up{job="open-pr-review-worker"} == 0
+        # `absent` covers zero replicas: with DNS discovery a stopped worker service leaves no target.
+        expr: up{job="open-pr-review-worker"} == 0 or absent(up{job="open-pr-review-worker"})
         for: 2m
         labels:
           severity: page
         annotations:
-          summary: Worker metrics endpoint is down
-          description: Prometheus cannot scrape worker:9100. Reviews will queue and never run.
+          summary: Worker is down or not discovered
+          description: A worker replica cannot be scraped, or DNS discovery finds no worker replica at all. Reviews will queue and never run.
 
       - alert: OpenPrReviewApiDown
         expr: up{job="open-pr-review-api"} == 0

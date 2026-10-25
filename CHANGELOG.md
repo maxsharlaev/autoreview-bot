@@ -114,6 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every replica through `dns_sd_configs` on the `worker` service name. If you
   scraped `127.0.0.1:9100`, switch to the Docker network (see
   `docs/UPGRADE.md`).
+  `OpenPrReviewWorkerDown` now also fires when no worker replica is discovered
+  (`absent(up{job="open-pr-review-worker"})`).
 
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
   valid `X-Hub-Signature-256` HMAC signature; the API key (`REVIEW_API_KEY`) is

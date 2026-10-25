@@ -42,7 +42,7 @@ Step-by-step upgrade to an `owners:` block, keeping history with `aliases: [defa
 
 ## Worker metrics port no longer published
 
-The Compose file no longer maps the worker's metrics port to `127.0.0.1:9100` on the host; it is exposed only on the Docker network, so `docker compose up --scale worker=N` works. If your Prometheus scraped `127.0.0.1:9100` / `localhost:9100`, switch it to the Docker network: attach Prometheus to the stack's network and use the bundled `dns_sd_configs` job from [`observability/prometheus-scrape.yml`](../observability/prometheus-scrape.yml), which scrapes every replica. To keep a host port for a single worker, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (then it can't be scaled).
+The Compose file no longer maps the worker's metrics port to `127.0.0.1:9100` on the host; it is exposed only on the Docker network, so `docker compose up --scale worker=N` works. If your Prometheus scraped `127.0.0.1:9100` / `localhost:9100`, switch it to the Docker network: attach Prometheus to the stack's network and use the bundled `dns_sd_configs` job from [`observability/prometheus-scrape.yml`](../observability/prometheus-scrape.yml), which scrapes every replica. To keep a host port for a single worker, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (then it can't be scaled). Reload `observability/alerts.yml` too: `OpenPrReviewWorkerDown` now also fires when no worker replica is discovered.
 
 ## New GitHub permissions
 

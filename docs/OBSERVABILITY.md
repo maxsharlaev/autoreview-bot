@@ -21,7 +21,7 @@ Merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.y
 - Published host ports: `localhost:8000` for the API only. The worker's `:9100` is exposed only on the Docker network, so Prometheus must join that network (or run in it). The bundled worker job uses `dns_sd_configs` on the `worker` service name, which returns one address per replica, so scaled workers are all scraped (Swarm: `tasks.worker`). A static `worker:9100` target would scrape only one replica.
 - Kubernetes: Service/Pod scrape / `PodMonitor` / `ServiceMonitor` on those ports
 
-Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`).
+Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` fires when a worker replica is down (`up == 0`) and also when DNS discovery finds no worker at all (`absent(up{job="open-pr-review-worker"})`), because then there is no target to report `up == 0`.
 
 ## Grafana (existing)
 
