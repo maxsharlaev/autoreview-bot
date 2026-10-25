@@ -9,7 +9,7 @@ groups:
           severity: page
         annotations:
           summary: Worker is down or not discovered
-          description: A worker replica cannot be scraped, or DNS discovery finds no worker replica at all. Reviews will queue and never run.
+          description: A worker replica cannot be scraped, or DNS discovery finds no worker replica at all. Reviews will queue and never run. Known limitation - with scaled workers, a replica that stops drops out of DNS discovery, so losing some (not all) replicas does not fire this alert; use Docker/orchestrator desired-vs-running metrics for that (a queue-backlog alert is planned).
 
       - alert: OpenPrReviewApiDown
         expr: up{job="open-pr-review-api"} == 0
