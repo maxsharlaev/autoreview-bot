@@ -64,7 +64,7 @@ The digest runs per owner and only for owners with `features.digest_enabled: tru
 | Key | Type | Default | Owner | Description |
 | --- | --- | --- | --- | --- |
 | `language.summary` | `en` \| `ru` | `en` | yes | Language of the review summary and finding titles. |
-| `language.details` | `en` \| `ru` | `en` | yes | Language of finding scenario, evidence, recommendation and PR comment labels. Fallback for the PR description language. |
+| `language.details` | `en` \| `ru` | `en` | yes | Language of finding scenario, evidence, recommendation and PR comment labels ([review comment](PROGRESS_STATUS.md#review-comment)). Fallback for the PR description language. |
 
 Jira and Slack text currently use English labels.
 

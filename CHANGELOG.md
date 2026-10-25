@@ -80,6 +80,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Review time in the comment**: the sticky review comment shows the reviewed
+  commit and when the analysis finished, always in UTC, with its duration, for
+  example `Reviewed: commit abc1234 at 2026-10-24 09:25:40 UTC (took 3m 12s)`
+  (Russian labels with `language.details: ru`). The check run
+  summary of a published review ends with the same line. The values are stored
+  in `review_runs.summary["analysis"]`, so both show the same time. No migration.
+  The final PAT commit status description leaves the time out so it always
+  fits GitHub's 140-character limit; the check run summary keeps it.
+
+- **Review phases in the progress status**: while a review runs, the check run
+  summary and the commit status description show the current phase and when it
+  started, with a fixed step number, e.g.
+  `[2026-10-24 21:20:05 UTC] (4/5) Running model analysis…` (queued,
+  fetching PR and diff, reading repository context, running model analysis,
+  publishing results). Written once per phase change, best effort, always within
+  140 characters. A phase timestamp that stops advancing shows a hung review.
+  See [docs/PROGRESS_STATUS.md](docs/PROGRESS_STATUS.md#review-phases).
+
+- **Severity in the transitions table**: the "Previous finding transitions"
+  table of the review comment has a Severity column (`Важность` in Russian).
+  Findings that are still open (`still_open`, `regressed`, `needs_human`) show a
+  traffic light before it: 🔴 P0, 🟠 P1, 🟡 P2, 🟢 P3; fixed findings
+  (`resolved`, `obsolete`) show only the severity.
+  Rows redacted by the public repository policy keep their severity and light.
+  The "Still open from previous review" card headings show the same marker
+  before the status, e.g. `[🟠 P1] [regressed] Title`; redacted cards keep it.
+  Documented in [docs/PROGRESS_STATUS.md](docs/PROGRESS_STATUS.md#review-comment).
+
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
   valid `X-Hub-Signature-256` HMAC signature; the API key (`REVIEW_API_KEY`) is
   no longer checked on this endpoint. This allows standard GitHub webhooks

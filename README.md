@@ -51,6 +51,7 @@ Expect `202` with a `review_run_id`, then a sticky comment on the PR. For automa
 | Every `config.yaml` key | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | Every environment variable | [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) |
 | Several GitHub owners | [docs/MULTI_OWNER.md](docs/MULTI_OWNER.md) |
+| Review comment format | [docs/PROGRESS_STATUS.md](docs/PROGRESS_STATUS.md#review-comment) |
 | HTTP API and error codes | [docs/API.md](docs/API.md) |
 | Troubleshooting and operations | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 | Upgrades and migrations | [docs/UPGRADE.md](docs/UPGRADE.md) |
