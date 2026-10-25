@@ -140,7 +140,7 @@ Simplest; supports `paths` / `branches` filters; works with a PAT or an App.
 3. Variable `AI_REVIEW_URL` = `https://review.example.com` (no trailing `/`).
 4. Copy [examples/github/ai-review-trigger.yml](../examples/github/ai-review-trigger.yml) to `.github/workflows/ai-review.yml` in the reviewed repository.
 5. The example calls `maxsharlaev/autoreview-bot/.github/workflows/ai-review-trigger.yml@main`. If Actions can't see this repository, paste the `steps` of `.github/workflows/ai-review-trigger.yml` instead of `uses:`.
-6. Adjust `on.pull_request.branches` / `paths` / `paths-ignore` ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#github-actions-in-a-reviewed-repository)).
+6. Adjust `on.pull_request.branches` and either `paths` or `paths-ignore`, not both ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#github-actions-in-a-reviewed-repository)).
 
 This repository's `ci.yml` does not run reviews, only the service's tests. Action filters and the service allowlist are separate layers: a green API with no Action run means checking `paths`/`branches`/draft.
 

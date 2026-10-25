@@ -82,6 +82,7 @@ Smaller items already agreed, independent of the monthly plan:
 - **Webhook delivery deduplication:** remember `X-GitHub-Delivery` ids so a redelivered event is recognized before any GitHub call.
 - **Narrower installation tokens:** request App installation tokens scoped to the reviewed repository and only the permissions a step needs.
 - **Grafana per owner:** an `owner` dimension in dashboards and alerts, so each owner's queue, failures and cost are visible separately.
+- **Enforced execution policy for the review agent:** a deterministic allowlist of the tool actions the review agent may take, model credentials not inherited by processes the agent starts, and secret scanning of model output before it is stored or published as a last line of defense.
 - **Human approval for model-driven Jira actions:** Jira transitions and comments triggered by model-assigned severity (P0/P1) are proposed instead of applied, and a person confirms them through a PR label, a reaction or the admin panel. Configurable per owner (apply automatically, require approval, or off).
 - **Admin panel with sensitive-comment cleanup:** list runs whose published comment had sensitive content (`has_sensitive_content`) and let an operator redact or delete those comments, for example before a repository becomes public ([PROGRESS_STATUS.md](PROGRESS_STATUS.md#has_sensitive_content)).
 
@@ -107,7 +108,7 @@ Ideas beyond the plan above, in priority order. Sizes are rough engineering esti
 
 - **Goal:** let a developer get a review in the terminal before pushing.
 - **Sketch:** a small CLI and an optional git `pre-push` hook. It sends the staged changes, a commit or the branch diff against its base to the API in a **no-publish** mode: nothing is posted to GitHub, Jira or Slack, and the result comes back to the terminal. Each developer gets their own key with a cost limit and rate limit, scoped to an owner.
-- **Data handling:** code leaves the developer's machine and goes to the service and the model provider. The CLI applies an ignore list before sending (secrets, `.env*`, keys, generated and vendored files), shows what will be sent, and the server applies the same skip rules. Results are not stored as PR findings.
+- **Data handling:** code leaves the developer's machine and goes to the service and the model provider. The CLI applies an ignore list before sending (secrets, `.env*`, keys, generated and vendored files), shows what will be sent, and the server applies its skip rules. Results are not stored as PR findings.
 - **Risks:** secret leakage from a local diff; cost abuse; results differing from the PR review.
 - **Size:** about 1 week.
 

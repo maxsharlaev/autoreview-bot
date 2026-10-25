@@ -153,7 +153,7 @@ App можно использовать только для получения i
 3. Variable `AI_REVIEW_URL` = `https://review.example.com` (без `/` в конце).
 4. Скопировать [examples/github/ai-review-trigger.yml](../../examples/github/ai-review-trigger.yml) в продуктовый репо как `.github/workflows/ai-review.yml`.
 5. Пример уже ссылается на `maxsharlaev/autoreview-bot/.github/workflows/ai-review-trigger.yml@main`. Если Actions не видит этот репозиторий — вставить `steps` из `.github/workflows/ai-review-trigger.yml` вместо `uses:`.
-6. Раскомментировать и выставить `on.pull_request.branches` / `paths` / `paths-ignore` под продукт.
+6. Раскомментировать и выставить `on.pull_request.branches` и `paths` или `paths-ignore` (не оба сразу) под продукт.
 
 CI **этого** репозитория (`ci.yml`) ревью не запускает — только тесты сервиса.
 

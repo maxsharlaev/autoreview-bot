@@ -37,16 +37,15 @@ on:
     branches:          # the PR base branch (merge target)
       - main
       - develop
-    paths:             # review only if one of these paths changed
-      - "src/**"
-      - "apps/**"
-    paths-ignore:      # skip if only these changed
-      - "docs/**"
-      - "**/*.md"
+    paths:             # review unless only docs changed
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
 ```
 
-- Several `paths` are OR-ed: any match runs the workflow.
-- With both `paths` and `paths-ignore`, a PR touching `src/` and `docs/` still runs.
+- The workflow runs if at least one changed file matches the `paths` patterns.
+- Pattern order matters: a later pattern overrides an earlier one. Here `**` matches everything and the `!` patterns then exclude docs, so a docs-only PR is skipped, while a PR touching `src/` and `docs/` still runs.
+- GitHub does not allow `paths` and `paths-ignore` for the same event: use one of them, with `!` patterns in `paths` to combine inclusion and exclusion.
 - `branches` filters the **base** branch, not the feature branch.
 - The example skips drafts with an `if:`; `ready_for_review` runs it after a draft is marked ready.
 - The example skips forks (`head.repo != github.repository`).
@@ -132,7 +131,7 @@ The service only writes to stdout; your log agent ships it. Locally: `docker com
 | `fork_pr` | skip | PR from a fork. |
 | `author_no_write_access` | skip | Author lacks write, maintain or admin permission. |
 | `repo_not_allowed` | skip | Repository not in the allowlist. |
-| `PR_TOO_LARGE_FOR_AI_REVIEW` | skip / notice | Size guard hard threshold or `codex.max_files` / `max_diff_lines` exceeded. |
+| `PR_TOO_LARGE_FOR_AI_REVIEW` | skip / notice | Size guard hard threshold or `codex.max_files` (all changed files, skipped ones included) / `max_diff_lines` exceeded. |
 | `owner_not_configured`, `owner_disabled`, `owner_changed` | skip | The run's owner was removed, disabled, or the repository routes elsewhere now. |
 | `ISSUE_CONTEXT_UNAVAILABLE` | warning | Jira could not be read; the code review still runs. |
 | `AI_OUTPUT_INVALID` | error | Invalid model JSON after one retry. |

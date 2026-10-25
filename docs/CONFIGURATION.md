@@ -130,17 +130,17 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 | --- | --- | --- | --- | --- |
 | `codex.model` | string | `gpt-5.6-sol` | yes | Model passed to Codex CLI. |
 | `codex.reasoning_effort` | string | `medium` | yes | Codex reasoning effort. |
-| `codex.api_key_env` | env var name | — | **owner only** | Model key variable for this owner (required when set). Without it: `OWNER_<ID>_OPENAI_API_KEY`, else the shared `OPENAI_API_KEY`. |
+| `codex.api_key_env` | env var name | — | **owner only** | Model key variable for this owner (required when set, in both the API and the worker). Without it: `OWNER_<ID>_OPENAI_API_KEY`, else the shared `OPENAI_API_KEY`. |
 | `codex.prompt_file` | path | `""` | — | Replacement review prompt, e.g. `prompts/local/review.md`. Empty uses [`prompts/review.md`](../prompts/review.md). Relative to the working directory (`/app` in Docker). A missing file fails the review. `{{summary_language}}` and `{{details_language}}` are substituted. |
 | `codex.sandbox` | string | `read-only` | — | Codex `--sandbox` value. Keep `read-only`. |
 | `codex.approval_policy` | string | `never` | — | Codex approval policy. Keep `never`: nobody answers prompts in a worker. |
 | `codex.timeout_seconds` | int | `600` | — | Timeout of one Codex call. Keep it below `WORKER_JOB_TIMEOUT`. |
-| `codex.max_files` | int | `100` | — | More reviewable changed files than this: no model call, the PR gets the `PR_TOO_LARGE_FOR_AI_REVIEW` comment. |
+| `codex.max_files` | int | `100` | — | More changed files in the PR than this, counting skipped files too (lockfiles, binaries and other files not sent to the model): no model call, the PR gets the `PR_TOO_LARGE_FOR_AI_REVIEW` comment. |
 | `codex.max_diff_lines` | int | `20000` | — | More diff lines than this: same as `max_files`. |
 | `codex.max_findings` | int | `20` | — | Maximum findings kept from one review. |
 | `codex.max_file_bytes` | int | `524288` | — | Per-file patch bytes sent to the model; longer patches are truncated. |
 
-Binary files (images, archives, fonts, binaries) and common lockfiles are left out of the model context.
+Common lockfiles, `.env*` files and files with image, PDF, archive, font or compiled-binary suffixes are left out of the model context. Other generated, minified or vendored files (for example `.min.js` or `.map`) are not detected and are sent like source. Full list: [DATA_HANDLING.md](DATA_HANDLING.md#sent-to-the-model-provider).
 
 ## `routing`
 

@@ -4,7 +4,7 @@
 No. Reviews are advisory. The progress check run never reports `failure` for findings, only for bot errors ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)).
 
 **Does it run the PR's code?**
-No. It clones the PR head and runs Codex in a read-only sandbox without network access; nothing is built, installed or executed ([SECURITY.md](../SECURITY.md#threat-model-and-trust-boundaries)).
+It doesn't build or install it. Codex runs in the cloned checkout in a read-only sandbox without network access and is instructed not to execute repository code; that instruction is not yet technically enforced ([SECURITY.md](../SECURITY.md#threat-model-and-trust-boundaries)).
 
 **What is sent to the model provider?**
 The PR's metadata, diffs, earlier findings, optional Jira text, and whatever files of the checkout the agent reads. Details: [DATA_HANDLING.md](DATA_HANDLING.md).
@@ -40,7 +40,7 @@ Yes: `codex.prompt_file` (and `pr_description.prompt_file`), see [DEPLOY.md](DEP
 No. It only comments on a linked issue and, when enabled, moves it to `rework_status` on P0/P1 findings.
 
 **Large PRs?**
-Above `size_guard.hard` or `codex.max_files` / `max_diff_lines` the run is skipped with `PR_TOO_LARGE_FOR_AI_REVIEW`. The `autoreview:force` label bypasses the size guard ([PR_DESCRIPTION.md](PR_DESCRIPTION.md#size-guard)).
+Above `size_guard.hard` or `codex.max_files` (all changed files, skipped ones included) / `max_diff_lines` the run is skipped with `PR_TOO_LARGE_FOR_AI_REVIEW`. The `autoreview:force` label bypasses the size guard ([PR_DESCRIPTION.md](PR_DESCRIPTION.md#size-guard)).
 
 **How do I delete stored data?**
 See [DATA_HANDLING.md](DATA_HANDLING.md#retention-and-deletion).
