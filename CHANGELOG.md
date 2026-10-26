@@ -114,9 +114,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every replica through `dns_sd_configs` on the `worker` service name. If you
   scraped `127.0.0.1:9100`, switch to the Docker network (see
   `docs/UPGRADE.md`).
-  `OpenPrReviewWorkerDown` now also fires when no worker replica is discovered
-  (`absent(up{job="open-pr-review-worker"})`). It does not detect losing only
-  some replicas (a stopped replica leaves DNS discovery); see
+  The worker alert is split: `OpenPrReviewWorkerDown` (critical) fires when no
+  worker replica is discovered (`absent(up{job="open-pr-review-worker"})`), and
+  the new `OpenPrReviewWorkerTargetDown` (warning) fires when a discovered
+  replica cannot be scraped (`up == 0`). Neither detects losing only some
+  replicas (a stopped replica leaves DNS discovery); see
   `docs/OBSERVABILITY.md`.
 
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
