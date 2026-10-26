@@ -61,7 +61,7 @@ GITHUB_WEBHOOK_SECRET=<repository webhook secret, if you use a webhook>
 1. **Settings** организации → **Secrets and variables** → **Actions** → **New organization secret** (или секреты репозитория).
 2. Имя `AI_REVIEW_API_KEY`, значение: `REVIEW_API_KEY` сервера (или ключ owner'а).
 3. Repository access: репозитории, которые вызывают API.
-4. Переменная `AI_REVIEW_URL`: базовый HTTPS URL без `/` в конце.
+4. Переменная `AI_REVIEW_URL`: базовый HTTPS URL без завершающего слеша.
 
 Скопируйте [пример workflow](../../examples/github/ai-review-trigger.yml) в каждый ревьюируемый репозиторий как `.github/workflows/ai-review.yml`. Он ссылается на `maxsharlaev/autoreview-bot@main`; для форка или недоступного workflow измените `uses:` или скопируйте шаги reusable workflow этого репозитория. Он вызывает `POST /api/v1/reviews` с URL PR, поэтому HMAC webhook не нужен. `ci.yml` этого репозитория только тестирует и собирает сервис. Фильтры: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#github-actions-в-ревьюируемом-репозитории).
 

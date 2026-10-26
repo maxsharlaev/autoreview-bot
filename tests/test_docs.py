@@ -204,3 +204,67 @@ def test_russian_mirror_has_the_same_heading_structure(name: str) -> None:
     if not mirror.exists():
         pytest.fail(f"docs/ru/{name} is missing")
     assert _heading_levels(mirror) == _heading_levels(DOCS / name), f"docs/ru/{name}: headings differ from docs/{name}"
+
+
+_FENCE_BLOCK = re.compile(r"^```[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL)
+_HEADING = re.compile(r"^#{1,6}\s+(.*)$", re.MULTILINE)
+_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+
+
+def _sections(path: Path) -> list[tuple[str, dict[str, object]]]:
+    """Split a page at headings and fingerprint each section independently of language."""
+    text = path.read_text(encoding="utf-8")
+    fences = [m.group(1) for m in _FENCE_BLOCK.finditer(text)]
+    # Replace fences with placeholders so headings and code spans inside them are ignored.
+    marked = _FENCE_BLOCK.sub("\x00FENCE\x00", text)
+    starts = [(m.start(), m.group(1).strip()) for m in _HEADING.finditer(marked)]
+    bounds = [(0, "(preamble)"), *starts]
+    out: list[tuple[str, dict[str, object]]] = []
+    fence_iter = iter(fences)
+    for index, (start, heading) in enumerate(bounds):
+        end = bounds[index + 1][0] if index + 1 < len(bounds) else len(marked)
+        body = marked[start:end]
+        lines = body.splitlines()
+        rows = [line for line in lines if line.lstrip().startswith("|")]
+        tables = sum(
+            1
+            for i, line in enumerate(lines)
+            if line.lstrip().startswith("|") and (i == 0 or not lines[i - 1].lstrip().startswith("|"))
+        )
+        section_fences = [next(fence_iter) for _ in range(body.count("\x00FENCE\x00"))]
+        out.append(
+            (
+                heading,
+                {
+                    "code blocks": section_fences,
+                    "tables": tables,
+                    "table rows": len(rows),
+                    "inline code": sorted(_INLINE_CODE.findall(body)),
+                },
+            )
+        )
+    return out
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in DOCS.glob("*.md")))
+def test_russian_mirror_sections_match(name: str) -> None:
+    mirror = RU / name
+    if not mirror.exists():
+        pytest.fail(f"docs/ru/{name} is missing")
+    english, russian = _sections(DOCS / name), _sections(mirror)
+    problems = []
+    for index, ((en_heading, en_print), (ru_heading, ru_print)) in enumerate(zip(english, russian, strict=False)):
+        for key, en_value in en_print.items():
+            ru_value = ru_print[key]
+            if en_value == ru_value:
+                continue
+            if key == "inline code":
+                missing = sorted(set(en_value) - set(ru_value)) or "(counts differ)"
+                extra = sorted(set(ru_value) - set(en_value))
+                detail = f"missing {missing}, extra {extra}"
+            else:
+                detail = f"en {en_value!r} vs ru {ru_value!r}"
+            problems.append(f"section {index} ({en_heading!r} / {ru_heading!r}): {key} differ: {detail}")
+    if len(english) != len(russian):
+        problems.append(f"section count differs: en {len(english)} vs ru {len(russian)}")
+    assert not problems, f"docs/ru/{name} vs docs/{name}:\n" + "\n".join(problems)
