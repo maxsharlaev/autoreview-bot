@@ -1,85 +1,90 @@
-# Установка GitHub App и секретов
+<!-- section: github-app-pat-and-trigger-setup -->
+# Настройка GitHub App, PAT и триггера
 
-Полный деплой хоста (Compose, сеть, Prometheus): [DEPLOY.md](DEPLOY.md).
+Полный деплой хоста (Compose, сеть, Prometheus): [DEPLOY.md](DEPLOY.md). Английская версия: [GITHUB_SETUP.md](../GITHUB_SETUP.md).
 
-Сервис принимает события Pull Request на `POST /api/v1/pull-request`. Эндпойнт требует только валидную подпись `X-Hub-Signature-256` (HMAC-SHA256 с `GITHUB_WEBHOOK_SECRET`); API-ключ не требуется (GitHub webhook не может отправлять произвольные заголовки). Если `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или короче 16 символов), webhook-эндпойнт отключён (`503`), но сервис запускается. Для `/api/v1/reviews` по-прежнему требуется `REVIEW_API_KEY`.
+Сервис принимает события Pull request на `POST /api/v1/pull-request`. Этот эндпойнт требует только валидный `X-Hub-Signature-256` (HMAC-SHA256 с `GITHUB_WEBHOOK_SECRET`); API key не нужен, потому что webhooks GitHub не умеют отправлять свои заголовки. Если `GITHUB_WEBHOOK_SECRET` не настроен (пустой, заглушка или короче 16 символов), эндпойнт webhook отключён (`503`), но сервис стартует, и `/api/v1/reviews` продолжает работать с `REVIEW_API_KEY`. Никогда не кладите креды в URL webhook.
 
-`GET /health`, `GET /is-ready` и `GET /metrics` остаются открытыми для пробы живости и Prometheus. Worker отдельно отдаёт `GET http://worker:9100/metrics`. Снимок очереди: `GET /api/v1/ops/status` (с API key).
+`GET /health`, `GET /is-ready` и `GET /metrics` открыты для проб и Prometheus; worker отдаёт `GET http://worker:9100/metrics`. Снимок очереди: `GET /api/v1/ops/status` (API key). Справочник API: [API.md](API.md).
 
-## Что куда кладётся
+<!-- section: where-secrets-go -->
+## Где хранятся секреты
 
-| Секрет | Где хранится | Зачем |
+| Значение | Где | Назначение |
 | --- | --- | --- |
-| `AI_REVIEW_API_KEY` | GitHub: Organization или Repository **Secrets** | Ключ доступа к API. Тот же значение — в `.env` сервиса как `REVIEW_API_KEY`. |
-| `GITHUB_WEBHOOK_SECRET` | GitHub App **или** webhook репозитория **и** `.env` сервиса | HMAC `X-Hub-Signature-256` |
-| GitHub App private key | `.env` сервиса `GITHUB_APP_PRIVATE_KEY` | JWT → installation token. Не нужен, если задан PAT. |
-| `GITHUB_TOKEN` / `GITHUB_PAT` | только `.env` сервиса | Fine-grained PAT (`github_pat_*`). Если задан — используется вместо App. |
-| `OPENAI_API_KEY`, Jira token | только `.env` / secrets хоста сервиса | Codex и Jira. В GitHub Secrets продуктовых репо не нужны. |
+| `REVIEW_API_KEY` | `.env` сервера | Защищает API ревью и эксплуатации |
+| `AI_REVIEW_API_KEY` | **Secrets** организации или репозитория GitHub | То же значение, что `REVIEW_API_KEY` (или ключ owner'а) |
+| `GITHUB_WEBHOOK_SECRET` | Webhook GitHub App **или** репозитория **и** `.env` сервера | HMAC `X-Hub-Signature-256` |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | Только `.env` сервера | JWT App → installation token. С PAT не нужны |
+| `GITHUB_TOKEN` / `GITHUB_PAT` | Только `.env` сервера | Fine-grained PAT (`github_pat_*`); если задан, используется вместо App |
+| `OPENAI_API_KEY`, токен Jira | Только `.env` сервера / секреты хоста | Codex и Jira. В секретах ревьюируемых репозиториев не нужны |
 
-Сгенерируйте длинный случайный ключ (например `openssl rand -hex 32`) и используйте **одно и то же** значение:
+Сгенерируйте длинный случайный ключ сервиса (например `openssl rand -hex 32`); он не связан с PAT GitHub. Все переменные: [ENVIRONMENT.md](ENVIRONMENT.md).
 
-- `REVIEW_API_KEY` на сервере
-- GitHub secret `AI_REVIEW_API_KEY`
-Прямой webhook требует только валидную подпись `X-Hub-Signature-256` (API-ключ не нужен). GitHub рекомендует не помещать ключи в URL доставки. Если `GITHUB_WEBHOOK_SECRET` не задан, webhook-эндпойнт отключён, но `/api/v1/reviews` работает (с `REVIEW_API_KEY`).
+<!-- section: option-a-fine-grained-pat -->
+## Вариант A: fine-grained PAT
 
-## Вариант: fine-grained PAT
-
-Если GitHub App нет, достаточно PAT (`github_pat_*`) с доступом к тестовому репозиторию. В `.env`:
+Без GitHub App достаточно PAT (`github_pat_*`) с доступом к ревьюируемым репозиториям. В `.env`:
 
 ```bash
 GITHUB_TOKEN=github_pat_...
-# либо GITHUB_PAT=github_pat_...
-REVIEW_API_KEY=<свой ключ API сервиса, не PAT>
-GITHUB_WEBHOOK_SECRET=<secret webhook репозитория, если настраиваете webhook>
+# or GITHUB_PAT=github_pat_...
+REVIEW_API_KEY=<service API key, not the PAT>
+GITHUB_WEBHOOK_SECRET=<repository webhook secret, if you use a webhook>
 ```
 
-Поля App (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) можно оставить пустыми. Если задан PAT, JWT приложения не используется. Комментарии в PR идут от имени владельца токена. Для статуса прогресса (commit status `autoreview`) PAT нужно право **Commit statuses: Read and write** (у классического PAT — `repo:status`); без него ревью работает, просто без статуса.
+Права на репозиторий:
 
-События: GitHub Action в репозитории с кодом ([examples/github/ai-review-trigger.yml](../../examples/github/ai-review-trigger.yml), фильтры paths/branches — [OPERATIONS.md](OPERATIONS.md)) или ручной `POST /api/v1/reviews`. Прямой webhook станет рекомендуемым способом после изменения авторизации. Репозиторий должен быть в `github.allowed_repos`. CI этого сервиса (`ci.yml`) ревью не вызывает.
+- **Pull requests**: Read and write (sticky-комментарий, заголовок/описание PR).
+- **Contents**: Read-only (для `git clone`). Бот никогда не пишет в содержимое репозитория.
+- **Commit statuses**: Read and write для статуса прогресса `autoreview` (classic PAT: `repo:status`). Необязательно; без него ревью идёт без статуса.
 
-## 1. Создать GitHub App
+Оставьте поля App (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) пустыми; с PAT JWT App не используется. Комментарии в PR появляются от аккаунта владельца токена. Сначала проверьте на одном репозитории и убедитесь, что работают и clone, и комментарий.
 
-1. GitHub → **Settings** организации → **Developer settings** → **GitHub Apps** → **New GitHub App**.
-2. Имя, например `Open PR Review`.
-3. **Homepage URL** — URL сервиса или внутренний docs.
-4. **Webhook**
-   - Для текущего MVP можно отключить webhook и запускать ревью через GitHub Actions. App при этом даёт токен для чтения PR и публикации комментария.
-   - Включить webhook с URL `https://review.example.com/api/v1/pull-request` без ключа в URL и задать `GITHUB_WEBHOOK_SECRET` на App и на сервере (подпись обязательна).
-5. **Permissions** (Repository):
+<!-- section: option-b-github-app -->
+## Вариант B: GitHub App
+
+1. **Settings** организации (или аккаунта) → **Developer settings** → **GitHub Apps** → **New GitHub App**.
+2. Имя, например `Autoreview`. **Homepage URL**: URL сервиса или внутренняя документация.
+3. **Webhook**: либо выключите его и запускайте ревью через GitHub Actions (App всё равно даёт токен для чтения PR, clone и комментариев), либо включите с `https://review.example.com/api/v1/pull-request` (без ключа в URL) и одинаковым `GITHUB_WEBHOOK_SECRET` в App и на сервере.
+4. **Repository permissions**:
    - **Contents**: Read-only
    - **Pull requests**: Read and write
    - **Metadata**: Read-only
-   - **Checks**: Read and write — для check run `autoreview` с прогрессом ревью (необязательно: без него ревью работает, просто без статуса)
-6. При будущем включении webhook подписаться только на **Pull request**.
-7. Where can this App be installed: **Only on this account**.
-8. Create App. Запомните **App ID** → `GITHUB_APP_ID`.
-9. **Generate a private key** → скачайте `.pem`. Содержимое (или путь к файлу) → `GITHUB_APP_PRIVATE_KEY`.
-10. **Install App** на репозитории из `github.allowed_repos` в `config.yaml`. После установки можно взять **Installation ID** → `GITHUB_INSTALLATION_ID` (если `0`, сервис резолвит сам).
+   - **Checks**: Read and write, для check run `autoreview` (необязательно; без него ревью идёт без статуса)
+5. С webhook подпишитесь только на события **Pull request**.
+6. Where can this App be installed: **Only on this account** (или any account, если вы обслуживаете несколько организаций одним App, см. [MULTI_OWNER.md](MULTI_OWNER.md#подключение-ещё-одной-организации)).
+7. Создайте App и запишите **App ID** → `GITHUB_APP_ID`.
+8. **Generate a private key** и положите содержимое `.pem` (или путь к файлу) в `GITHUB_APP_PRIVATE_KEY`.
+9. **Install** App на репозитории из `github.allowed_repos`. **Installation ID** можно указать в `GITHUB_INSTALLATION_ID`; `0` позволяет сервису найти его самому.
 
-Для прямого webhook требуется только `GITHUB_WEBHOOK_SECRET` (API-ключ не нужен). `AI_REVIEW_API_KEY` нужен для GitHub Actions (`/api/v1/reviews`) и ручных вызовов.
+Прямому webhook нужен только `GITHUB_WEBHOOK_SECRET`. `AI_REVIEW_API_KEY` нужен для GitHub Actions (`/api/v1/reviews`) и ручных вызовов.
 
-## 2. Organization / repository secret
+<!-- section: organization-or-repository-secret-for-actions -->
+## Секрет организации или репозитория для Actions
 
-1. GitHub → Organization **Settings** → **Secrets and variables** → **Actions** → **New organization secret**
-   (либо Secrets конкретного репозитория).
-2. Name: `AI_REVIEW_API_KEY`
-3. Value: тот же ключ, что `REVIEW_API_KEY` на сервере.
-4. Repository access: репозитории, где будет вызываться API (и где установлен App).
+1. **Settings** организации → **Secrets and variables** → **Actions** → **New organization secret** (или секреты репозитория).
+2. Имя `AI_REVIEW_API_KEY`, значение: `REVIEW_API_KEY` сервера (или ключ owner'а).
+3. Repository access: репозитории, которые вызывают API.
+4. Переменная `AI_REVIEW_URL`: базовый HTTPS URL без завершающего слеша.
 
-## 3. Конфиг сервиса
+Скопируйте [пример workflow](../../examples/github/ai-review-trigger.yml) в каждый ревьюируемый репозиторий как `.github/workflows/ai-review.yml`. Он ссылается на `maxsharlaev/autoreview-bot@main`; для форка или недоступного workflow измените `uses:` или скопируйте шаги reusable workflow этого репозитория. Он вызывает `POST /api/v1/reviews` с URL PR, поэтому HMAC webhook не нужен. `ci.yml` этого репозитория только тестирует и собирает сервис. Фильтры: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#github-actions-в-ревьюируемом-репозитории).
 
-`.env`:
+<!-- section: service-configuration -->
+## Конфигурация сервиса
+
+`.env` для App:
 
 ```bash
-REVIEW_API_KEY=<тот же ключ, что AI_REVIEW_API_KEY>
-GITHUB_WEBHOOK_SECRET=<webhook secret из App>
+REVIEW_API_KEY=<same as AI_REVIEW_API_KEY>
+GITHUB_WEBHOOK_SECRET=<App webhook secret>
 GITHUB_APP_ID=<app id>
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----..."
 GITHUB_INSTALLATION_ID=0
 WORKER_MAX_JOBS=4
 ```
 
-`config.yaml` — список репозиториев (можно несколько):
+`config.yaml`:
 
 ```yaml
 github:
@@ -88,57 +93,43 @@ github:
     # - example-org/another-repo
 ```
 
-События из репозиториев вне списка сервис игнорирует (`202`, `repo_not_allowed`).
+События из репозиториев вне непустого списка игнорируются (`202`, `repo_not_allowed`); ручные вызовы API получают `403`.
 
-## 4. Проверка
+<!-- section: verify -->
+## Проверка
 
 После `docker compose up` и публичного HTTPS (или туннеля):
 
-1. Настройте GitHub Action по [примеру](../../examples/github/ai-review-trigger.yml), используя HTTPS URL сервиса и `AI_REVIEW_API_KEY` в GitHub Secret.
-2. Откройте тестовый PR в установленном репо. В логах worker появится `review_run`; в PR — sticky comment `<!-- open-pr-review -->`.
+1. Настройте Action, как описано выше.
+2. Откройте тестовый не draft PR. В логе worker'а появляется `review_run`; PR получает sticky-комментарий `<!-- open-pr-review -->`.
 3. Статус прогона:
 
-```bash
-curl -H "Authorization: Bearer $AI_REVIEW_API_KEY" \
-  https://review.example.com/api/v1/reviews/<review_run_id>
-```
+   ```bash
+   curl -H "Authorization: Bearer $AI_REVIEW_API_KEY" \
+     https://review.example.com/api/v1/reviews/<review_run_id>
+   ```
 
-Вызов из GitHub Actions (фильтры `paths` / `branches`, секреты): [OPERATIONS.md](OPERATIONS.md) и [examples/github/ai-review-trigger.yml](../../examples/github/ai-review-trigger.yml).
-
+<!-- section: parallel-prs -->
 ## Параллельные PR
 
-Каждый запуск кладёт отдельный job в очередь. Worker ARQ берёт до `WORKER_MAX_JOBS` заданий сразу (по умолчанию **4**). Разные PR обрабатываются параллельно.
+Каждый прогон — отдельная job очереди. ARQ worker берёт до `WORKER_MAX_JOBS` job одновременно (по умолчанию **4**); разные PR выполняются параллельно. Повтор того же `head_sha` переиспользует прогон, новый SHA отменяет незавершённый, а конкурентные доставки по одному PR сериализуются ([API.md](API.md#гарантии-конкурентности)).
 
-При последовательной доставке повтор того же `head_sha` переиспользует существующий прогон. Новый SHA запрашивает отмену незавершённого задания. Защита от одновременной доставки и проверка SHA перед публикацией входят в [roadmap](ROADMAP.md).
+Чтобы масштабироваться, увеличьте `WORKER_MAX_JOBS` и/или запустите больше реплик worker'а: `docker compose up -d --scale worker=N`. Метрики worker'а не публикуются на хосте, а поставляемый scrape job находит каждую реплику по имени сервиса ([OBSERVABILITY.md](OBSERVABILITY.md)). Ограничения — квота модели и клонирование, а не FastAPI.
 
-Чтобы поднять параллелизм: увеличьте `WORKER_MAX_JOBS` и/или количество контейнеров `worker` в Compose. Упираетесь в лимиты OpenAI и клонирование репозиториев, не в FastAPI.
-
+<!-- section: several-owners -->
 ## Несколько owner'ов
 
-У каждого owner'а в блоке `owners:` файла `config.yaml` свои креды GitHub и webhook-секрет; в YAML указываются только имена переменных (см. [README](../MULTI_OWNER.md)). Без явных `*_env` имена такие: `OWNER_<ID>_GITHUB_TOKEN` (PAT) или `OWNER_<ID>_GITHUB_APP_ID` и `OWNER_<ID>_GITHUB_APP_PRIVATE_KEY` (App), `OWNER_<ID>_GITHUB_WEBHOOK_SECRET` и `OWNER_<ID>_REVIEW_API_KEY`; `<ID>` в верхнем регистре, `-` заменяется на `_`.
+У каждого owner'а в `owners:` свои креды GitHub, секрет webhook и необязательный API key owner'а, заданные именами переменных. Именование, два способа подключить ещё одну организацию (тот же App с другой установкой или свой App/PAT с `/api/v1/pull-request/<owner-id>`) и ответы, специфичные для owner'ов: [MULTI_OWNER.md](MULTI_OWNER.md).
 
-Два способа подключить ещё одну организацию:
-
-1. **Тот же GitHub App, другая установка.** Установите App в другую организацию. Укажите owner'у те же имена переменных App (и webhook-секрета) и закрепите его репозитории через `allowed_repos: [org-b/*]` или `installation_id`. События по-прежнему идут на `/api/v1/pull-request`; сервис маршрутизирует их по репозиторию и installation id. Общий секрет здесь допустим.
-2. **Свой App или PAT.** Создайте для owner'а отдельный App или PAT и направьте вебхук на `https://review.example.com/api/v1/pull-request/<owner-id>`. Этот адрес проверяет только секрет этого owner'а.
-
-Для запуска из Actions используйте операторский `REVIEW_API_KEY` с `X-Review-Owner: <owner-id>` (или `?owner=`) либо ключ owner'а из `api.key_env`. Дополнительные ответы:
-
-| Ответ | Что значит |
-| --- | --- |
-| `403 owner_signature_mismatch` | Вебхук подписан секретом не того owner'а, к которому относится репозиторий |
-| `202 skipped unknown_owner` / API `403` | Репозиторий никем не закреплён и `routing.unclaimed: reject` |
-| `404 unknown_owner` | Неизвестный owner в URL, `X-Review-Owner` или `?owner=` |
-| `409 owner_repo_conflict` | Явно указан owner для репозитория, закреплённого за другим owner'ом |
-| `403 owner_forbidden` | Ключ owner'а использован для другого owner'а |
-| `401` на `/pull-request/<id>` отключённого owner'а | Нет подписи или она неверна; с верной подписью ответ `202 owner_disabled` |
-
+<!-- section: common-errors -->
 ## Частые ошибки
 
 | Симптом | Что проверить |
 | --- | --- |
-| `503` на webhook | `GITHUB_WEBHOOK_SECRET` не задан (пуст, placeholder или слишком короткий) |
-| `401` на webhook | `X-Hub-Signature-256` отсутствует или неверный (проверьте `GITHUB_WEBHOOK_SECRET` на App и на сервере) |
-| `401` на `/api/v1/reviews` | `REVIEW_API_KEY` отсутствует или неверный |
-| Вебхук 202, комментария нет | Worker запущен; репозиторий в `allowed_repos`; PR не draft/fork; автор с write access. |
-| Clone/comment 403 | Git clone и REST — разные протоколы. Для clone у fine-grained PAT GitHub часто требует Contents **Read and write**, даже если мы только читаем SHA. Комментарий — отдельно: Pull requests **write**. |
+| `503` на webhook | `GITHUB_WEBHOOK_SECRET` не настроен (пустой, заглушка или слишком короткий) |
+| `401` на webhook | `X-Hub-Signature-256` отсутствует или неверен: сравните секрет в App и на сервере |
+| `401` на `/api/v1/reviews` | `REVIEW_API_KEY` отсутствует или неверен |
+| `repo_not_allowed` | Непустой `github.allowed_repos` должен содержать точное `owner/repo` (или `owner/*`) |
+| Webhook `202`, комментария нет | Worker запущен; репозиторий разрешён; PR не draft/fork; у автора есть право write ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)) |
+| `403` при clone или комментарии | Clone требует Contents read, а доступ токена к репозиториям должен включать этот репозиторий (для организации fine-grained PAT может требовать одобрения владельца); комментарию нужен Pull requests **write** |
+| Нет статуса прогресса | Право Checks (App) или Commit statuses (PAT) ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |

@@ -1,3 +1,4 @@
+<!-- section: github-app-pat-and-trigger-setup -->
 # GitHub App, PAT and trigger setup
 
 Full host deployment (Compose, network, Prometheus): [DEPLOY.md](DEPLOY.md). Russian translation: [ru/GITHUB_SETUP.md](ru/GITHUB_SETUP.md).
@@ -6,6 +7,7 @@ The service receives Pull request events on `POST /api/v1/pull-request`. That en
 
 `GET /health`, `GET /is-ready` and `GET /metrics` are open for probes and Prometheus; the worker serves `GET http://worker:9100/metrics`. Queue snapshot: `GET /api/v1/ops/status` (API key). API reference: [API.md](API.md).
 
+<!-- section: where-secrets-go -->
 ## Where secrets go
 
 | Value | Location | Purpose |
@@ -19,6 +21,7 @@ The service receives Pull request events on `POST /api/v1/pull-request`. That en
 
 Generate a long random service key (for example `openssl rand -hex 32`); it is separate from the GitHub PAT. All variables: [ENVIRONMENT.md](ENVIRONMENT.md).
 
+<!-- section: option-a-fine-grained-pat -->
 ## Option A: fine-grained PAT
 
 Without a GitHub App, a PAT (`github_pat_*`) with access to the reviewed repositories is enough. In `.env`:
@@ -38,6 +41,7 @@ Repository permissions:
 
 Leave the App fields (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) empty; with a PAT the App JWT is not used. PR comments appear under the token owner's account. Test on one repository first and verify both clone and comment.
 
+<!-- section: option-b-github-app -->
 ## Option B: GitHub App
 
 1. Organization (or account) **Settings** → **Developer settings** → **GitHub Apps** → **New GitHub App**.
@@ -56,6 +60,7 @@ Leave the App fields (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) empty; with a P
 
 A direct webhook needs only `GITHUB_WEBHOOK_SECRET`. `AI_REVIEW_API_KEY` is for GitHub Actions (`/api/v1/reviews`) and manual calls.
 
+<!-- section: organization-or-repository-secret-for-actions -->
 ## Organization or repository secret for Actions
 
 1. Organization **Settings** → **Secrets and variables** → **Actions** → **New organization secret** (or the repository's secrets).
@@ -65,6 +70,7 @@ A direct webhook needs only `GITHUB_WEBHOOK_SECRET`. `AI_REVIEW_API_KEY` is for 
 
 Copy [the example workflow](../examples/github/ai-review-trigger.yml) into each reviewed repository as `.github/workflows/ai-review.yml`. It references `maxsharlaev/autoreview-bot@main`; for a fork or an inaccessible workflow adjust `uses:` or copy the steps of this repository's reusable workflow. It calls `POST /api/v1/reviews` with the PR URL, so no webhook HMAC is needed. This repository's `ci.yml` only tests and builds the service. Filters: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#github-actions-in-a-reviewed-repository).
 
+<!-- section: service-configuration -->
 ## Service configuration
 
 `.env` for an App:
@@ -89,6 +95,7 @@ github:
 
 Events from repositories outside a non-empty list are ignored (`202`, `repo_not_allowed`); manual API calls get `403`.
 
+<!-- section: verify -->
 ## Verify
 
 After `docker compose up` and public HTTPS (or a tunnel):
@@ -102,16 +109,19 @@ After `docker compose up` and public HTTPS (or a tunnel):
      https://review.example.com/api/v1/reviews/<review_run_id>
    ```
 
+<!-- section: parallel-prs -->
 ## Parallel PRs
 
 Each run is a separate queue job. The ARQ worker takes up to `WORKER_MAX_JOBS` jobs at once (default **4**); different PRs run in parallel. Repeating the same `head_sha` reuses the run, a new SHA cancels the unfinished one, and concurrent deliveries for one PR are serialized ([API.md](API.md#concurrency-guarantees)).
 
 To scale: raise `WORKER_MAX_JOBS`, and/or run more worker replicas with `docker compose up -d --scale worker=N`. Worker metrics are not published on the host, and the bundled scrape job finds every replica by its service name ([OBSERVABILITY.md](OBSERVABILITY.md)). The limits are the model quota and cloning, not FastAPI.
 
+<!-- section: several-owners -->
 ## Several owners
 
 Each owner in `owners:` has its own GitHub credentials, webhook secret and optional scoped API key, set by env var name. Naming, the two ways to connect another organization (same App with another installation, or an own App/PAT with `/api/v1/pull-request/<owner-id>`), and the owner-specific responses: [MULTI_OWNER.md](MULTI_OWNER.md).
 
+<!-- section: common-errors -->
 ## Common errors
 
 | Symptom | Check |

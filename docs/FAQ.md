@@ -1,3 +1,4 @@
+<!-- section: faq -->
 # FAQ
 
 **Does the bot block merges?**

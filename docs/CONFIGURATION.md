@@ -1,3 +1,4 @@
+<!-- section: configuration-reference-config-yaml -->
 # Configuration reference (`config.yaml`)
 
 `config.yaml` holds non-secret settings. Secrets live in the environment (see [ENVIRONMENT.md](ENVIRONMENT.md)); YAML only names the variables that hold them. Start from [`config.example.yaml`](../config.example.yaml).
@@ -10,6 +11,7 @@
 
 Column **Owner** says whether the key can be overridden in an `owners.<id>` block (see [MULTI_OWNER.md](MULTI_OWNER.md)). Overrides are partial and deep-merged over the top-level value; the merged section is validated like the global one.
 
+<!-- section: github -->
 ## `github`
 
 | Key | Type | Default | Owner | Description |
@@ -20,6 +22,7 @@ Column **Owner** says whether the key can be overridden in an `owners.<id>` bloc
 
 Owner GitHub blocks (`owners.<id>.github.*`) are listed in [Owners](#owners).
 
+<!-- section: jira -->
 ## `jira`
 
 Used only by the legacy owner. Named owners use only their own `owners.<id>.jira` block; nothing is inherited.
@@ -33,6 +36,7 @@ Used only by the legacy owner. Named owners use only their own `owners.<id>.jira
 
 Jira is active only when base URL, email and `JIRA_API_TOKEN` are all set. The service account needs browse, comment and transition permissions on those projects. The service never creates issues.
 
+<!-- section: slack -->
 ## `slack`
 
 Used only by the legacy owner; named owners use their own `owners.<id>.slack` block.
@@ -42,6 +46,7 @@ Used only by the legacy owner; named owners use their own `owners.<id>.slack` bl
 | `slack.enabled` | bool | `false` | own block (default `true` there) | Post notifications and the digest. Needs `SLACK_BOT_TOKEN` and a channel. With `false` the digest is stored in the database only. |
 | `slack.channel` | string | `""` | own block | Channel name or id. Use a private channel: unredacted finding details can be sent there (see [PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md)). |
 
+<!-- section: schedule -->
 ## `schedule`
 
 | Key | Type | Default | Owner | Description |
@@ -51,6 +56,7 @@ Used only by the legacy owner; named owners use their own `owners.<id>.slack` bl
 
 The digest runs per owner and only for owners with `features.digest_enabled: true`.
 
+<!-- section: features -->
 ## `features`
 
 | Key | Type | Default | Owner | Description |
@@ -59,6 +65,7 @@ The digest runs per owner and only for owners with `features.digest_enabled: tru
 | `features.jira_transition` | bool | `true` | yes | Move the issue to `rework_status` when P0/P1 findings exist. |
 | `features.digest_enabled` | bool | `true` | yes | Include this owner in the scheduled digest. |
 
+<!-- section: language -->
 ## `language`
 
 | Key | Type | Default | Owner | Description |
@@ -68,6 +75,7 @@ The digest runs per owner and only for owners with `features.digest_enabled: tru
 
 Jira and Slack text currently use English labels.
 
+<!-- section: pr-description -->
 ## `pr_description`
 
 Optional PR description and title drafts, off by default. Behaviour: [PR_DESCRIPTION.md](PR_DESCRIPTION.md).
@@ -84,12 +92,14 @@ Optional PR description and title drafts, off by default. Behaviour: [PR_DESCRIP
 | `pr_description.language` | `auto` or BCP 47 code | unset | yes | Draft language. Unset falls back to `pr_text.language`, then `language.details`. `auto` detects English/Russian from the human title, body, then commits. |
 | `pr_description.prompt_file` | path | `""` | yes | Replacement prompt, e.g. `prompts/local/pr_description.md`. Empty uses [`prompts/pr_description.md`](../prompts/pr_description.md). A missing file fails the step. |
 
+<!-- section: pr-text -->
 ## `pr_text`
 
 | Key | Type | Default | Owner | Description |
 | --- | --- | --- | --- | --- |
 | `pr_text.language` | `auto` or BCP 47 code | unset | — | Legacy name of `pr_description.language`, used only when that key is unset. |
 
+<!-- section: size-guard -->
 ## `size_guard`
 
 Checked before any model call. Details: [PR_DESCRIPTION.md](PR_DESCRIPTION.md#size-guard).
@@ -104,6 +114,7 @@ Checked before any model call. Details: [PR_DESCRIPTION.md](PR_DESCRIPTION.md#si
 
 A value exactly at a threshold is allowed.
 
+<!-- section: public-repos -->
 ## `public_repos`
 
 Applies only to repositories GitHub reports as public (unknown visibility counts as public). Details: [PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md).
@@ -113,6 +124,7 @@ Applies only to repositories GitHub reports as public (unknown visibility counts
 | `public_repos.jira_disclosure` | `none` \| `key_only` \| `full` | `key_only` | yes | What bot output may show about the linked Jira issue. |
 | `public_repos.security_findings` | `redact` \| `redact_all` \| `full` | `redact` | yes | Redact security findings (by category and keywords), all findings, or none. |
 
+<!-- section: progress-status -->
 ## `progress_status`
 
 Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRESS_STATUS.md).
@@ -124,6 +136,7 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 | `progress_status.reaction` | bool | `false` | yes | Add an `eyes` reaction to the PR while a worker reviews it. |
 | `progress_status.timeout_seconds` | float, > 0 and ≤ 30 | `5` | yes | Cap per GitHub call. |
 
+<!-- section: codex -->
 ## `codex`
 
 | Key | Type | Default | Owner | Description |
@@ -142,12 +155,14 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 
 Common lockfiles, `.env*` files and files with image, PDF, archive, font or compiled-binary suffixes are left out of the model context. Other generated, minified or vendored files (for example `.min.js` or `.map`) are not detected and are sent like source. Full list: [DATA_HANDLING.md](DATA_HANDLING.md#sent-to-the-model-provider).
 
+<!-- section: routing -->
 ## `routing`
 
 | Key | Type | Default | Owner | Description |
 | --- | --- | --- | --- | --- |
 | `routing.unclaimed` | `default` \| `reject` | `default` | — | Where a repository that no owner claims goes: the default owner, or rejected as `unknown_owner`. Unknown keys under `routing` are rejected. |
 
+<!-- section: owners -->
 ## `owners`
 
 Optional. Without it the service runs as one owner, `default`, built from the environment and the sections above. Modes, routing and examples: [MULTI_OWNER.md](MULTI_OWNER.md).

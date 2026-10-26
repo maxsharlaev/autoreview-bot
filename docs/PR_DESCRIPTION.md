@@ -1,3 +1,4 @@
+<!-- section: optional-pr-description-drafts -->
 # Optional PR description drafts
 
 Russian translation: [ru/PR_DESCRIPTION.md](ru/PR_DESCRIPTION.md). Every key: [CONFIGURATION.md](CONFIGURATION.md#pr_description).
@@ -41,10 +42,12 @@ The default prompt is [`prompts/pr_description.md`](../prompts/pr_description.md
 
 Output is checked against [`schemas/pr_description_output.json`](../schemas/pr_description_output.json). Sections are rendered as plain text with HTML and mentions escaped; bare URLs are broken up to prevent automatic linking. Empty sections and the linked-task section without Jira are omitted. `pr_description.language: auto` detects English or Russian from human title, then human body, then commits; sparse input falls back to `language.details`. Explicit language codes are passed to the model. The former `pr_text.language` key remains a fallback for existing installations. Another language code also applies to the title subject. Section headings come from fixed English/Russian dictionaries, with English headings for other language codes. English and Russian output is checked by script plus the model's declared language; other language codes use a separate read-only Codex language check. A mismatch causes one regeneration, then publication is skipped. Conventional-commit type and scope remain English. The bot does not claim tests passed without evidence.
 
+<!-- section: size-guard -->
 ## Size guard
 
 The size guard uses PR commit and line totals from the webhook before any model call. If a webhook omits these fields, or for a manual run, it uses the PR metadata already loaded for the review, without another request. Above a soft threshold, review runs but description and title generation are skipped. Above a hard threshold, the run is skipped with one sticky notice; later pushes do not repeat that notice. Adding the `autoreview:force` label triggers a new run and bypasses both thresholds. At an exact threshold, the PR is still allowed.
 
+<!-- section: commit-messages -->
 ## Commit messages
 
 The commit prompt contains only the first line of each useful commit message, grouped by conventional type. Fixup, squash, merge and WIP messages are omitted. `max_commit_chars` bounds the selected subjects; the prompt states the total and how many commits were not shown. The adapter reads no more than GitHub's 250 PR commits (`max_commit_messages`, default 250, is a legacy cap on that count).

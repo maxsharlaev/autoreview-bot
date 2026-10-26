@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.env.example` lists every variable; `RUN_MIGRATIONS`, which no code reads,
   is no longer set there.
 
+- **Russian documentation mirror**: every English page in `docs/` now has a
+  Russian counterpart in `docs/ru/` with the same sections in the same order
+  (new: API, configuration, environment, data handling, FAQ, multiple owners,
+  observability, upgrade, public release checklist; `docs/ru/OPERATIONS.md` is
+  now `docs/ru/TROUBLESHOOTING.md`). `tests/test_docs.py` checks that the file
+  sets and heading structures match.
+
+- **Roadmap**: a long-term direction, spec-driven review (checking a PR against
+  acceptance criteria in the repository), and control over PR title and
+  description edits (policy with per-owner and per-repository overrides,
+  deterministic low-quality checks, a two-pass spec check), in
+  `docs/ROADMAP.md` and its Russian mirror.
+
 - **Review progress status** (#7): webhook runs report progress on the PR head
   as an `autoreview` check run (GitHub App, needs Checks: Read and write) or
   commit status (PAT, needs Commit statuses: Read and write). On by default

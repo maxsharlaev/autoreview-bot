@@ -1,87 +1,105 @@
-# Архитектура AI Review Service
+<!-- section: architecture -->
+# Архитектура
 
-Advisory MVP: GitHub webhook → очередь → Codex CLI → sticky-comment. Без blocking check и без создания Jira-задач. План развития: [ROADMAP.md](ROADMAP.md).
+Autoreview-bot — рекомендательный сервис: событие PR в GitHub → очередь → Codex CLI → проверенный JSON → один обновляемый комментарий в PR. Он не блокирует merge и не создаёт задачи в Jira. См. [роадмап](ROADMAP.md) и [английскую версию](../ARCHITECTURE.md).
 
-## Поток
+<!-- section: pipeline -->
+## Конвейер
 
 ```text
-GitHub PR event
-  -> POST /api/v1/pull-request (обязательная подпись HMAC, без API key)
-  -> Redis / ARQ (до WORKER_MAX_JOBS параллельных job)
+GitHub PR event or Actions job
+  -> POST /api/v1/pull-request (HMAC signature, no API key)
+     or POST /api/v1/reviews (API key)
+  -> Redis / ARQ (up to WORKER_MAX_JOBS jobs in parallel)
   -> Review worker
-       -> GitHub App API (PR, diff, permissions)
-       -> Jira read (ключ из branch/title/body)
-       -> Context builder (лимиты, untrusted-блоки)
-       -> git clone head SHA (PAT / installation token via GIT_ASKPASS)
+       -> GitHub API (PR, diff, author permission)
+       -> Jira read (key from branch, title or body)
+       -> Context builder (limits, untrusted blocks)
+       -> git clone at head SHA (PAT or installation token via GIT_ASKPASS)
        -> codex exec --sandbox read-only --output-schema
        -> JSON verifier
        -> Postgres (runs / findings / transitions)
-       -> Publisher: sticky comment
-       -> Jira comment + transition (P0/P1)
-       -> Slack (если enabled)
+       -> Publisher: sticky comment, progress status
+       -> Jira comment and status transition (P0/P1)
+       -> Slack (if enabled)
 Scheduler
-  -> дайджест открытых PR
-  -> Slack или только запись в DB
+  -> digest of open PRs
+  -> Slack, or only a database record
 ```
 
+<!-- section: components -->
 ## Компоненты
 
-| Компонент | Роль |
+| Компонент | Ответственность |
 | --- | --- |
-| `app/api/v1/pull_request.py` | Ingress webhook, идемпотентность, cancel старого SHA |
-| `app/adapters/github.py` | GitHub App JWT, installation token, PR/diff/comments |
-| `app/adapters/jira.py` | Чтение issue, комментарий, переход статуса |
-| `app/adapters/slack.py` | Каркас; по умолчанию выключен |
-| `app/services/orchestrator.py` | Пайплайн одного `review_run` |
-| `app/services/codex_runner.py` | Subprocess Codex с урезанным env |
-| `app/services/verifier.py` | JSON Schema, path/line, cap findings |
-| `app/services/publisher.py` | Sticky comment, Jira write, Slack |
-| `app/workers` | ARQ jobs + hourly digest, metrics on `:9100` |
-| `GET /metrics`, `GET /api/v1/ops/status` | Prometheus + снимок очереди/ошибок |
+| `app/api/v1/pull_request.py` | Приём webhook, проверка подписи, маршрутизация по owner'ам |
+| `app/api/v1/reviews.py` | Ручной API ревью и статус прогона |
+| `app/services/review_enqueue.py` | Создание прогона, дедупликация, отмена старых SHA |
+| `app/adapters/github.py` | JWT GitHub App, installation token или PAT; PR, diff, комментарии, статусы |
+| `app/adapters/jira.py` | Чтение задачи, комментарий и переход статуса |
+| `app/adapters/slack.py` | Необязательные уведомления; по умолчанию выключены |
+| `app/owners/` | Реестр owner'ов, маршрутизация, креды и конфиг по owner'ам |
+| `app/services/orchestrator.py` | Один прогон ревью |
+| `app/services/codex_runner.py` | Подпроцесс Codex с ограниченным окружением |
+| `app/services/verifier.py` | JSON Schema, пути замечаний, ограничение числа |
+| `app/services/publisher.py` | Sticky-комментарий, запись в Jira, Slack |
+| `app/services/progress_status.py` | Check run / commit status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |
+| `app/workers` | Job'ы ARQ, дайджест, очистка статусов, метрики worker'а на `:9100` |
+| `GET /metrics`, `GET /api/v1/ops/status` | Prometheus и снимок очереди/ошибок |
 
+<!-- section: observability -->
 ## Наблюдаемость
 
-Prometheus: API `:8000/metrics`, worker `:9100/metrics`. Стек Grafana/Prometheus/Loki в этот Compose **не входит** — внешний Prometheus сам скрейпит эндпойнты. Артефакты импорта: `observability/`. Документы: [OBSERVABILITY.md](../OBSERVABILITY.md), [OPERATIONS.md](OPERATIONS.md).
+Эндпойнты Prometheus: API `:8000/metrics`, worker `:9100/metrics`. Grafana, Prometheus и Loki **не** входят в этот Compose-файл; эндпойнты скрейпит ваш Prometheus. Артефакты для импорта лежат в `observability/`. См. [OBSERVABILITY.md](OBSERVABILITY.md) и [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-## Идемпотентность
+<!-- section: deduplication-and-concurrency -->
+## Дедупликация и конкурентность
 
-Ключ `{repository}:{pr_number}:{head_sha}`. При последовательной доставке повтор webhook с тем же SHA переиспользует `pending` / `running` / `completed`; `failed` можно повторить. Новый SHA запрашивает отмену прежнего job. Ручной `POST /api/v1/reviews` по умолчанию `force: true` — новый run на тот же SHA. Разные PR обрабатываются параллельно (`WORKER_MAX_JOBS`). Атомарная дедупликация и проверка актуального SHA перед публикацией входят в roadmap.
+Ключ — `{repository}:{pr_number}:{head_sha}`. Повторная доставка для того же SHA переиспользует `pending`, `running` или `completed` прогон; `failed` можно повторить. Новый SHA отменяет предыдущий прогон. Ручной `POST /api/v1/reviews` по умолчанию использует `force: true` — новый прогон на том же SHA. Разные PR выполняются параллельно (`WORKER_MAX_JOBS`).
 
-## Авторизация API
+Запросы по одному PR сериализуются advisory lock'ом Postgres, ARQ job id детерминированы для каждого прогона, а worker захватывает прогон условным обновлением, поэтому конкурентные доставки не создают дублирующих прогонов. Worker перечитывает head PR перед стартом и закрывает прогон как `HEAD_CHANGED`, если он сдвинулся; для приватных репозиториев он проверяет ещё раз перед публикацией. Подробнее: [API.md](API.md#гарантии-конкурентности).
 
-`POST /api/v1/reviews`, `GET /api/v1/reviews/{id}` и `GET /api/v1/ops/status` требуют `REVIEW_API_KEY`. `GET /metrics` открыт для внутреннего scrape (не публиковать наружу). `POST /api/v1/pull-request` принимает только запросы с верной подписью `X-Hub-Signature-256` (API-ключ не нужен); без валидного webhook-секрета эндпойнт отвечает 503, а Actions и ручной API продолжают работать. Ручной запуск без вебхука: `POST /api/v1/reviews`. Установка App и секретов: [GITHUB_SETUP.md](GITHUB_SETUP.md).
+<!-- section: api-authentication -->
+## Аутентификация API
 
+`POST /api/v1/reviews`, `GET /api/v1/reviews/{id}` и `GET /api/v1/ops/status` требуют API key. `GET /metrics` предназначен для внутреннего скрейпинга; не открывайте его наружу. `POST /api/v1/pull-request` принимает только запросы с валидным `X-Hub-Signature-256` (без API key); без валидного секрета webhook он возвращает 503, а Actions и ручной API продолжают работать. См. [API.md](API.md), [GITHUB_SETUP.md](GITHUB_SETUP.md) и [SECURITY.md](../../SECURITY.md).
+
+<!-- section: data-model -->
 ## Модель данных
 
-- `repositories` — GitHub full name, enabled
-- `pull_requests` — number, SHAs, issue key, author, assignee, state
-- `review_runs` — trigger, SHAs, status, versions, duration, error code
-- `findings` — stable id, severity, location, evidence
+- `repositories` — полное имя GitHub, enabled, owner, авторы комментариев
+- `pull_requests` — номер, SHA, ключ задачи, автор, исполнитель, состояние, заголовок бота
+- `review_runs` — триггер, SHA, статус, версии, длительность, код ошибки/пропуска, статус прогресса
+- `findings` — stable id, серьёзность, расположение, доказательства, видимость
 - `finding_transitions` — new / resolved / still_open / regressed / obsolete / needs_human
-- `task_snapshots` — Jira key и факт comment/transition
+- `task_snapshots` — ключ Jira и был ли сделан комментарий/переход
 - `digest_runs` — снимок дайджеста
 
-Raw diff в БД не хранится.
+Сырые diff не хранятся. Подробнее: [DATA_HANDLING.md](DATA_HANDLING.md).
 
+<!-- section: skips-and-errors -->
 ## Пропуски и ошибки
 
-- Fork PR и draft — `skipped`
-- Автор без write access — `skipped`
-- Репозиторий не в непустом allowlist — `skipped`; пустой список пока разрешает любой репозиторий
-- Слишком большой PR — comment `PR_TOO_LARGE_FOR_AI_REVIEW`
-- Нет Jira-ключа — warning, ревью кода всё равно
-- Jira недоступна — `ISSUE_CONTEXT_UNAVAILABLE`
-- Невалидный JSON Codex — один retry, затем `AI_OUTPUT_INVALID`
+- PR из форков и draft-PR: `skipped`.
+- Автор без права write: `skipped`.
+- Репозиторий вне непустого allowlist: `repo_not_allowed`. Пустой список разрешает любой репозиторий.
+- Слишком большой PR: комментарий `PR_TOO_LARGE_FOR_AI_REVIEW`.
+- Нет ключа Jira: предупреждение, код всё равно ревьюится. Jira недоступна: `ISSUE_CONTEXT_UNAVAILABLE`.
+- Невалидный JSON Codex: один повтор, затем `AI_OUTPUT_INVALID`.
 
+Все коды: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#коды-ошибок-и-пропусков).
+
+<!-- section: comment-language -->
 ## Язык комментария
 
-По умолчанию summary и details на английском. `language.summary` задаёт язык summary и title; `language.details` — язык scenario, evidence, recommendation и подписей PR-комментария. Поддерживаются `en` и `ru`.
+По умолчанию вывод на английском. `language.summary` управляет summary и заголовками замечаний; `language.details` — сценарием, доказательствами, рекомендацией и подписями комментария. Оба поддерживают `en` и `ru`.
 
+<!-- section: multiple-owners -->
 ## Несколько owner'ов
 
-Модель owner'ов живёт в `app/owners/`. `OwnerRegistry.build()` один раз при старте API и worker читает env и `config.yaml`, проверяет конфиг и строит для каждого активного owner'а неизменяемый `OwnerContext`: креды GitHub, webhook-секрет, API-ключ, привязки Jira и Slack, ключ модели и эффективный конфиг owner'а. Глобальные настройки для кредов читаются только там; адаптеры (`GitHubAppClient.from_credentials`, `JiraClient.from_binding`, `SlackClient.from_binding`, `Publisher.from_context`) получают привязки owner'а. Конфиг без `owners:` даёт одного owner'а `default`, его эффективный конфиг совпадает с глобальным (режимы A–D описаны в [README](../MULTI_OWNER.md)).
+`app/owners/` содержит модель owner'а. `OwnerRegistry.build()` один раз при старте (API и worker) читает env и `config.yaml`, всё проверяет и строит замороженный `OwnerContext` для каждого активного owner'а: креды GitHub, секрет webhook, API key, привязки Jira и Slack, ключ модели и эффективный конфиг owner'а. Глобальные настройки читаются ради кредов только там; адаптеры (`GitHubAppClient.from_credentials`, `JiraClient.from_binding`, `SlackClient.from_binding`, `Publisher.from_context`) принимают привязки owner'а. Конфиг без `owners:` даёт одного owner'а, `default`, чей эффективный конфиг — глобальный (режимы A–D: [MULTI_OWNER.md](MULTI_OWNER.md#режимы)).
 
-- **Маршрутизация.** `resolve()` выбирает явно указанного owner'а, затем точный `org/repo`, затем `org/*`, затем installation id из вебхука и в конце `routing.unclaimed`; после этого применяется allowlist выбранного owner'а. Корневой вебхук проверяет подпись секретами всех owner'ов и отклоняет репозиторий другого owner'а с `owner_signature_mismatch`; `/api/v1/pull-request/<id>` проверяет только секрет этого owner'а.
-- **Эффективный конфиг.** Интеграции (`jira`, `slack`) берутся только из собственных блоков owner'а. Секции политик (`public_repos`, `language`, `features`, `pr_description`, `size_guard`, `progress_status`, `codex.model`/`reasoning_effort`) глубоко сливаются поверх глобальных. Worker, публикация, size guard, описание PR, проверка метки в вебхуке и дайджест читают эффективный конфиг owner'а запуска.
-- **Данные.** В `repositories`, `review_runs`, `digest_runs` и `findings` есть `owner_id` (миграции `005`–`007`); авторы комментариев хранятся вместе с owner'ом. Worker строит контекст по `review_runs.owner_id` и пропускает запуски, чей owner удалён, отключён или сменился (`owner_not_configured`, `owner_disabled`, `owner_changed`). Записи, сделанные до поддержки нескольких owner'ов, принадлежат `default` или owner'у с `aliases: [default]`.
-- **Изоляция.** Codex получает только ключ модели owner'а запуска (`OPENAI_API_KEY`/`CODEX_API_KEY`) в окружении по белому списку; git получает только GitHub-токен owner'а. Дайджест строится по owner'ам: свои креды GitHub, свой `DigestRun` и свой канал Slack.
+- **Маршрутизация.** `resolve()` выбирает явного owner'а, затем точную заявку `org/repo`, заявку `org/*`, id установки из webhook и наконец `routing.unclaimed`; затем применяется allowlist выбранного owner'а. Корневой webhook проверяет подпись по секретам всех owner'ов и отклоняет репозиторий другого owner'а с `owner_signature_mismatch`; `/api/v1/pull-request/<id>` проверяет только секрет этого owner'а.
+- **Эффективный конфиг.** Интеграции (`jira`, `slack`) берутся только из собственных блоков owner'а. Секции политик (`public_repos`, `language`, `features`, `pr_description`, `size_guard`, `progress_status`, `codex.model`/`reasoning_effort`) глубоко сливаются с глобальными секциями. Worker, publisher, size guard, описание PR, проверка метки в webhook и дайджест читают эффективный конфиг owner'а прогона.
+- **Данные.** `repositories`, `review_runs`, `digest_runs` и `findings` содержат `owner_id` (миграции `005`-`007`); авторы комментариев хранятся вместе со своим owner'ом. Worker строит контекст из `review_runs.owner_id` и пропускает прогоны, чей owner удалён, отключён или перемаршрутизирован (`owner_not_configured`, `owner_disabled`, `owner_changed`). Строки, записанные до поддержки нескольких owner'ов, принадлежат `default` или owner'у с `aliases: [default]`.
+- **Изоляция.** Codex получает только ключ модели owner'а прогона (`OPENAI_API_KEY`/`CODEX_API_KEY`) в окружении из allowlist; git получает только токен GitHub owner'а. Дайджест выполняется по каждому owner'у со своими кредами GitHub, `DigestRun` и каналом Slack.

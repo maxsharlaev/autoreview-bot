@@ -1,7 +1,9 @@
+<!-- section: data-handling -->
 # Data handling
 
 What the service sends to the model provider, what it stores, and how to delete it. Public repository rules: [PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md). Security model: [SECURITY.md](../SECURITY.md).
 
+<!-- section: sent-to-the-model-provider -->
 ## Sent to the model provider
 
 Model calls go through the Codex CLI with the API key of the run's owner (`OPENAI_API_KEY` or `OWNER_<ID>_OPENAI_API_KEY`).
@@ -22,6 +24,7 @@ Not sent: GitHub, Jira, Slack and database credentials are not passed to the rev
 
 For a public repository the review and PR text models do not receive Jira issue text; a separate read-only alignment check does, and publishes only a fixed result ([PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md#jira-jira_disclosure)). Retention on the provider side is governed by your agreement with it.
 
+<!-- section: stored-in-postgres -->
 ## Stored in Postgres
 
 | Table | Content |
@@ -36,18 +39,22 @@ For a public repository the review and PR text models do not receive Jira issue 
 
 No GitHub tokens or API keys are stored in the database.
 
+<!-- section: redis -->
 ## Redis
 
 The ARQ queue: job ids and arguments (run ids, repository, PR number), and short-lived results. Not the source of truth.
 
+<!-- section: temporary-files -->
 ## Temporary files
 
 The worker clones the PR head into a temporary directory (`ai-review-*` in the system temp directory, `TMPDIR`) and deletes it when the run ends. Codex runs with `--ephemeral`.
 
+<!-- section: logs -->
 ## Logs
 
 The service logs to stdout: run ids, repositories, PR numbers, statuses, error codes and short error texts. Tokens are not logged on purpose. Your log pipeline decides retention.
 
+<!-- section: retention-and-deletion -->
 ## Retention and deletion
 
 There is no automatic retention: rows stay until you delete them. Sticky comments, check runs and PR titles written to GitHub stay on GitHub.

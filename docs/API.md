@@ -1,3 +1,4 @@
+<!-- section: http-api -->
 # HTTP API
 
 The API listens on port 8000 (`127.0.0.1:8000` in Compose; put a TLS reverse proxy in front). FastAPI also serves the OpenAPI schema at `GET /openapi.json` and `GET /docs` without authentication.
@@ -14,6 +15,7 @@ The API listens on port 8000 (`127.0.0.1:8000` in Compose; put a TLS reverse pro
 | `GET /metrics` | none | Prometheus (API). The worker serves its own on `:9100/metrics`. Keep both internal. |
 | `GET /docs`, `GET /openapi.json` | none | Generated API schema. |
 
+<!-- section: authentication -->
 ## Authentication
 
 Send the key in one of:
@@ -29,10 +31,12 @@ Keys:
 
 A missing or wrong key is `401 {"detail": "invalid access key"}`. The webhook endpoints take no API key; they verify `X-Hub-Signature-256`. Never put a key in a URL.
 
+<!-- section: choosing-the-owner -->
 ## Choosing the owner
 
 With several owners ([MULTI_OWNER.md](MULTI_OWNER.md)) a request is routed by repository. To pick the owner explicitly send `X-Review-Owner: <owner-id>` or `?owner=<owner-id>` (case-insensitive, aliases accepted). Both set to different values is `400`. A scoped key always uses its own owner.
 
+<!-- section: post-api-v1-reviews -->
 ## `POST /api/v1/reviews`
 
 ```bash
@@ -50,6 +54,7 @@ $body = @{ pull_url = "https://github.com/example-org/example-repo/pull/1" } | C
 Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Headers $headers -ContentType "application/json" -Body $body
 ```
 
+<!-- section: body -->
 ### Body
 
 | Field | Type | Default | Description |
@@ -65,6 +70,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 
 The endpoint always reads the PR from GitHub with the owner's credentials and binds the run to its current head. Draft and fork PRs are accepted here but the worker skips them.
 
+<!-- section: response-202 -->
 ### Response `202`
 
 ```json
@@ -73,6 +79,7 @@ The endpoint always reads the PR from GitHub with the owner's credentials and bi
 
 `status` can be `running` or `completed` when `force: false` reused a run.
 
+<!-- section: errors -->
 ### Errors
 
 | HTTP | `detail` | Meaning |
@@ -94,6 +101,7 @@ The endpoint always reads the PR from GitHub with the owner's credentials and bi
 
 If enqueueing to Redis fails, the request fails with `500` and the run is stored as `failed` / `QUEUE_UNAVAILABLE`; the next request replaces it.
 
+<!-- section: concurrency-guarantees -->
 ### Concurrency guarantees
 
 - Enqueueing is serialized per PR (repository + number) with a Postgres advisory lock that the webhook takes too. A request waits for it at most 20 s, then gets `503 pr_queue_busy`.
@@ -102,6 +110,7 @@ If enqueueing to Redis fails, the request fails with `500` and the run is stored
 - The worker only processes `pending` runs and claims them with a conditional `pending → running` update, so of two competing jobs only one reviews.
 - A superseded job is aborted after the new run is committed (best effort, at most 2 s).
 
+<!-- section: get-api-v1-reviews-review-run-id -->
 ## `GET /api/v1/reviews/{review_run_id}`
 
 ```json
@@ -119,10 +128,12 @@ If enqueueing to Redis fails, the request fails with `500` and the run is stored
 
 `404 review run not found` also for a run of another owner when a scoped key is used. Error and skip codes: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#error-and-skip-codes).
 
+<!-- section: get-api-v1-ops-status -->
 ## `GET /api/v1/ops/status`
 
 Operator key only. Returns `in_flight` (pending/running counts), `queue_jobs` (ARQ queue depth), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` and `hints` (a plain-language diagnosis such as missing model quota or a worker that does not consume the queue).
 
+<!-- section: webhooks -->
 ## Webhooks
 
 Subscribe to the **Pull request** event. Handled actions: `opened`, `synchronize`, `reopened`, `ready_for_review`, and `labeled` with the size-guard override label (that one forces a new run). Setup: [GITHUB_SETUP.md](GITHUB_SETUP.md).

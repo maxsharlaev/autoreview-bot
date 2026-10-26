@@ -1,7 +1,9 @@
+<!-- section: architecture -->
 # Architecture
 
 Autoreview-bot is an advisory service: GitHub PR event → queue → Codex CLI → verified JSON → one updated PR comment. It does not block merges or create Jira issues. See the [roadmap](ROADMAP.md) and the [Russian translation](ru/ARCHITECTURE.md).
 
+<!-- section: pipeline -->
 ## Pipeline
 
 ```text
@@ -25,6 +27,7 @@ Scheduler
   -> Slack, or only a database record
 ```
 
+<!-- section: components -->
 ## Components
 
 | Component | Responsibility |
@@ -44,20 +47,24 @@ Scheduler
 | `app/workers` | ARQ jobs, digest, status cleanup, worker metrics on `:9100` |
 | `GET /metrics`, `GET /api/v1/ops/status` | Prometheus and a queue/failure snapshot |
 
+<!-- section: observability -->
 ## Observability
 
 Prometheus endpoints: API `:8000/metrics`, worker `:9100/metrics`. Grafana, Prometheus and Loki are **not** part of this Compose file; your Prometheus scrapes the endpoints. Import artifacts live in `observability/`. See [OBSERVABILITY.md](OBSERVABILITY.md) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
+<!-- section: deduplication-and-concurrency -->
 ## Deduplication and concurrency
 
 The key is `{repository}:{pr_number}:{head_sha}`. A repeated delivery for the same SHA reuses a `pending`, `running` or `completed` run; a `failed` one can be retried. A new SHA cancels the previous run. Manual `POST /api/v1/reviews` defaults to `force: true`, a new run on the same SHA. Different PRs run in parallel (`WORKER_MAX_JOBS`).
 
 Requests for one PR are serialized with a Postgres advisory lock, ARQ job ids are deterministic per run, and the worker claims a run with a conditional update, so concurrent deliveries do not produce duplicate runs. The worker re-reads the PR head before it starts and closes the run as `HEAD_CHANGED` if it moved; for private repositories it checks again before publishing. Details: [API.md](API.md#concurrency-guarantees).
 
+<!-- section: api-authentication -->
 ## API authentication
 
 `POST /api/v1/reviews`, `GET /api/v1/reviews/{id}` and `GET /api/v1/ops/status` need an API key. `GET /metrics` is for internal scraping; do not expose it. `POST /api/v1/pull-request` accepts only requests with a valid `X-Hub-Signature-256` (no API key); without a valid webhook secret it returns 503, while Actions and the manual API keep working. See [API.md](API.md), [GITHUB_SETUP.md](GITHUB_SETUP.md) and [SECURITY.md](../SECURITY.md).
 
+<!-- section: data-model -->
 ## Data model
 
 - `repositories` — GitHub full name, enabled, owner, comment authors
@@ -70,6 +77,7 @@ Requests for one PR are serialized with a Postgres advisory lock, ARQ job ids ar
 
 Raw diffs are not stored. More: [DATA_HANDLING.md](DATA_HANDLING.md).
 
+<!-- section: skips-and-errors -->
 ## Skips and errors
 
 - Fork and draft PRs: `skipped`.
@@ -81,10 +89,12 @@ Raw diffs are not stored. More: [DATA_HANDLING.md](DATA_HANDLING.md).
 
 All codes: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#error-and-skip-codes).
 
+<!-- section: comment-language -->
 ## Comment language
 
 Output defaults to English. `language.summary` controls the summary and finding titles; `language.details` the scenario, evidence, recommendation and comment labels. Both support `en` and `ru`.
 
+<!-- section: multiple-owners -->
 ## Multiple owners
 
 `app/owners/` holds the owner model. `OwnerRegistry.build()` reads the env and `config.yaml` once at startup (API and worker), validates everything and builds a frozen `OwnerContext` per active owner: GitHub credentials, webhook secret, API key, Jira and Slack bindings, model key and the owner's effective config. Global settings are read for credentials only there; adapters (`GitHubAppClient.from_credentials`, `JiraClient.from_binding`, `SlackClient.from_binding`, `Publisher.from_context`) take the owner's bindings. A config without `owners:` yields one owner, `default`, whose effective config is the global config (modes A–D: [MULTI_OWNER.md](MULTI_OWNER.md#modes)).

@@ -1,7 +1,9 @@
+<!-- section: roadmap-autoreview-bot -->
 # Roadmap: autoreview-bot
 
 A five-month sequence of verifiable milestones, not fixed release dates: each stage ends with a checkable result. The service is meant for any self-hosting team. GitHub, Jira and Codex are the first implementations but do not define the internal interfaces of future integrations. The English roadmap is canonical; see the [Russian translation](ru/ROADMAP.md).
 
+<!-- section: current-state -->
 ## Current state
 
 | Area | Available | Gap |
@@ -18,6 +20,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 | Security | Mandatory webhook signatures, scoped API keys, public-repository redaction ([SECURITY.md](../SECURITY.md)) | Deny-by-default for an empty allowlist |
 | Quality | Unit tests; Postgres migration and isolation tests in CI; lint/format/image build; docs coverage test | Redis/ARQ and external contract tests, local pre-commit hooks |
 
+<!-- section: month-0-prepare-the-public-repository-1-2-weeks -->
 ## Month 0 — prepare the public repository (1–2 weeks)
 
 1. Check licenses of dependencies and bundled assets, including Grafana templates, alongside the Apache-2.0 license.
@@ -27,6 +30,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 **Exit:** an independent user can read the docs and deploy to a test repository; a repeated audit of the published repository finds no internal data.
 
+<!-- section: month-1-reliable-review -->
 ## Month 1 — reliable review
 
 1. Recheck the current PR head before persistence and publication for every repository; a cancelled or stale run must not change the comment or Jira. (Atomic deduplication of repeated and concurrent deliveries and the pickup check are done; the pre-publication check exists for private repositories.)
@@ -38,6 +42,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 **Exit:** one PR and one SHA give a predictable state; a stale run does not publish; the test pipeline reproduces locally and in CI.
 
+<!-- section: month-2-issue-tracker-and-observability -->
 ## Month 2 — issue tracker and observability
 
 1. Define `IssueTracker`: key lookup, fields and acceptance criteria, comment and an allowed status transition. Jira is the first implementation.
@@ -48,6 +53,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 **Exit:** operators see issue state and the reasons for actions; Jira can be checked without side effects; alerts point to the failing stage; English works without configuration and localized templates pass snapshot tests.
 
+<!-- section: month-3-interchangeable-hosts-and-clis -->
 ## Month 3 — interchangeable hosts and CLIs
 
 1. A `CodeHost` contract: PR/MR events, diff and revisions, clone/auth, permissions, publication and duplicate delivery. Move the GitHub adapter onto it without public behaviour changes.
@@ -57,6 +63,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 **Exit:** the same review runs through two code hosts and two reviewer CLIs; unsupported features are explicit in the configuration.
 
+<!-- section: month-4-independent-validation-and-an-optional-admin-ui -->
 ## Month 4 — independent validation and an optional admin UI
 
 1. Cross-validation: the main runner produces a verdict and evidence; a second runner gets the code, diff and verdict and confirms, disputes or refers each finding to a human. Grok is a candidate second provider after checking API/CLI availability, data terms and cost.
@@ -66,6 +73,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 **Exit:** operators follow the task lifecycle in a UI that can be switched off; independent validation adds an explainable result at a measurable cost.
 
+<!-- section: month-5-public-beta -->
 ## Month 5 — public beta
 
 1. Install from a clean machine with a new project: GitHub and Jira, then the second host and runner. Publish a compatibility matrix and configuration migration guidance.
@@ -75,6 +83,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 **Exit:** a public beta with documented limits, reproducible setup and a tested recovery path.
 
+<!-- section: planned-follow-ups -->
 ## Planned follow-ups
 
 Smaller items already agreed, independent of the monthly plan:
@@ -86,10 +95,12 @@ Smaller items already agreed, independent of the monthly plan:
 - **Human approval for model-driven Jira actions:** Jira transitions and comments triggered by model-assigned severity (P0/P1) are proposed instead of applied, and a person confirms them through a PR label, a reaction or the admin panel. Configurable per owner (apply automatically, require approval, or off).
 - **Admin panel with sensitive-comment cleanup:** list runs whose published comment had sensitive content (`has_sensitive_content`) and let an operator redact or delete those comments, for example before a repository becomes public ([PROGRESS_STATUS.md](PROGRESS_STATUS.md#has_sensitive_content)).
 
+<!-- section: future-directions -->
 ## Future directions
 
 Ideas beyond the plan above, in priority order. Sizes are rough engineering estimates for one developer.
 
+<!-- section: 1-fix-verification -->
 ### 1. Fix verification
 
 - **Goal:** show whether the bot's findings actually get fixed, and close them automatically when they are.
@@ -97,6 +108,7 @@ Ideas beyond the plan above, in priority order. Sizes are rough engineering esti
 - **Risks:** the model may mark a finding resolved when the code only moved; an extra model call per push adds cost. Mitigations: require evidence of the change, and make the check cheaper than a full review.
 - **Size:** about 1 week.
 
+<!-- section: 2-team-rules-in-the-repository -->
 ### 2. Team rules in the repository
 
 - **Goal:** review against the team's own conventions, not only general best practice.
@@ -104,6 +116,7 @@ Ideas beyond the plan above, in priority order. Sizes are rough engineering esti
 - **Risks:** prompt injection through the rules file (it stays in an untrusted block, and its rules can't change output format or publication); long files add tokens; vague rules cause noise.
 - **Size:** 3–5 days.
 
+<!-- section: 3-local-check-before-push -->
 ### 3. Local check before push
 
 - **Goal:** let a developer get a review in the terminal before pushing.
@@ -112,6 +125,7 @@ Ideas beyond the plan above, in priority order. Sizes are rough engineering esti
 - **Risks:** secret leakage from a local diff; cost abuse; results differing from the PR review.
 - **Size:** about 1 week.
 
+<!-- section: 4-repository-engineering-health-report -->
 ### 4. Repository engineering health report
 
 - **Goal:** a periodic picture of a repository's engineering health, beyond single PRs.
@@ -119,12 +133,36 @@ Ideas beyond the plan above, in priority order. Sizes are rough engineering esti
 - **Risks:** tools differ by language and ecosystem; report noise; access to CI data needs extra permissions; cost on large repositories.
 - **Size:** 2–3 weeks for an MVP.
 
+<!-- section: 5-spec-driven-review-long-term-direction -->
+### 5. Spec-driven review (long-term direction)
+
+- **Goal:** move from "does the code have problems" to "does the code do what was intended", as a step toward managing AI-assisted development. No dates: this moves slowly, in small steps, as a feature of the current bot.
+- **Stages:**
+  1. **Specs as repository artifacts:** specifications in the reviewed repository (for example `specs/*.md`) with checkable acceptance criteria, each with an id, a statement and how to verify it. A PR references a spec or specific criteria.
+  2. **PR checked against the spec:** a verdict per criterion (`met`, `not met`, `not touched`) with evidence, reusing the existing findings model as a new category.
+  3. **Spec coverage over time:** which criteria are implemented, which are covered by tests, and where the code deviates from the spec.
+  4. **Closed loop with coding agents:** spec → tasks → agent PR → the bot checks the criteria → unmet criteria go back to the agent.
+- **Risks and notes:** model nondeterminism, so verdicts need repeat runs or consensus, and deterministic checks such as tests wherever possible; spec quality, so the bot should first check that criteria are verifiable; scope, so start narrow inside the current bot rather than as a separate product.
+
+<!-- section: 6-control-over-pr-title-and-description-edits -->
+### 6. Control over PR title and description edits
+
+- **Goal:** let each owner and repository decide whether the bot edits a PR's title and description, and fix poor ones (for example a title and body that GitHub truncated from a single commit subject) without ever losing the author's text. This is the first concrete step toward [spec-driven review](#5-spec-driven-review-long-term-direction).
+- **Policy:** `pr_description.policy` is `off`, `suggest` (a separate comment, like today's `comment` mode), `fill_empty`, `rewrite_if_low_quality` or `always`, with a separate policy for the title. The existing `mode` and `title_mode` map onto it. Overrides go global → owner → repository, and an opt-out label turns edits off for one PR.
+- **Low-quality checks:** deterministic checks run first and cost nothing: GitHub truncation (title ending in `…` with the body starting with `…`), a title equal to the only commit subject, a placeholder title, an empty or template-only body, a body that is too short. A model is asked only when these checks are not conclusive.
+- **Safety:** the original title and body are kept in a collapsed block; the bot stores a hash of the body it wrote (`bot_body_hash`) next to `bot_title_source_hash`; a human edit after a bot edit makes the PR human-owned for good; the PR is re-read before every write; `always` is allowed only when set explicitly for a repository.
+- **Two passes with a context break:** when edits are enabled, pass 1 writes a spec for the change (what to test and how). Pass 2 starts a fresh session with no pass-1 reasoning, only the spec artifact and the code, evaluates the code against the spec and reports two things separately: (a) defects in the code, (b) inconsistencies between the spec, the description or the task and the code. When the task is in Jira, pass 2 compares against the Jira issue.
+- **Later idea:** separate, cheaper models per pass. We will come back to it.
+- **Risks:** an extra model call per PR adds cost; a weak spec makes pass 2 noisy; rewriting text people care about needs the safety rules above to hold without exceptions.
+
+<!-- section: smaller-ideas-unordered -->
 ### Smaller ideas (unordered)
 
 - **Feedback on findings:** reactions on findings (useful / false positive) collected into false-positive statistics per category and severity, used to tune policies and prompts.
 - **Strict profile for migrations and infrastructure:** stricter criteria when a PR changes Alembic migrations, Dockerfiles, Compose files or CI configs (downgrade paths, data loss, secrets, permissions).
 - **Dependency check in PRs:** when lock files change, check new or updated packages for known CVEs and typosquatting, and report them as findings.
 
+<!-- section: rules-throughout -->
 ## Rules throughout
 
 - A new integration passes contract, failure/retry and permission tests before it enters the sample configuration.

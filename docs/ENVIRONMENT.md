@@ -1,3 +1,4 @@
+<!-- section: environment-variables -->
 # Environment variables
 
 Secrets and process settings come from the environment. Non-secret behaviour is in `config.yaml` ([CONFIGURATION.md](CONFIGURATION.md)). Start from [`.env.example`](../.env.example).
@@ -9,6 +10,7 @@ Secrets and process settings come from the environment. Non-secret behaviour is 
 
 Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migrate` (Alembic). "all" means all three.
 
+<!-- section: database-queue-and-processes -->
 ## Database, queue and processes
 
 | Variable | Default | Read by | Description |
@@ -27,12 +29,14 @@ Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migr
 | `RUN_MIGRATIONS` | `false` | — | **Currently not used by any code.** Migrations run in the Compose `migrate` service (`alembic upgrade head`) or by hand. |
 | `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES` | unset | migrate | `1`/`true`/`yes` lets the `007_findings_owner_id` downgrade delete duplicate findings. See [UPGRADE.md](UPGRADE.md). |
 
+<!-- section: api-access -->
 ## API access
 
 | Variable | Default | Read by | Description |
 | --- | --- | --- | --- |
 | `REVIEW_API_KEY` | `""` | api | Operator key for `/api/v1/reviews*` and `/api/v1/ops/status`, valid for every owner. Generate a long random value; it is not a GitHub token. Without it those endpoints answer `401`. |
 
+<!-- section: github-legacy-default-owner -->
 ## GitHub (legacy / `default` owner)
 
 Used when there is no `owners:` block, or in mode B. Named owners use the `OWNER_<ID>_*` variables below.
@@ -48,6 +52,7 @@ Used when there is no `owners:` block, or in mode B. Named owners use the `OWNER
 
 Setting `GITHUB_TOKEN`, or both `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, counts as "legacy GitHub credentials" and selects mode A or B ([MULTI_OWNER.md](MULTI_OWNER.md#modes)).
 
+<!-- section: model-jira-and-slack-legacy-default-owner -->
 ## Model, Jira and Slack (legacy / `default` owner)
 
 | Variable | Default | Read by | Description |
@@ -58,6 +63,7 @@ Setting `GITHUB_TOKEN`, or both `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, co
 | `JIRA_API_TOKEN` | `""` | worker | Jira API token. |
 | `SLACK_BOT_TOKEN` | `""` | worker | Slack bot token, used when `slack.enabled: true`. |
 
+<!-- section: per-owner-variables-owner-id -->
 ## Per-owner variables (`OWNER_<ID>_*`)
 
 For each named owner, `<ID>` is the owner id upper-cased with `-` replaced by `_` (owner `org-b` → `OWNER_ORG_B_…`). A `*_env` key in the owner block replaces the default name with any variable you choose (for example to share one Jira token between owners).
@@ -75,6 +81,7 @@ For each named owner, `<ID>` is the owner id upper-cased with `-` replaced by `_
 
 A missing variable marked required, or a missing variable named explicitly in `codex.api_key_env`, stops the API and the worker at startup with an error naming it. Other missing variables only log a startup warning.
 
+<!-- section: passed-through-to-subprocesses -->
 ## Passed through to subprocesses
 
 The worker starts `git` and `codex` with an allowlisted environment, not its own. Nothing else (database URL, GitHub, Jira or Slack tokens, other owners' keys) reaches them.
@@ -84,6 +91,7 @@ The worker starts `git` and `codex` with an allowlisted environment, not its own
 | `git clone` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`/`TMP`/`TEMP`, `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (either case), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`; plus the run owner's GitHub token through `GIT_ASKPASS`. |
 | `codex exec` | `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`/`TMP`/`TEMP`, `OPENAI_BASE_URL`, `CODEX_HOME`, `XDG_CACHE_HOME`, `SSL_CERT_FILE`; plus `OPENAI_API_KEY` and `CODEX_API_KEY` set to the run owner's model key. |
 
+<!-- section: tests-only -->
 ## Tests only
 
 | Variable | Description |

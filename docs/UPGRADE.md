@@ -1,7 +1,9 @@
+<!-- section: upgrade-and-rollback -->
 # Upgrade and rollback
 
 There are no versioned releases yet; deployments track `main`. Notable changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
+<!-- section: upgrading-a-compose-deployment -->
 ## Upgrading a Compose deployment
 
 1. Read the `Unreleased` section of the changelog for new permissions, keys or migrations.
@@ -14,6 +16,7 @@ Without Compose: stop the worker, run `alembic upgrade head` with the new code a
 
 Configuration stays compatible: new keys have defaults that keep the previous behaviour, and unknown top-level YAML keys are ignored. Restart the API and worker after changing `config.yaml` or `.env`.
 
+<!-- section: migrations -->
 ## Migrations
 
 | Revision | Change | Notes |
@@ -27,6 +30,7 @@ Configuration stays compatible: new keys have defaults that keep the previous be
 | `007_findings_owner_id` | `owner_id` on findings, required. | Downgrade may need `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` (below). |
 | `008_review_run_progress` | `progress_status`, `comment_url`, `has_sensitive_content` on review runs. | NULL for existing rows. |
 
+<!-- section: rollback -->
 ## Rollback
 
 - **Configuration only** (for example an owner block): restore the previous `config.yaml` / `.env` and recreate the API and worker. Runs queued for a removed owner are skipped as `owner_not_configured`, for a disabled one as `owner_disabled`; their rows stay. See [MULTI_OWNER.md](MULTI_OWNER.md#upgrade-and-rollback) for the order that also closes progress statuses.
@@ -36,14 +40,17 @@ Configuration stays compatible: new keys have defaults that keep the previous be
 
 Always back up the Postgres volume before a downgrade.
 
+<!-- section: moving-to-several-owners -->
 ## Moving to several owners
 
 Step-by-step upgrade to an `owners:` block, keeping history with `aliases: [default]`, and rollback: [MULTI_OWNER.md](MULTI_OWNER.md#upgrade-and-rollback).
 
+<!-- section: worker-metrics-port-no-longer-published -->
 ## Worker metrics port no longer published
 
 The Compose file no longer maps the worker's metrics port to `127.0.0.1:9100` on the host; it is exposed only on the Docker network, so `docker compose up --scale worker=N` works. If your Prometheus scraped `127.0.0.1:9100` / `localhost:9100`, switch it to the Docker network: attach Prometheus to the stack's network and use the bundled `dns_sd_configs` job from [`observability/prometheus-scrape.yml`](../observability/prometheus-scrape.yml), which scrapes every replica. To keep a host port for a single worker, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (then it can't be scaled). Reload `observability/alerts.yml` too: `OpenPrReviewWorkerDown` keeps `severity: page` but now fires only when no worker replica is discovered. The per-replica case (a discovered replica cannot be scraped) moved to the new `OpenPrReviewWorkerTargetDown` with `severity: warning`; add a route for it if you want those notifications.
 
+<!-- section: new-github-permissions -->
 ## New GitHub permissions
 
 Progress status (from `008_review_run_progress`) uses **Checks: Read and write** (App) or **Commit statuses: Read and write** (PAT). Without them reviews keep working without a status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)).
