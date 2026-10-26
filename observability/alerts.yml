@@ -2,14 +2,15 @@ groups:
   - name: open-pr-review
     rules:
       - alert: OpenPrReviewWorkerDown
-        # With DNS discovery a stopped worker service leaves no target, so `absent` detects a total outage.
-        expr: absent(up{job="open-pr-review-worker"})
+        # `absent` covers a Prometheus that never discovered a worker. When every worker stops, the
+        # `worker` name stops resolving and Prometheus keeps the last targets at up == 0, so `max == 0` covers that.
+        expr: absent(up{job="open-pr-review-worker"}) or max(up{job="open-pr-review-worker"}) == 0
         for: 2m
         labels:
           severity: page
         annotations:
-          summary: No worker discovered
-          description: DNS discovery finds no worker replica at all. Reviews will queue and never run.
+          summary: No worker is running
+          description: No worker replica is discovered, or every known worker target is down (for example all workers stopped, DNS no longer resolves and Prometheus keeps the last target at up == 0). Reviews will queue and never run.
 
       - alert: OpenPrReviewWorkerTargetDown
         expr: up{job="open-pr-review-worker"} == 0
