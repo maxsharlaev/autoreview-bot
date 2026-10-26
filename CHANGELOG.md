@@ -121,6 +121,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the status, e.g. `[🟠 P1] [regressed] Title`; redacted cards keep it.
   Documented in [docs/PROGRESS_STATUS.md](docs/PROGRESS_STATUS.md#review-comment).
 
+- **Worker metrics port**: Compose no longer publishes the worker's `:9100` on
+  the host; it is exposed on the Docker network only, so
+  `docker compose up --scale worker=N` works. The bundled Prometheus job finds
+  every replica through `dns_sd_configs` on the `worker` service name. If you
+  scraped `127.0.0.1:9100`, switch to the Docker network (see
+  `docs/UPGRADE.md`).
+  The worker alert is split: `OpenPrReviewWorkerDown` (`page`) fires when no
+  worker replica is discovered (`absent(up{job="open-pr-review-worker"})`), and
+  the new `OpenPrReviewWorkerTargetDown` (`warning`) fires when a discovered
+  replica cannot be scraped (`up == 0`). Neither detects losing only some
+  replicas (a stopped replica leaves DNS discovery); see
+  `docs/OBSERVABILITY.md`.
+
 - **Webhook authentication**: `POST /api/v1/pull-request` now requires only a
   valid `X-Hub-Signature-256` HMAC signature; the API key (`REVIEW_API_KEY`) is
   no longer checked on this endpoint. This allows standard GitHub webhooks

@@ -25,9 +25,9 @@ Compose from the repository root (`docker-compose.yml`):
 | `redis` | ARQ queue | 6379 | **No** |
 | `migrate` | One-shot `alembic upgrade head` | — | No |
 | `api` | FastAPI | 8000 | `127.0.0.1:8000` → HTTPS reverse proxy |
-| `worker` | Clone, Codex, publication, metrics | 9100 | `127.0.0.1:9100` for a local scrape; internal network for a remote one |
+| `worker` | Clone, Codex, publication, metrics | 9100 | **No**: Docker network only (`expose`), so replicas can scale |
 
-Compose publishes no Postgres or Redis ports. The API and worker metrics listen on `127.0.0.1` only; use a reverse proxy or a private network for external HTTPS and a remote Prometheus.
+Compose publishes no Postgres or Redis ports. The API is published on `127.0.0.1:8000` only, and worker metrics are not published at all; use a reverse proxy or a private network for external HTTPS and a remote Prometheus.
 
 The worker **must** run with `security_opt: seccomp:unconfined` and `apparmor:unconfined` (already in Compose) so Codex's inner bubblewrap sandbox can start. Do not remove them without testing on the target host.
 
@@ -41,7 +41,7 @@ The worker **must** run with `security_opt: seccomp:unconfined` and `apparmor:un
 | GitHub: a fine-grained PAT **or** permission to create a GitHub App | Clone and PR comment ([GITHUB_SETUP.md](GITHUB_SETUP.md)) |
 | Jira, if needed: URL, service account email, API token, project → `rework_status` | Otherwise disable `jira_comment` / `jira_transition` |
 | A public HTTPS hostname that GitHub/Actions can reach | For example `https://review.example.com` |
-| Where metrics are scraped from | IP/DNS of `api:8000` and `worker:9100` as seen from Prometheus |
+| Where metrics are scraped from | API: IP/DNS of `api:8000` as seen from Prometheus; worker: `worker:9100` from the stack's Docker network only (DNS discovery of replicas) |
 
 ## Host resources
 
@@ -112,14 +112,14 @@ Custom review instructions: copy `prompts/review.md` to `prompts/local/review.md
 ## Deployment steps
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
-2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only by a local or internal Prometheus.
+2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only inside the Docker network.
 3. `docker compose up -d --build`. Wait for `migrate` (exit 0), then `api` and `worker` Up.
 4. Checks from the host or internal network:
 
    ```bash
    curl -sS https://review.example.com/health
    curl -sS https://review.example.com/is-ready    # "ready", otherwise Postgres/Redis
-   curl -sS http://<worker>:9100/metrics | grep open_pr_review
+   docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
    ```
 
 5. Reverse proxy and TLS. Check that `/metrics` is **not** reachable from outside.
@@ -154,7 +154,7 @@ Running both triggers on one repository does not create duplicate runs for one S
 
 The application does **not** push metrics or logs; your scraper pulls.
 
-1. Prometheus: merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.yml). Targets `api:8000` and `worker:9100` (or host/IP when scraping from outside the Docker network). Keep the job names `open-pr-review-api` / `open-pr-review-worker`.
+1. Prometheus: merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.yml). API: `api:8000` (or host/IP when scraping from outside the Docker network). Worker: Prometheus must be on the stack's Docker network (or have explicit routing to it); the worker job finds every replica through `dns_sd_configs` on the `worker` service name. To scrape the worker from the host, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (see [UPGRADE.md](UPGRADE.md)); the worker can't be scaled then. Keep the job names `open-pr-review-api` / `open-pr-review-worker`.
 2. Rules: [observability/alerts.yml](../observability/alerts.yml): `OpenPrReviewWorkerDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
 3. Grafana: import [observability/grafana/dashboards/autoreview-bot.json](../observability/grafana/dashboards/autoreview-bot.json). Default datasource UIDs are `prometheus` and `loki`; point them to yours.
 4. Logs: your agent (Promtail/Alloy) reads stdout of `api` and `worker`. Compose sets `OPEN_PR_REVIEW_SERVICE` (`api` / `worker`), which appears as the `service` field in JSON logs (`LOG_FORMAT=json`). There is no Loki client in the service; the dashboard's log panel stays empty until your agent ships to Loki.

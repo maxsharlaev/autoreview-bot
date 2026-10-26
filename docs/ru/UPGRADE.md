@@ -40,6 +40,10 @@
 
 Пошаговое обновление до блока `owners:`, сохранение истории через `aliases: [default]` и откат: [MULTI_OWNER.md](MULTI_OWNER.md#обновление-и-откат).
 
+## Порт метрик worker'а больше не публикуется
+
+Compose-файл больше не пробрасывает порт метрик worker'а на хост (`127.0.0.1:9100`); он открыт только в Docker-сети, поэтому `docker compose up --scale worker=N` работает. Если ваш Prometheus скрейпил `127.0.0.1:9100` / `localhost:9100`, переведите его на Docker-сеть: подключите Prometheus к сети стека и используйте поставляемый job с `dns_sd_configs` из [`observability/prometheus-scrape.yml`](../../observability/prometheus-scrape.yml), который скрейпит каждую реплику. Чтобы сохранить порт на хосте для одного worker'а, добавьте `docker-compose.override.yml` с `ports: ["127.0.0.1:9100:9100"]` для `worker` (тогда его нельзя масштабировать). Перезагрузите и `observability/alerts.yml`: `OpenPrReviewWorkerDown` сохраняет `severity: page`, но теперь срабатывает, только когда не найдено ни одной реплики worker'а. Случай отдельной реплики (найденную реплику не удаётся скрейпить) перенесён в новый `OpenPrReviewWorkerTargetDown` с `severity: warning`; добавьте для него маршрут, если хотите получать эти уведомления.
+
 ## Новые права GitHub
 
 Статус прогресса (начиная с `008_review_run_progress`) использует **Checks: Read and write** (App) или **Commit statuses: Read and write** (PAT). Без них ревью продолжают работать без статуса ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)).

@@ -73,8 +73,10 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./prompts:/app/prompts:ro
-    ports:
-      - "127.0.0.1:9100:9100"
+    # Metrics stay on the Docker network (no host port), so `--scale worker=N` works.
+    # Scrape every replica by service DNS name; see observability/prometheus-scrape.yml.
+    expose:
+      - "9100"
     # Docker's default seccomp/AppArmor block bubblewrap (CLONE_NEWUSER). Codex
     # still sandboxes itself with bwrap; this only relaxes the outer profile.
     security_opt:
