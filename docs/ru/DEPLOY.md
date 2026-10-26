@@ -155,7 +155,7 @@ Webhook GitHub App (или репозитория) на `/api/v1/pull-request`. 
 Приложение **не** отправляет метрики и логи само; их забирает ваш скрейпер.
 
 1. Prometheus: влейте [observability/prometheus-scrape.yml](../../observability/prometheus-scrape.yml). API: `api:8000` (или host/IP при скрейпинге снаружи Docker-сети). Worker: Prometheus должен быть в Docker-сети стека (или иметь явную маршрутизацию в неё); job worker'а находит все реплики через `dns_sd_configs` по имени сервиса `worker`. Чтобы скрейпить worker с хоста, добавьте `docker-compose.override.yml` с `ports: ["127.0.0.1:9100:9100"]` для `worker` (см. [UPGRADE.md](UPGRADE.md)); тогда worker нельзя масштабировать. Оставьте имена job `open-pr-review-api` / `open-pr-review-worker`.
-2. Правила: [observability/alerts.yml](../../observability/alerts.yml): `OpenPrReviewWorkerDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
+2. Правила: [observability/alerts.yml](../../observability/alerts.yml): `OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
 3. Grafana: импортируйте [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json). UID datasource'ов по умолчанию — `prometheus` и `loki`; направьте их на свои.
 4. Логи: ваш агент (Promtail/Alloy) читает stdout `api` и `worker`. Compose задаёт `OPEN_PR_REVIEW_SERVICE` (`api` / `worker`), которое попадает в поле `service` JSON-логов (`LOG_FORMAT=json`). Клиента Loki в сервисе нет; панель логов дашборда остаётся пустой, пока ваш агент не отправляет логи в Loki.
 

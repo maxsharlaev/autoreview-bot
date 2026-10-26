@@ -155,7 +155,7 @@ Running both triggers on one repository does not create duplicate runs for one S
 The application does **not** push metrics or logs; your scraper pulls.
 
 1. Prometheus: merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.yml). API: `api:8000` (or host/IP when scraping from outside the Docker network). Worker: Prometheus must be on the stack's Docker network (or have explicit routing to it); the worker job finds every replica through `dns_sd_configs` on the `worker` service name. To scrape the worker from the host, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (see [UPGRADE.md](UPGRADE.md)); the worker can't be scaled then. Keep the job names `open-pr-review-api` / `open-pr-review-worker`.
-2. Rules: [observability/alerts.yml](../observability/alerts.yml): `OpenPrReviewWorkerDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
+2. Rules: [observability/alerts.yml](../observability/alerts.yml): `OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
 3. Grafana: import [observability/grafana/dashboards/autoreview-bot.json](../observability/grafana/dashboards/autoreview-bot.json). Default datasource UIDs are `prometheus` and `loki`; point them to yours.
 4. Logs: your agent (Promtail/Alloy) reads stdout of `api` and `worker`. Compose sets `OPEN_PR_REVIEW_SERVICE` (`api` / `worker`), which appears as the `service` field in JSON logs (`LOG_FORMAT=json`). There is no Loki client in the service; the dashboard's log panel stays empty until your agent ships to Loki.
 
