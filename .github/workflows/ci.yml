@@ -66,3 +66,24 @@ jobs:
           cp .env.example .env
           cp config.example.yaml config.yaml
           POSTGRES_PASSWORD=ci-build-only docker compose build
+
+  prometheus-config:
+    runs-on: ubuntu-latest
+    env:
+      # Keep in sync with docker-compose.observability.yml.
+      PROMETHEUS_IMAGE: prom/prometheus:v3.7.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check dev Prometheus config
+        # Same mounts as docker-compose.observability.yml.
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/dev/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/observability/prometheus-scrape.yml:/etc/prometheus/scrape.yml:ro" \
+            -v "$PWD/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            "$PROMETHEUS_IMAGE" check config /etc/prometheus/prometheus.yml
+      - name: Check alert rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            "$PROMETHEUS_IMAGE" check rules /etc/prometheus/alerts.yml

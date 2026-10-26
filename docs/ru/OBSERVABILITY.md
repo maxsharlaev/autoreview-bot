@@ -36,7 +36,7 @@ docker compose up -d --scale worker=2
 docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus
 ```
 
-Первая команда запускает Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет Prometheus. После правки `alerts.yml` перезапустите контейнер, чтобы перечитать правила.
+Первая команда запускает Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет Prometheus. После правки `alerts.yml` перезапустите контейнер, чтобы перечитать правила. CI запускает `promtool check config` на этом собранном конфиге (тот же образ и те же mounts, что в overlay) и `promtool check rules` на `alerts.yml`.
 
 <!-- section: grafana-existing -->
 ## Grafana (существующая)
