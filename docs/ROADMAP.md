@@ -119,6 +119,16 @@ Ideas beyond the plan above, in priority order. Sizes are rough engineering esti
 - **Risks:** tools differ by language and ecosystem; report noise; access to CI data needs extra permissions; cost on large repositories.
 - **Size:** 2–3 weeks for an MVP.
 
+### 5. Spec-driven review (long-term direction)
+
+- **Goal:** move from "does the code have problems" to "does the code do what was intended", as a step toward managing AI-assisted development. No dates: this moves slowly, in small steps, as a feature of the current bot.
+- **Stages:**
+  1. **Specs as repository artifacts:** specifications in the reviewed repository (for example `specs/*.md`) with checkable acceptance criteria, each with an id, a statement and how to verify it. A PR references a spec or specific criteria.
+  2. **PR checked against the spec:** a verdict per criterion (`met`, `not met`, `not touched`) with evidence, reusing the existing findings model as a new category.
+  3. **Spec coverage over time:** which criteria are implemented, which are covered by tests, and where the code deviates from the spec.
+  4. **Closed loop with coding agents:** spec → tasks → agent PR → the bot checks the criteria → unmet criteria go back to the agent.
+- **Risks and notes:** model nondeterminism, so verdicts need repeat runs or consensus, and deterministic checks such as tests wherever possible; spec quality, so the bot should first check that criteria are verifiable; scope, so start narrow inside the current bot rather than as a separate product.
+
 ### Smaller ideas (unordered)
 
 - **Feedback on findings:** reactions on findings (useful / false positive) collected into false-positive statistics per category and severity, used to tune policies and prompts.
