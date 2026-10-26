@@ -129,6 +129,16 @@ Ideas beyond the plan above, in priority order. Sizes are rough engineering esti
   4. **Closed loop with coding agents:** spec → tasks → agent PR → the bot checks the criteria → unmet criteria go back to the agent.
 - **Risks and notes:** model nondeterminism, so verdicts need repeat runs or consensus, and deterministic checks such as tests wherever possible; spec quality, so the bot should first check that criteria are verifiable; scope, so start narrow inside the current bot rather than as a separate product.
 
+### 6. Control over PR title and description edits
+
+- **Goal:** let each owner and repository decide whether the bot edits a PR's title and description, and fix poor ones (for example a title and body that GitHub truncated from a single commit subject) without ever losing the author's text. This is the first concrete step toward [spec-driven review](#5-spec-driven-review-long-term-direction).
+- **Policy:** `pr_description.policy` is `off`, `suggest` (a separate comment, like today's `comment` mode), `fill_empty`, `rewrite_if_low_quality` or `always`, with a separate policy for the title. The existing `mode` and `title_mode` map onto it. Overrides go global → owner → repository, and an opt-out label turns edits off for one PR.
+- **Low-quality checks:** deterministic checks run first and cost nothing: GitHub truncation (title ending in `…` with the body starting with `…`), a title equal to the only commit subject, a placeholder title, an empty or template-only body, a body that is too short. A model is asked only when these checks are not conclusive.
+- **Safety:** the original title and body are kept in a collapsed block; the bot stores a hash of the body it wrote (`bot_body_hash`) next to `bot_title_source_hash`; a human edit after a bot edit makes the PR human-owned for good; the PR is re-read before every write; `always` is allowed only when set explicitly for a repository.
+- **Two passes with a context break:** when edits are enabled, pass 1 writes a spec for the change (what to test and how). Pass 2 starts a fresh session with no pass-1 reasoning, only the spec artifact and the code, evaluates the code against the spec and reports two things separately: (a) defects in the code, (b) inconsistencies between the spec, the description or the task and the code. When the task is in Jira, pass 2 compares against the Jira issue.
+- **Later idea:** separate, cheaper models per pass. We will come back to it.
+- **Risks:** an extra model call per PR adds cost; a weak spec makes pass 2 noisy; rewriting text people care about needs the safety rules above to hold without exceptions.
+
 ### Smaller ideas (unordered)
 
 - **Feedback on findings:** reactions on findings (useful / false positive) collected into false-positive statistics per category and severity, used to tune policies and prompts.

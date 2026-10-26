@@ -33,8 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets and heading structures match.
 
 - **Roadmap**: a long-term direction, spec-driven review (checking a PR against
-  acceptance criteria in the repository), in `docs/ROADMAP.md` and its Russian
-  mirror.
+  acceptance criteria in the repository), and control over PR title and
+  description edits (policy with per-owner and per-repository overrides,
+  deterministic low-quality checks, a two-pass spec check), in
+  `docs/ROADMAP.md` and its Russian mirror.
 
 - **Review progress status** (#7): webhook runs report progress on the PR head
   as an `autoreview` check run (GitHub App, needs Checks: Read and write) or
