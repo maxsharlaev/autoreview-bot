@@ -1,3 +1,4 @@
+<!-- section: configuration-reference-config-yaml -->
 # Справочник конфигурации (`config.yaml`)
 
 `config.yaml` содержит несекретные настройки. Секреты живут в окружении (см. [ENVIRONMENT.md](ENVIRONMENT.md)); YAML только называет переменные, в которых они лежат. Начните с [`config.example.yaml`](../../config.example.yaml).
@@ -10,6 +11,7 @@
 
 Колонка **Owner** показывает, можно ли переопределить ключ в блоке `owners.<id>` (см. [MULTI_OWNER.md](MULTI_OWNER.md)). Переопределения частичные и глубоко сливаются со значением верхнего уровня; слитая секция проверяется так же, как глобальная.
 
+<!-- section: github -->
 ## `github`
 
 | Ключ | Тип | По умолчанию | Owner | Описание |
@@ -20,6 +22,7 @@
 
 Блоки GitHub owner'ов (`owners.<id>.github.*`) перечислены в разделе [Owners](#owners).
 
+<!-- section: jira -->
 ## `jira`
 
 Используется только legacy-owner'ом. Именованные owner'ы используют только свой блок `owners.<id>.jira`; ничего не наследуется.
@@ -33,6 +36,7 @@
 
 Jira активна, только когда заданы base URL, email и `JIRA_API_TOKEN`. Сервисному аккаунту нужны права browse, comment и transition в этих проектах. Сервис никогда не создаёт задачи.
 
+<!-- section: slack -->
 ## `slack`
 
 Используется только legacy-owner'ом; именованные owner'ы используют свой блок `owners.<id>.slack`.
@@ -42,6 +46,7 @@ Jira активна, только когда заданы base URL, email и `JI
 | `slack.enabled` | bool | `false` | свой блок (там по умолчанию `true`) | Отправлять уведомления и дайджест. Нужны `SLACK_BOT_TOKEN` и канал. При `false` дайджест только сохраняется в базе. |
 | `slack.channel` | string | `""` | свой блок | Имя или id канала. Используйте приватный канал: туда могут уходить нередактированные детали замечаний (см. [PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md)). |
 
+<!-- section: schedule -->
 ## `schedule`
 
 | Ключ | Тип | По умолчанию | Owner | Описание |
@@ -51,6 +56,7 @@ Jira активна, только когда заданы base URL, email и `JI
 
 Дайджест строится по каждому owner'у и только для owner'ов с `features.digest_enabled: true`.
 
+<!-- section: features -->
 ## `features`
 
 | Ключ | Тип | По умолчанию | Owner | Описание |
@@ -59,6 +65,7 @@ Jira активна, только когда заданы base URL, email и `JI
 | `features.jira_transition` | bool | `true` | да | Переводить задачу в `rework_status` при замечаниях P0/P1. |
 | `features.digest_enabled` | bool | `true` | да | Включать этого owner'а в плановый дайджест. |
 
+<!-- section: language -->
 ## `language`
 
 | Ключ | Тип | По умолчанию | Owner | Описание |
@@ -68,6 +75,7 @@ Jira активна, только когда заданы base URL, email и `JI
 
 Тексты Jira и Slack пока используют английские подписи.
 
+<!-- section: pr-description -->
 ## `pr_description`
 
 Необязательные черновики описания и заголовка PR, по умолчанию выключены. Поведение: [PR_DESCRIPTION.md](PR_DESCRIPTION.md).
@@ -84,12 +92,14 @@ Jira активна, только когда заданы base URL, email и `JI
 | `pr_description.language` | `auto` или код BCP 47 | не задан | да | Язык черновика. Если не задан — `pr_text.language`, затем `language.details`. `auto` определяет английский/русский по заголовку человека, телу, затем коммитам. |
 | `pr_description.prompt_file` | путь | `""` | да | Замена промпта, например `prompts/local/pr_description.md`. Пусто — используется [`prompts/pr_description.md`](../../prompts/pr_description.md). Отсутствующий файл проваливает шаг. |
 
+<!-- section: pr-text -->
 ## `pr_text`
 
 | Ключ | Тип | По умолчанию | Owner | Описание |
 | --- | --- | --- | --- | --- |
 | `pr_text.language` | `auto` или код BCP 47 | не задан | — | Legacy-имя `pr_description.language`, используется, только если тот ключ не задан. |
 
+<!-- section: size-guard -->
 ## `size_guard`
 
 Проверяется до любого вызова модели. Подробнее: [PR_DESCRIPTION.md](PR_DESCRIPTION.md#size-guard).
@@ -104,6 +114,7 @@ Jira активна, только когда заданы base URL, email и `JI
 
 Значение ровно на пороге допускается.
 
+<!-- section: public-repos -->
 ## `public_repos`
 
 Применяется только к репозиториям, которые GitHub сообщает как публичные (неизвестная видимость считается публичной). Подробнее: [PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md).
@@ -113,6 +124,7 @@ Jira активна, только когда заданы base URL, email и `JI
 | `public_repos.jira_disclosure` | `none` \| `key_only` \| `full` | `key_only` | да | Что вывод бота может показывать о связанной задаче Jira. |
 | `public_repos.security_findings` | `redact` \| `redact_all` \| `full` | `redact` | да | Редактировать замечания безопасности (по категории и ключевым словам), все замечания или ничего. |
 
+<!-- section: progress-status -->
 ## `progress_status`
 
 Check run или commit status на head PR. Подробнее: [PROGRESS_STATUS.md](PROGRESS_STATUS.md).
@@ -124,6 +136,7 @@ Check run или commit status на head PR. Подробнее: [PROGRESS_STATU
 | `progress_status.reaction` | bool | `false` | да | Ставить на PR реакцию `eyes`, пока worker его ревьюит. |
 | `progress_status.timeout_seconds` | float, > 0 и ≤ 30 | `5` | да | Предел на один вызов GitHub. |
 
+<!-- section: codex -->
 ## `codex`
 
 | Ключ | Тип | По умолчанию | Owner | Описание |
@@ -142,12 +155,14 @@ Check run или commit status на head PR. Подробнее: [PROGRESS_STATU
 
 Распространённые lockfile'ы, файлы `.env*` и файлы с суффиксами изображений, PDF, архивов, шрифтов или скомпилированных бинарников не попадают в контекст модели. Другие сгенерированные, минифицированные или vendored-файлы (например `.min.js` или `.map`) не распознаются и отправляются как исходный код. Полный список: [DATA_HANDLING.md](DATA_HANDLING.md#отправляется-провайдеру-модели).
 
+<!-- section: routing -->
 ## `routing`
 
 | Ключ | Тип | По умолчанию | Owner | Описание |
 | --- | --- | --- | --- | --- |
 | `routing.unclaimed` | `default` \| `reject` | `default` | — | Куда идёт репозиторий, который не заявил ни один owner: к owner'у по умолчанию или отклоняется как `unknown_owner`. Неизвестные ключи в `routing` отклоняются. |
 
+<!-- section: owners -->
 ## `owners`
 
 Необязателен. Без него сервис работает как один owner, `default`, собранный из окружения и секций выше. Режимы, маршрутизация и примеры: [MULTI_OWNER.md](MULTI_OWNER.md).

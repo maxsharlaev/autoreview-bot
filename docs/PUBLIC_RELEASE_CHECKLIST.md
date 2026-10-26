@@ -1,3 +1,4 @@
+<!-- section: public-release-checklist -->
 # Public release checklist
 
 English is the primary documentation language. Existing Russian guides are available in [docs/ru](ru/README.md).

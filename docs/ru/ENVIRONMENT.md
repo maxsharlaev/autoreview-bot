@@ -1,3 +1,4 @@
+<!-- section: environment-variables -->
 # Переменные окружения
 
 Секреты и настройки процессов берутся из окружения. Несекретное поведение — в `config.yaml` ([CONFIGURATION.md](CONFIGURATION.md)). Начните с [`.env.example`](../../.env.example).
@@ -9,6 +10,7 @@
 
 Колонка **Читает**: `api` (FastAPI), `worker` (ARQ worker и запуски Codex), `migrate` (Alembic). «все» — все три.
 
+<!-- section: database-queue-and-processes -->
 ## База данных, очередь и процессы
 
 | Переменная | По умолчанию | Читает | Описание |
@@ -27,12 +29,14 @@
 | `RUN_MIGRATIONS` | `false` | — | **Сейчас не используется кодом.** Миграции выполняет сервис Compose `migrate` (`alembic upgrade head`) или вы вручную. |
 | `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES` | не задана | migrate | `1`/`true`/`yes` разрешает downgrade `007_findings_owner_id` удалять дубликаты замечаний. См. [UPGRADE.md](UPGRADE.md). |
 
+<!-- section: api-access -->
 ## Доступ к API
 
 | Переменная | По умолчанию | Читает | Описание |
 | --- | --- | --- | --- |
 | `REVIEW_API_KEY` | `""` | api | Операторский ключ для `/api/v1/reviews*` и `/api/v1/ops/status`, действует для всех owner'ов. Сгенерируйте длинное случайное значение; это не токен GitHub. Без него эти эндпойнты отвечают `401`. |
 
+<!-- section: github-legacy-default-owner -->
 ## GitHub (legacy / owner `default`)
 
 Используется без блока `owners:` или в режиме B. Именованные owner'ы используют переменные `OWNER_<ID>_*` ниже.
@@ -48,6 +52,7 @@
 
 Заданный `GITHUB_TOKEN` или пара `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY` считаются «legacy-кредами GitHub» и выбирают режим A или B ([MULTI_OWNER.md](MULTI_OWNER.md#режимы)).
 
+<!-- section: model-jira-and-slack-legacy-default-owner -->
 ## Модель, Jira и Slack (legacy / owner `default`)
 
 | Переменная | По умолчанию | Читает | Описание |
@@ -58,6 +63,7 @@
 | `JIRA_API_TOKEN` | `""` | worker | API-токен Jira. |
 | `SLACK_BOT_TOKEN` | `""` | worker | Токен бота Slack, используется при `slack.enabled: true`. |
 
+<!-- section: per-owner-variables-owner-id -->
 ## Переменные owner'ов (`OWNER_<ID>_*`)
 
 Для каждого именованного owner'а `<ID>` — id owner'а в верхнем регистре, `-` заменён на `_` (owner `org-b` → `OWNER_ORG_B_…`). Ключ `*_env` в блоке owner'а заменяет имя по умолчанию любой выбранной переменной (например, чтобы несколько owner'ов использовали один токен Jira).
@@ -75,6 +81,7 @@
 
 Отсутствие обязательной переменной или переменной, явно названной в `codex.api_key_env`, останавливает API и worker при старте с ошибкой, называющей её. Отсутствие остальных переменных только пишет предупреждение при старте.
 
+<!-- section: passed-through-to-subprocesses -->
 ## Передаётся подпроцессам
 
 Worker запускает `git` и `codex` с окружением из allowlist, а не со своим. Больше ничего (URL базы, токены GitHub, Jira или Slack, ключи других owner'ов) до них не доходит.
@@ -84,6 +91,7 @@ Worker запускает `git` и `codex` с окружением из allowlis
 | `git clone` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`/`TMP`/`TEMP`, `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (в любом регистре), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`; плюс токен GitHub owner'а прогона через `GIT_ASKPASS`. |
 | `codex exec` | `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`/`TMP`/`TEMP`, `OPENAI_BASE_URL`, `CODEX_HOME`, `XDG_CACHE_HOME`, `SSL_CERT_FILE`; плюс `OPENAI_API_KEY` и `CODEX_API_KEY` со значением ключа модели owner'а прогона. |
 
+<!-- section: tests-only -->
 ## Только для тестов
 
 | Переменная | Описание |

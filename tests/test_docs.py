@@ -268,3 +268,41 @@ def test_russian_mirror_sections_match(name: str) -> None:
     if len(english) != len(russian):
         problems.append(f"section count differs: en {len(english)} vs ru {len(russian)}")
     assert not problems, f"docs/ru/{name} vs docs/{name}:\n" + "\n".join(problems)
+
+
+_MARKER = re.compile(r"^<!-- section: ([a-z0-9]+(?:-[a-z0-9]+)*) -->$")
+
+
+def _section_ids(path: Path) -> list[str]:
+    """Return section ids in order; fail if a heading has no marker on the line before it."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    ids: list[str] = []
+    in_fence = False
+    for index, line in enumerate(lines):
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not re.match(r"^#{1,6}\s", line):
+            continue
+        marker = _MARKER.match(lines[index - 1]) if index else None
+        assert marker, (
+            f"{path.relative_to(ROOT)}: heading {line!r} (line {index + 1}) "
+            "needs a `<!-- section: <id> -->` marker on the line before it"
+        )
+        ids.append(marker.group(1))
+    return ids
+
+
+@pytest.mark.parametrize("path", sorted([*DOCS.glob("*.md"), *RU.glob("*.md")]), ids=lambda p: str(p.relative_to(DOCS)))
+def test_every_heading_has_a_unique_section_marker(path: Path) -> None:
+    ids = _section_ids(path)
+    duplicates = sorted({sid for sid in ids if ids.count(sid) > 1})
+    assert not duplicates, f"{path.relative_to(ROOT)}: duplicate section ids {duplicates}"
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in DOCS.glob("*.md")))
+def test_russian_mirror_has_the_same_section_ids(name: str) -> None:
+    english, russian = _section_ids(DOCS / name), _section_ids(RU / name)
+    for index, (en_id, ru_id) in enumerate(zip(english, russian, strict=False)):
+        assert en_id == ru_id, f"docs/ru/{name}: section {index} is {ru_id!r}, docs/{name} has {en_id!r}"
+    assert len(english) == len(russian), f"docs/ru/{name}: {len(russian)} sections, docs/{name} has {len(english)}"

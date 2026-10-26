@@ -1,3 +1,4 @@
+<!-- section: observability-scrape-our-endpoints-from-your-prometheus-grafana -->
 # Observability: scrape our endpoints from *your* Prometheus / Grafana
 
 This service does not run Grafana, Prometheus, or Loki. It only **exports**:
@@ -11,6 +12,7 @@ This service does not run Grafana, Prometheus, or Loki. It only **exports**:
 
 No observability URLs in `.env`. The platform scraper connects inbound.
 
+<!-- section: prometheus-existing -->
 ## Prometheus (existing)
 
 Point scrape jobs at the API and worker. Do not publish `/metrics` to the internet.
@@ -23,16 +25,19 @@ Merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.y
 
 Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) fires when DNS discovery finds no worker at all (`absent(up{job="open-pr-review-worker"})`): reviews queue and never run. `OpenPrReviewWorkerTargetDown` (`warning`) fires when a discovered worker replica cannot be scraped (`up == 0`); other replicas may still process reviews. Limitation: with scaled workers, a replica that stops disappears from Docker DNS discovery instead of reporting `up == 0`, so losing some but not all replicas fires neither alert. Detect partial loss with your Docker or orchestrator metrics (desired vs running replicas); a queue-backlog alert is planned as a follow-up.
 
+<!-- section: grafana-existing -->
 ## Grafana (existing)
 
 1. Datasource Prometheus → the Prometheus that scrapes Open PR Review. Optional Loki for logs.
 2. **Dashboards → Import** → [observability/grafana/dashboards/autoreview-bot.json](../observability/grafana/dashboards/autoreview-bot.json).
 3. Dashboard expects datasource UIDs `prometheus` and `loki`. Remap if yours differ.
 
+<!-- section: loki-existing -->
 ## Loki (existing)
 
 Ship container stdout with **your** agent. Compose sets `OPEN_PR_REVIEW_SERVICE=api|worker`. Set `LOG_FORMAT=json` only if that pipeline wants JSON; default `text` is fine for `docker compose logs`.
 
+<!-- section: env-app-not-the-metrics-stack -->
 ## Env (app, not the metrics stack)
 
 | Variable | Default | Role |
@@ -42,6 +47,7 @@ Ship container stdout with **your** agent. Compose sets `OPEN_PR_REVIEW_SERVICE=
 | `METRICS_PORT` | `9100` | worker bind for `/metrics` |
 | `LOG_LEVEL` | `INFO` | |
 
+<!-- section: metrics-that-matter-for-workers -->
 ## Metrics that matter for workers
 
 | Metric | Meaning |

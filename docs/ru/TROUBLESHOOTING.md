@@ -1,7 +1,9 @@
+<!-- section: operations-and-troubleshooting -->
 # Эксплуатация и диагностика
 
 Цель этой страницы: быстро понять, **жив ли worker и почему ревью не появляется на PR**, не читая весь вывод Codex. Первый деплой: [DEPLOY.md](DEPLOY.md). Дашборды и алерты: [OBSERVABILITY.md](OBSERVABILITY.md).
 
+<!-- section: how-reviews-start -->
 ## Как запускаются ревью
 
 Сервис не опрашивает GitHub. Его должен кто-то вызвать.
@@ -14,6 +16,7 @@
 
 `ci.yml` этого репозитория запускает только lint, тесты и сборку Docker. Он не запрашивает и не должен запрашивать ревью.
 
+<!-- section: github-actions-in-a-reviewed-repository -->
 ### GitHub Actions в ревьюируемом репозитории
 
 1. Добавьте репозиторий в `github.allowed_repos` (или `allowed_repos` owner'а), иначе API ответит `403 repo_not_allowed`.
@@ -53,6 +56,7 @@ on:
 
 Изменение фильтров — это коммит в ревьюируемый репозиторий; перезапуск worker'а не нужен. Использовать и Actions, и прямой webhook в одном репозитории безопасно (запросы по одному PR сериализуются, тот же SHA переиспользуется, см. [API.md](API.md#гарантии-конкурентности)), но это удваивает вызовы; лучше один триггер.
 
+<!-- section: 60-seconds-without-grafana -->
 ## 60 секунд без Grafana
 
 ```bash
@@ -76,6 +80,7 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/ops/status" -Headers @{ Aut
 
 Поле `hints` — диагноз простыми словами: нет квоты модели, нет ключа, job в очереди, но ни одна не выполняется (worker не разбирает очередь), зависшие pending/running прогоны.
 
+<!-- section: what-should-be-green -->
 ## Что должно быть зелёным
 
 | Проверка | Хорошо | Плохо |
@@ -89,8 +94,10 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/ops/status" -Headers @{ Aut
 
 Строки лога worker'а, которые стоит искать: `worker ready`, `queued review_run=`, `job start`, `codex start`, `job done`, `review_finished`, `failed: CODEX_QUOTA`. Worker также пишет heartbeat Codex каждые 20 с. Для корреляции используйте id прогона.
 
+<!-- section: symptom-action -->
 ## Симптом → действие
 
+<!-- section: api-answers-202-nothing-appears-on-github -->
 ### API отвечает `202`, на GitHub ничего не появляется
 
 1. `GET /api/v1/ops/status`.
@@ -103,26 +110,32 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/ops/status" -Headers @{ Aut
 8. Action не запускается: проверьте `on.pull_request.paths` / `branches`, draft, fork. Job выполняется, но API отвечает `401`: `AI_REVIEW_API_KEY`. `403`: репозиторий не разрешён. Проверьте, что у `AI_REVIEW_URL` нет `/` в конце.
 9. Пропуск: `skip_reason` в `GET /api/v1/reviews/{id}` (draft, fork, автор без права write, size guard, причины owner'а). Пропуски не публикуют полное ревью.
 
+<!-- section: worker-hangs-in-codex-heartbeat-codex-still-running -->
 ### Worker «висит» в Codex (heartbeat `codex still running`)
 
 Нормально до `codex.timeout_seconds` (по умолчанию 600 с). После `WORKER_JOB_TIMEOUT` (по умолчанию 900 с) ARQ отменяет job, и прогон становится `REVIEW_TIMEOUT`. `stale_in_flight > 0` дольше 15 минут означает, что прогон остался `running` (например, процесс умер). Пересоздайте worker; следующий запрос для этого SHA заменит зависший прогон, а job очистки закроет его статус прогресса.
 
+<!-- section: run-completed-no-sticky-comment -->
 ### Прогон `completed`, sticky-комментария нет
 
 Проверьте `skip_reason` / `error_code` в `GET /api/v1/reviews/{id}`. Проверьте право Pull requests **write** у PAT/App и строки лога publisher'а. Переиспользованный прогон повторно не публикует.
 
+<!-- section: pr-queue-busy-503 -->
 ### `pr_queue_busy` (503)
 
 Другой запрос по тому же PR держал блокировку PR 20 с (обычно медленное чтение GitHub или зависшая база). Ничего не изменилось. Повторите запрос или доставьте webhook повторно из «Recent deliveries» App или репозитория.
 
+<!-- section: no-dashboard-or-no-metrics-in-grafana -->
 ### Нет дашборда или метрик в Grafana
 
 Prometheus должен достучаться до `:8000/metrics` и `:9100/metrics` (сеть, security groups, scrape job из [`observability/prometheus-scrape.yml`](../../observability/prometheus-scrape.yml)). Дашборд импортируется вручную из JSON; алерты из [`observability/alerts.yml`](../../observability/alerts.yml) загружаются один раз в ваш Prometheus.
 
+<!-- section: metrics-but-no-logs-in-grafana -->
 ### Метрики есть, логов в Grafana нет
 
 Сервис пишет только в stdout; отправляет их ваш агент логов. Локально: `docker compose logs -f worker`.
 
+<!-- section: error-and-skip-codes -->
 ## Коды ошибок и пропусков
 
 | Код | Вид | Значение |
@@ -147,6 +160,7 @@ Prometheus должен достучаться до `:8000/metrics` и `:9100/me
 | `REVIEW_TIMEOUT` | ошибка | Job превысила `WORKER_JOB_TIMEOUT`. |
 | `INTERNAL_ERROR` | ошибка | Неожиданная ошибка или прогон, чья job потеряна. |
 
+<!-- section: restarts-and-data -->
 ## Перезапуски и данные
 
 | Действие | Как |

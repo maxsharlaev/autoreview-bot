@@ -1,3 +1,4 @@
+<!-- section: faq -->
 # FAQ
 
 **Бот блокирует merge?**

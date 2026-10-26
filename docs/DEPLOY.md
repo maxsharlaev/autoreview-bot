@@ -1,13 +1,16 @@
+<!-- section: deploy-autoreview-bot -->
 # Deploy autoreview-bot
 
 Goal: run **one** instance of the review service and connect it to GitHub and an existing Prometheus/Grafana stack. Grafana, Prometheus and Loki are **not** installed by this service.
 
 Related: [GITHUB_SETUP.md](GITHUB_SETUP.md), [CONFIGURATION.md](CONFIGURATION.md), [ENVIRONMENT.md](ENVIRONMENT.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [OBSERVABILITY.md](OBSERVABILITY.md), [SECURITY.md](../SECURITY.md), [Russian translation](ru/DEPLOY.md).
 
+<!-- section: outcome -->
 ## Outcome
 
 A Compose stack runs on an internal host (VM or Docker host). An open PR in an allowlisted repository gets a sticky comment. The worker is visible in Grafana through metric scraping.
 
+<!-- section: out-of-scope -->
 ## Out of scope
 
 - Installing Grafana, Prometheus or Loki from this repository.
@@ -15,6 +18,7 @@ A Compose stack runs on an internal host (VM or Docker host). An open PR in an a
 - A blocking GitHub check (the progress status is informational, [PROGRESS_STATUS.md](PROGRESS_STATUS.md)).
 - Creating Jira issues (the service only comments and transitions, if enabled).
 
+<!-- section: what-is-deployed -->
 ## What is deployed
 
 Compose from the repository root (`docker-compose.yml`):
@@ -31,6 +35,7 @@ Compose publishes no Postgres or Redis ports. The API is published on `127.0.0.1
 
 The worker **must** run with `security_opt: seccomp:unconfined` and `apparmor:unconfined` (already in Compose) so Codex's inner bubblewrap sandbox can start. Do not remove them without testing on the target host.
 
+<!-- section: what-to-collect-first -->
 ## What to collect first
 
 | Item | Why |
@@ -43,6 +48,7 @@ The worker **must** run with `security_opt: seccomp:unconfined` and `apparmor:un
 | A public HTTPS hostname that GitHub/Actions can reach | For example `https://review.example.com` |
 | Where metrics are scraped from | API: IP/DNS of `api:8000` as seen from Prometheus; worker: `worker:9100` from the stack's Docker network only (DNS discovery of replicas) |
 
+<!-- section: host-resources -->
 ## Host resources
 
 - Docker Engine and Compose v2.
@@ -50,6 +56,7 @@ The worker **must** run with `security_opt: seccomp:unconfined` and `apparmor:un
 - Disk: the `postgres_data` volume plus temporary clones on the worker (hundreds of MB per job).
 - CPU/RAM: Codex is heavy. For 4 parallel jobs (`WORKER_MAX_JOBS=4`) plan several vCPUs and at least 8 GB RAM, or lower the parallelism.
 
+<!-- section: network-and-tls -->
 ## Network and TLS
 
 1. From the internet/GitHub, expose **only** the API over HTTPS. Terminate TLS at nginx, Caddy or an ingress.
@@ -58,6 +65,7 @@ The worker **must** run with `security_opt: seccomp:unconfined` and `apparmor:un
 4. Worker `:9100`: Prometheus/internal network only.
 5. GitHub webhooks and Actions call `https://<host>/api/v1/…`. GitHub does not accept self-signed certificates.
 
+<!-- section: configuration-on-the-host -->
 ## Configuration on the host
 
 ```bash
@@ -66,6 +74,7 @@ cp config.example.yaml config.yaml
 # fill in, never commit
 ```
 
+<!-- section: env-secrets -->
 ### `.env` (secrets)
 
 Generate `POSTGRES_PASSWORD` and `REVIEW_API_KEY` (`openssl rand -hex 32` each). The Postgres password must be URL-safe because Compose puts it into `DATABASE_URL`. `REVIEW_API_KEY` is **not** a GitHub PAT.
@@ -90,6 +99,7 @@ Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`. Slack is off by default (
 
 Compose builds `DATABASE_URL` for `migrate`, `api` and `worker` from `POSTGRES_PASSWORD`; `REDIS_URL` stays internal. For a local Python process set `DATABASE_URL` yourself. Every variable: [ENVIRONMENT.md](ENVIRONMENT.md).
 
+<!-- section: config-yaml -->
 ### `config.yaml`
 
 ```yaml
@@ -109,6 +119,7 @@ Set a non-empty allowlist: an empty list allows any repository the credentials c
 
 Custom review instructions: copy `prompts/review.md` to `prompts/local/review.md`, edit the copy and set `codex.prompt_file: prompts/local/review.md`. `prompts/local/` is git-ignored; Compose mounts `./prompts` read-only into the worker, and the path is relative to `/app` in the container. Keep the output schema and untrusted-input rules in a replacement prompt. A missing file fails the review explicitly. File edits apply to the next review; changing the path needs a worker restart.
 
+<!-- section: deployment-steps -->
 ## Deployment steps
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
@@ -127,10 +138,12 @@ Custom review instructions: copy `prompts/review.md` to `prompts/local/review.md
 7. Connect Prometheus/Grafana.
 8. Smoke test on a real PR.
 
+<!-- section: how-events-reach-the-service -->
 ## How events reach the service
 
 The service does **not** poll repositories. Choose one automatic trigger per repository.
 
+<!-- section: option-a-github-actions-in-each-reviewed-repository -->
 ### Option A: GitHub Actions in each reviewed repository
 
 Simplest; supports `paths` / `branches` filters; works with a PAT or an App.
@@ -144,12 +157,14 @@ Simplest; supports `paths` / `branches` filters; works with a PAT or an App.
 
 This repository's `ci.yml` does not run reviews, only the service's tests. Action filters and the service allowlist are separate layers: a green API with no Action run means checking `paths`/`branches`/draft.
 
+<!-- section: option-b-direct-webhook -->
 ### Option B: direct webhook
 
 A GitHub App (or repository) webhook to `/api/v1/pull-request`. Every delivery must be signed with `GITHUB_WEBHOOK_SECRET` (`X-Hub-Signature-256`). Never put a secret in the URL. Checklist: [GITHUB_SETUP.md](GITHUB_SETUP.md).
 
 Running both triggers on one repository does not create duplicate runs for one SHA (see [API.md](API.md#concurrency-guarantees)) but doubles the requests.
 
+<!-- section: observability-your-stack -->
 ## Observability (your stack)
 
 The application does **not** push metrics or logs; your scraper pulls.
@@ -161,6 +176,7 @@ The application does **not** push metrics or logs; your scraper pulls.
 
 `GET /api/v1/ops/status` (Bearer `REVIEW_API_KEY`) gives a queue snapshot without Grafana.
 
+<!-- section: acceptance-criteria -->
 ## Acceptance criteria
 
 - [ ] `GET /health` and `GET /is-ready` answer on the service hostname.
@@ -177,10 +193,12 @@ The application does **not** push metrics or logs; your scraper pulls.
 
 API `202` but no comment: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (`ops/status`, model quota, PAT Contents, allowlist).
 
+<!-- section: several-owners -->
 ## Several owners
 
 To serve another GitHub organization from the same deployment, add an `owners:` block to `config.yaml` and its `OWNER_<ID>_*` variables to `.env`, then recreate `api` and `worker`. Nothing changes until you do: a deployment without `owners:` keeps the single owner `default` and logs `owner=default`. Everything else: [MULTI_OWNER.md](MULTI_OWNER.md).
 
+<!-- section: after-rollout -->
 ## After rollout
 
 | Action | How |

@@ -1,7 +1,9 @@
+<!-- section: operations-and-troubleshooting -->
 # Operations and troubleshooting
 
 The goal of this page: find out quickly **whether the worker is alive and why a review does not appear on a PR**, without reading all of the Codex output. First deployment: [DEPLOY.md](DEPLOY.md). Dashboards and alerts: [OBSERVABILITY.md](OBSERVABILITY.md).
 
+<!-- section: how-reviews-start -->
 ## How reviews start
 
 The service does not poll GitHub. Something has to call it.
@@ -14,6 +16,7 @@ The service does not poll GitHub. Something has to call it.
 
 This repository's `ci.yml` only runs lint, tests and a Docker build. It does not and should not request reviews.
 
+<!-- section: github-actions-in-a-reviewed-repository -->
 ### GitHub Actions in a reviewed repository
 
 1. Add the repository to `github.allowed_repos` (or the owner's `allowed_repos`), otherwise the API answers `403 repo_not_allowed`.
@@ -53,6 +56,7 @@ on:
 
 Changing filters is a commit to the reviewed repository; the worker needs no restart. Using both Actions and a direct webhook on one repository is safe (requests for one PR are serialized and the same SHA is reused, see [API.md](API.md#concurrency-guarantees)), but it doubles the calls; prefer one trigger.
 
+<!-- section: 60-seconds-without-grafana -->
 ## 60 seconds without Grafana
 
 ```bash
@@ -76,6 +80,7 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/ops/status" -Headers @{ Aut
 
 The `hints` field is a plain-language diagnosis: no model quota, no key, jobs queued but none running (the worker does not consume the queue), stale pending/running runs.
 
+<!-- section: what-should-be-green -->
 ## What should be green
 
 | Check | Good | Bad |
@@ -89,8 +94,10 @@ The `hints` field is a plain-language diagnosis: no model quota, no key, jobs qu
 
 Worker log lines to look for: `worker ready`, `queued review_run=`, `job start`, `codex start`, `job done`, `review_finished`, `failed: CODEX_QUOTA`. The worker also logs a Codex heartbeat every 20 s. Use the run id to correlate.
 
+<!-- section: symptom-action -->
 ## Symptom → action
 
+<!-- section: api-answers-202-nothing-appears-on-github -->
 ### API answers `202`, nothing appears on GitHub
 
 1. `GET /api/v1/ops/status`.
@@ -103,26 +110,32 @@ Worker log lines to look for: `worker ready`, `queued review_run=`, `job start`,
 8. The Action does not start: check `on.pull_request.paths` / `branches`, draft, fork. Job runs but the API says `401`: `AI_REVIEW_API_KEY`. `403`: repository not allowed. Check that `AI_REVIEW_URL` has no trailing `/`.
 9. A skip: `skip_reason` on `GET /api/v1/reviews/{id}` (draft, fork, author without write access, size guard, owner reasons). Skips publish no full review.
 
+<!-- section: worker-hangs-in-codex-heartbeat-codex-still-running -->
 ### Worker "hangs" in Codex (heartbeat `codex still running`)
 
 Normal up to `codex.timeout_seconds` (default 600 s). After `WORKER_JOB_TIMEOUT` (default 900 s) ARQ cancels the job and the run becomes `REVIEW_TIMEOUT`. `stale_in_flight > 0` for more than 15 minutes means a run left `running` (for example the process died). Recreate the worker; the next request for that SHA replaces the stale run, and the cleanup job closes its progress status.
 
+<!-- section: run-completed-no-sticky-comment -->
 ### Run `completed`, no sticky comment
 
 Check `skip_reason` / `error_code` on `GET /api/v1/reviews/{id}`. Check Pull requests **write** for the PAT/App and the publisher log lines. A reused run does not post again.
 
+<!-- section: pr-queue-busy-503 -->
 ### `pr_queue_busy` (503)
 
 Another request for the same PR held the per-PR lock for 20 s (usually a slow GitHub read or a stuck database). Nothing changed. Retry the request, or redeliver the webhook from the App's or repository's "Recent deliveries".
 
+<!-- section: no-dashboard-or-no-metrics-in-grafana -->
 ### No dashboard or no metrics in Grafana
 
 Prometheus must reach `:8000/metrics` and `:9100/metrics` (network, security groups, the scrape job from [`observability/prometheus-scrape.yml`](../observability/prometheus-scrape.yml)). The dashboard is a manual JSON import; alerts from [`observability/alerts.yml`](../observability/alerts.yml) are loaded once into your Prometheus.
 
+<!-- section: metrics-but-no-logs-in-grafana -->
 ### Metrics but no logs in Grafana
 
 The service only writes to stdout; your log agent ships it. Locally: `docker compose logs -f worker`.
 
+<!-- section: error-and-skip-codes -->
 ## Error and skip codes
 
 | Code | Kind | Meaning |
@@ -147,6 +160,7 @@ The service only writes to stdout; your log agent ships it. Locally: `docker com
 | `REVIEW_TIMEOUT` | error | The job exceeded `WORKER_JOB_TIMEOUT`. |
 | `INTERNAL_ERROR` | error | Unexpected error, or a run whose job was lost. |
 
+<!-- section: restarts-and-data -->
 ## Restarts and data
 
 | Action | How |

@@ -1,13 +1,16 @@
+<!-- section: deploy-autoreview-bot -->
 # Деплой autoreview-bot
 
 Цель: запустить **один** инстанс сервиса ревью и подключить его к GitHub и к уже существующему стеку Prometheus/Grafana. Grafana, Prometheus и Loki этим сервисом **не** устанавливаются.
 
 Связанные документы: [GITHUB_SETUP.md](GITHUB_SETUP.md), [CONFIGURATION.md](CONFIGURATION.md), [ENVIRONMENT.md](ENVIRONMENT.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [OBSERVABILITY.md](OBSERVABILITY.md), [SECURITY.md](../../SECURITY.md), [английская версия](../DEPLOY.md).
 
+<!-- section: outcome -->
 ## Результат
 
 Стек Compose работает на внутреннем хосте (виртуальная машина или Docker-хост). Открытый PR в репозитории из allowlist получает sticky-комментарий. Worker виден в Grafana через скрейпинг метрик.
 
+<!-- section: out-of-scope -->
 ## Вне рамок
 
 - Установка Grafana, Prometheus или Loki из этого репозитория.
@@ -15,6 +18,7 @@
 - Блокирующая проверка GitHub (статус прогресса информационный, [PROGRESS_STATUS.md](PROGRESS_STATUS.md)).
 - Создание задач в Jira (сервис только комментирует и переводит статус, если включено).
 
+<!-- section: what-is-deployed -->
 ## Что разворачивается
 
 Compose из корня репозитория (`docker-compose.yml`):
@@ -31,6 +35,7 @@ Compose не публикует порты Postgres и Redis. API опублик
 
 Worker **обязан** работать с `security_opt: seccomp:unconfined` и `apparmor:unconfined` (уже есть в Compose), чтобы внутренняя песочница bubblewrap у Codex могла стартовать. Не убирайте их, не проверив на целевом хосте.
 
+<!-- section: what-to-collect-first -->
 ## Что собрать заранее
 
 | Что | Зачем |
@@ -43,6 +48,7 @@ Worker **обязан** работать с `security_opt: seccomp:unconfined` �
 | Публичное HTTPS-имя хоста, доступное GitHub/Actions | Например `https://review.example.com` |
 | Откуда скрейпятся метрики | API: IP/DNS `api:8000` с точки зрения Prometheus; worker: `worker:9100` только из Docker-сети стека (DNS-обнаружение реплик) |
 
+<!-- section: host-resources -->
 ## Ресурсы хоста
 
 - Docker Engine и Compose v2.
@@ -50,6 +56,7 @@ Worker **обязан** работать с `security_opt: seccomp:unconfined` �
 - Диск: том `postgres_data` плюс временные клоны на worker'е (сотни МБ на job).
 - CPU/RAM: Codex тяжёлый. Для 4 параллельных job (`WORKER_MAX_JOBS=4`) закладывайте несколько vCPU и не меньше 8 ГБ RAM или снизьте параллелизм.
 
+<!-- section: network-and-tls -->
 ## Сеть и TLS
 
 1. Из интернета/GitHub открывайте **только** API по HTTPS. Завершайте TLS на nginx, Caddy или ingress.
@@ -58,6 +65,7 @@ Worker **обязан** работать с `security_opt: seccomp:unconfined` �
 4. Worker `:9100`: только Prometheus/внутренняя сеть.
 5. Webhooks и Actions GitHub вызывают `https://<host>/api/v1/…`. GitHub не принимает самоподписанные сертификаты.
 
+<!-- section: configuration-on-the-host -->
 ## Конфигурация на хосте
 
 ```bash
@@ -66,6 +74,7 @@ cp config.example.yaml config.yaml
 # fill in, never commit
 ```
 
+<!-- section: env-secrets -->
 ### `.env` (секреты)
 
 Сгенерируйте `POSTGRES_PASSWORD` и `REVIEW_API_KEY` (каждый `openssl rand -hex 32`). Пароль Postgres должен быть URL-безопасным, потому что Compose подставляет его в `DATABASE_URL`. `REVIEW_API_KEY` — **не** PAT GitHub.
@@ -90,6 +99,7 @@ Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`. Slack по умолчан
 
 Compose собирает `DATABASE_URL` для `migrate`, `api` и `worker` из `POSTGRES_PASSWORD`; `REDIS_URL` остаётся внутренним. Для локального процесса Python задайте `DATABASE_URL` сами. Все переменные: [ENVIRONMENT.md](ENVIRONMENT.md).
 
+<!-- section: config-yaml -->
 ### `config.yaml`
 
 ```yaml
@@ -109,6 +119,7 @@ features:
 
 Свои инструкции ревью: скопируйте `prompts/review.md` в `prompts/local/review.md`, отредактируйте копию и задайте `codex.prompt_file: prompts/local/review.md`. `prompts/local/` в git-ignore; Compose монтирует `./prompts` в worker только для чтения, а путь задаётся относительно `/app` в контейнере. Сохраните в заменяющем промпте схему вывода и правила для недоверенного ввода. Отсутствующий файл явно проваливает ревью. Правки файла применяются к следующему ревью; смена пути требует перезапуска worker'а.
 
+<!-- section: deployment-steps -->
 ## Шаги деплоя
 
 1. Склонируйте репозиторий на хост; создайте `.env` и `config.yaml`, как описано выше.
@@ -127,10 +138,12 @@ features:
 7. Подключите Prometheus/Grafana.
 8. Smoke-тест на реальном PR.
 
+<!-- section: how-events-reach-the-service -->
 ## Как события доходят до сервиса
 
 Сервис **не** опрашивает репозитории. Выберите один автоматический триггер на репозиторий.
 
+<!-- section: option-a-github-actions-in-each-reviewed-repository -->
 ### Вариант A: GitHub Actions в каждом ревьюируемом репозитории
 
 Проще всего; поддерживает фильтры `paths` / `branches`; работает с PAT или App.
@@ -144,12 +157,14 @@ features:
 
 `ci.yml` этого репозитория ревью не запускает, только тесты сервиса. Фильтры Action и allowlist сервиса — отдельные уровни: зелёный API без запуска Action означает, что нужно проверить `paths`/`branches`/draft.
 
+<!-- section: option-b-direct-webhook -->
 ### Вариант B: прямой webhook
 
 Webhook GitHub App (или репозитория) на `/api/v1/pull-request`. Каждая доставка должна быть подписана `GITHUB_WEBHOOK_SECRET` (`X-Hub-Signature-256`). Никогда не кладите секрет в URL. Чеклист: [GITHUB_SETUP.md](GITHUB_SETUP.md).
 
 Оба триггера на одном репозитории не создают дублирующих прогонов для одного SHA (см. [API.md](API.md#гарантии-конкурентности)), но удваивают запросы.
 
+<!-- section: observability-your-stack -->
 ## Наблюдаемость (ваш стек)
 
 Приложение **не** отправляет метрики и логи само; их забирает ваш скрейпер.
@@ -161,6 +176,7 @@ Webhook GitHub App (или репозитория) на `/api/v1/pull-request`. 
 
 `GET /api/v1/ops/status` (Bearer `REVIEW_API_KEY`) даёт снимок очереди без Grafana.
 
+<!-- section: acceptance-criteria -->
 ## Критерии приёмки
 
 - [ ] `GET /health` и `GET /is-ready` отвечают на имени хоста сервиса.
@@ -177,10 +193,12 @@ Webhook GitHub App (или репозитория) на `/api/v1/pull-request`. 
 
 API `202`, но комментария нет: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (`ops/status`, квота модели, PAT Contents, allowlist).
 
+<!-- section: several-owners -->
 ## Несколько owner'ов
 
 Чтобы обслуживать ещё одну организацию GitHub из того же деплоя, добавьте блок `owners:` в `config.yaml` и его переменные `OWNER_<ID>_*` в `.env`, затем пересоздайте `api` и `worker`. Пока вы этого не сделали, ничего не меняется: деплой без `owners:` сохраняет одного owner'а `default` и пишет `owner=default`. Всё остальное: [MULTI_OWNER.md](MULTI_OWNER.md).
 
+<!-- section: after-rollout -->
 ## После выката
 
 | Действие | Как |

@@ -1,3 +1,4 @@
+<!-- section: github-app-pat-and-trigger-setup -->
 # Настройка GitHub App, PAT и триггера
 
 Полный деплой хоста (Compose, сеть, Prometheus): [DEPLOY.md](DEPLOY.md). Английская версия: [GITHUB_SETUP.md](../GITHUB_SETUP.md).
@@ -6,6 +7,7 @@
 
 `GET /health`, `GET /is-ready` и `GET /metrics` открыты для проб и Prometheus; worker отдаёт `GET http://worker:9100/metrics`. Снимок очереди: `GET /api/v1/ops/status` (API key). Справочник API: [API.md](API.md).
 
+<!-- section: where-secrets-go -->
 ## Где хранятся секреты
 
 | Значение | Где | Назначение |
@@ -19,6 +21,7 @@
 
 Сгенерируйте длинный случайный ключ сервиса (например `openssl rand -hex 32`); он не связан с PAT GitHub. Все переменные: [ENVIRONMENT.md](ENVIRONMENT.md).
 
+<!-- section: option-a-fine-grained-pat -->
 ## Вариант A: fine-grained PAT
 
 Без GitHub App достаточно PAT (`github_pat_*`) с доступом к ревьюируемым репозиториям. В `.env`:
@@ -38,6 +41,7 @@ GITHUB_WEBHOOK_SECRET=<repository webhook secret, if you use a webhook>
 
 Оставьте поля App (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) пустыми; с PAT JWT App не используется. Комментарии в PR появляются от аккаунта владельца токена. Сначала проверьте на одном репозитории и убедитесь, что работают и clone, и комментарий.
 
+<!-- section: option-b-github-app -->
 ## Вариант B: GitHub App
 
 1. **Settings** организации (или аккаунта) → **Developer settings** → **GitHub Apps** → **New GitHub App**.
@@ -56,6 +60,7 @@ GITHUB_WEBHOOK_SECRET=<repository webhook secret, if you use a webhook>
 
 Прямому webhook нужен только `GITHUB_WEBHOOK_SECRET`. `AI_REVIEW_API_KEY` нужен для GitHub Actions (`/api/v1/reviews`) и ручных вызовов.
 
+<!-- section: organization-or-repository-secret-for-actions -->
 ## Секрет организации или репозитория для Actions
 
 1. **Settings** организации → **Secrets and variables** → **Actions** → **New organization secret** (или секреты репозитория).
@@ -65,6 +70,7 @@ GITHUB_WEBHOOK_SECRET=<repository webhook secret, if you use a webhook>
 
 Скопируйте [пример workflow](../../examples/github/ai-review-trigger.yml) в каждый ревьюируемый репозиторий как `.github/workflows/ai-review.yml`. Он ссылается на `maxsharlaev/autoreview-bot@main`; для форка или недоступного workflow измените `uses:` или скопируйте шаги reusable workflow этого репозитория. Он вызывает `POST /api/v1/reviews` с URL PR, поэтому HMAC webhook не нужен. `ci.yml` этого репозитория только тестирует и собирает сервис. Фильтры: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#github-actions-в-ревьюируемом-репозитории).
 
+<!-- section: service-configuration -->
 ## Конфигурация сервиса
 
 `.env` для App:
@@ -89,6 +95,7 @@ github:
 
 События из репозиториев вне непустого списка игнорируются (`202`, `repo_not_allowed`); ручные вызовы API получают `403`.
 
+<!-- section: verify -->
 ## Проверка
 
 После `docker compose up` и публичного HTTPS (или туннеля):
@@ -102,16 +109,19 @@ github:
      https://review.example.com/api/v1/reviews/<review_run_id>
    ```
 
+<!-- section: parallel-prs -->
 ## Параллельные PR
 
 Каждый прогон — отдельная job очереди. ARQ worker берёт до `WORKER_MAX_JOBS` job одновременно (по умолчанию **4**); разные PR выполняются параллельно. Повтор того же `head_sha` переиспользует прогон, новый SHA отменяет незавершённый, а конкурентные доставки по одному PR сериализуются ([API.md](API.md#гарантии-конкурентности)).
 
 Чтобы масштабироваться, увеличьте `WORKER_MAX_JOBS` и/или запустите больше реплик worker'а: `docker compose up -d --scale worker=N`. Метрики worker'а не публикуются на хосте, а поставляемый scrape job находит каждую реплику по имени сервиса ([OBSERVABILITY.md](OBSERVABILITY.md)). Ограничения — квота модели и клонирование, а не FastAPI.
 
+<!-- section: several-owners -->
 ## Несколько owner'ов
 
 У каждого owner'а в `owners:` свои креды GitHub, секрет webhook и необязательный API key owner'а, заданные именами переменных. Именование, два способа подключить ещё одну организацию (тот же App с другой установкой или свой App/PAT с `/api/v1/pull-request/<owner-id>`) и ответы, специфичные для owner'ов: [MULTI_OWNER.md](MULTI_OWNER.md).
 
+<!-- section: common-errors -->
 ## Частые ошибки
 
 | Симптом | Что проверить |

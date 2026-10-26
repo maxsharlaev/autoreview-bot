@@ -1,7 +1,9 @@
+<!-- section: multiple-owners -->
 # Несколько owner'ов
 
 Один деплой может обслуживать несколько owner'ов GitHub (организаций или аккаунтов), у каждого свои креды GitHub, секрет webhook, API key, Jira, Slack, политики и ключ модели. Конфиг без `owners:` работает точно так же, как раньше. Как это устроено внутри: [ARCHITECTURE.md](ARCHITECTURE.md#несколько-ownerов).
 
+<!-- section: modes -->
 ## Режимы
 
 «Legacy-креды GitHub» — это `GITHUB_TOKEN`/`GITHUB_PAT` или пара `GITHUB_APP_ID` и `GITHUB_APP_PRIVATE_KEY`, заданные в окружении.
@@ -15,16 +17,19 @@
 
 Два owner'а с `default: true`, owner с именем `default` в режиме B, один и тот же репозиторий или `org/*`, заявленный двумя owner'ами, одна и та же установка App или API key у двух owner'ов, API key owner'а, равный `REVIEW_API_KEY`, или отсутствующий обязательный секрет останавливают старт с ошибкой, которая называет переменную, но никогда не её значение.
 
+<!-- section: routing -->
 ## Маршрутизация
 
 Запрос направляется: явно указанному owner'у (`/api/v1/pull-request/<id>`, заголовок `X-Review-Owner`, `?owner=` или API key owner'а); иначе owner'у, у которого точное `org/repo` есть в `github.allowed_repos`; иначе owner'у с `org/*`; иначе owner'у, чей ненулевой `installation_id` совпадает с webhook; иначе `routing.unclaimed: default` (owner по умолчанию) или `reject` (`unknown_owner`). Затем применяется allowlist выбранного owner'а. Явный owner для репозитория, заявленного другим owner'ом, получает 409 `owner_repo_conflict`; webhook, подписанный секретом одного owner'а для репозитория другого, получает 403 `owner_signature_mismatch`. `REVIEW_API_KEY` — операторский ключ для всех owner'ов; `owners.<id>.api.key_env` — ключ одного owner'а, который видит только свои прогоны.
 
+<!-- section: secrets -->
 ## Секреты
 
 YAML содержит только имена переменных (`*_env`) или пути к файлам ключей; литеральный секрет отклоняется. Без явного `*_env` имя — `OWNER_<ID>_<NAME>` (`<ID>` в верхнем регистре, `-` → `_`): `GITHUB_TOKEN`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `REVIEW_API_KEY`, `JIRA_API_TOKEN`, `SLACK_BOT_TOKEN`, `OPENAI_API_KEY`; например `OWNER_EXAMPLE_ORG_GITHUB_TOKEN`. `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY` (общий ключ модели по умолчанию) и настройки worker'а/логов/метрик остаются общими. Невалидный секрет webhook отключает webhooks только для этого owner'а.
 
 Все имена секретов: [ENVIRONMENT.md](ENVIRONMENT.md#переменные-ownerов-owner_id_). Все ключи owner'а: [CONFIGURATION.md](CONFIGURATION.md#owners).
 
+<!-- section: example-two-organizations-with-pats -->
 ## Пример: две организации с PAT
 
 ```yaml
@@ -44,6 +49,7 @@ owners:
 
 Fine-grained PAT принадлежит одному владельцу ресурсов (пользователю или одной организации), поэтому каждому owner'у нужен свой токен. Оставьте legacy `GITHUB_TOKEN` пустым, чтобы остаться в режиме D.
 
+<!-- section: connecting-another-organization -->
 ## Подключение ещё одной организации
 
 Два способа подключить ещё одну организацию:
@@ -62,6 +68,7 @@ Fine-grained PAT принадлежит одному владельцу ресу
 | `403 owner_forbidden` | API key owner'а использован для другого owner'а |
 | `401` на `/pull-request/<id>` отключённого owner'а | Нет подписи или она неверна; верная подпись получает `202 owner_disabled` |
 
+<!-- section: keeping-pre-multi-owner-history -->
 ## Сохранение истории до поддержки нескольких owner'ов
 
 Замечания, прогоны ревью и записи об авторах комментариев, созданные до появления блока `owners:`, хранятся под legacy id owner'а `default`. Они привязываются явно, никогда не через флаг `default: true`:
@@ -82,6 +89,7 @@ owners:
 ```
 
 
+<!-- section: jira-and-slack-per-owner -->
 ## Jira и Slack по owner'ам
 
 Именованный owner использует только свои блоки `jira` и `slack`; от секций верхнего уровня или legacy-owner'а `default` ничего не наследуется. Без блока `jira` owner не делает запросов в Jira; без блока `slack` он ничего не публикует, включая ежечасный дайджест. Чтение, комментарии и переходы Jira используют сайт, аккаунт и `projects` owner'а (разрешённые ключи проектов и их `rework_status`). Каждый owner со Slack получает свой дайджест в свой канал. Секреты — имена переменных: `api_token_env` / `bot_token_env` или по умолчанию `OWNER_<ID>_JIRA_API_TOKEN` / `OWNER_<ID>_SLACK_BOT_TOKEN`. Чтобы несколько owner'ов использовали один аккаунт Jira или бота Slack, укажите им одно и то же имя переменной.
@@ -105,6 +113,7 @@ owners:
 URL webhook отключённого owner'а `/api/v1/pull-request/<id>` отвечает `owner_disabled` только на запросы, подписанные секретом webhook этого owner'а; остальные получают 401.
 
 
+<!-- section: policies-and-model-per-owner -->
 ## Политики и модель по owner'ам
 
 `public_repos`, `language`, `features` (`jira_comment`, `jira_transition`, `digest_enabled`), `pr_description`, `size_guard` и `progress_status` можно переопределить для owner'а. Переопределения частичные и глубоко сливаются с секциями верхнего уровня: незаданные поля сохраняют глобальное значение, а слитая секция проверяется так же, как глобальная (например, `size_guard.hard` должен оставаться не меньше `size_guard.soft`). Они применяются ко всему, что их читает для прогонов этого owner'а: промпт и комментарий ревью, редактирование для публичных репозиториев, size guard и его `override_label` (в том числе в проверке метки webhook), черновики описания PR, комментарии/переходы Jira и дайджест. Расписание дайджеста остаётся глобальным; `features.digest_enabled` решает по каждому owner'у.
@@ -128,6 +137,7 @@ owners:
 ```
 
 
+<!-- section: upgrade-and-rollback -->
 ## Обновление и откат
 
 1. Разверните новый образ и выполните `alembic upgrade head` (Compose делает это в `migrate`), не трогая конфиг: поведение не меняется, логи/метрики показывают `owner=default`.

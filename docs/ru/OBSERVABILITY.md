@@ -1,3 +1,4 @@
+<!-- section: observability-scrape-our-endpoints-from-your-prometheus-grafana -->
 # Наблюдаемость: скрейпинг наших эндпойнтов *вашим* Prometheus / Grafana
 
 Этот сервис не запускает Grafana, Prometheus или Loki. Он только **экспортирует**:
@@ -11,6 +12,7 @@
 
 В `.env` нет URL наблюдаемости. Скрейпер платформы подключается сам.
 
+<!-- section: prometheus-existing -->
 ## Prometheus (существующий)
 
 Направьте scrape job'ы на API и worker. Не публикуйте `/metrics` в интернет.
@@ -23,16 +25,19 @@
 
 Загрузите [observability/alerts.yml](../../observability/alerts.yml) как rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) срабатывает, когда DNS-обнаружение не находит ни одного worker'а (`absent(up{job="open-pr-review-worker"})`): ревью копятся в очереди и не выполняются. `OpenPrReviewWorkerTargetDown` (`warning`) срабатывает, когда найденную реплику worker'а не удаётся скрейпить (`up == 0`); остальные реплики могут продолжать обрабатывать ревью. Ограничение: при нескольких репликах остановленная реплика пропадает из DNS-обнаружения Docker вместо того, чтобы сообщить `up == 0`, поэтому потеря части (не всех) реплик не вызывает ни одного из этих алертов. Отслеживайте частичную потерю метриками Docker или оркестратора (желаемое и запущенное число реплик); алерт на рост очереди запланирован как следующий шаг.
 
+<!-- section: grafana-existing -->
 ## Grafana (существующая)
 
 1. Datasource Prometheus → тот Prometheus, который скрейпит Open PR Review. Необязательно Loki для логов.
 2. **Dashboards → Import** → [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json).
 3. Дашборд ожидает UID datasource'ов `prometheus` и `loki`. Переназначьте, если у вас другие.
 
+<!-- section: loki-existing -->
 ## Loki (существующий)
 
 Отправляйте stdout контейнеров **вашим** агентом. Compose задаёт `OPEN_PR_REVIEW_SERVICE=api|worker`. Задавайте `LOG_FORMAT=json`, только если ваш конвейер ждёт JSON; значение по умолчанию `text` подходит для `docker compose logs`.
 
+<!-- section: env-app-not-the-metrics-stack -->
 ## Env (приложения, не стека метрик)
 
 | Переменная | По умолчанию | Роль |
@@ -42,6 +47,7 @@
 | `METRICS_PORT` | `9100` | порт worker'а для `/metrics` |
 | `LOG_LEVEL` | `INFO` | |
 
+<!-- section: metrics-that-matter-for-workers -->
 ## Метрики, важные для worker'ов
 
 | Метрика | Значение |

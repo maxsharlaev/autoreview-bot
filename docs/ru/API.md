@@ -1,3 +1,4 @@
+<!-- section: http-api -->
 # HTTP API
 
 API слушает порт 8000 (`127.0.0.1:8000` в Compose; перед ним нужен reverse proxy с TLS). FastAPI также отдаёт схему OpenAPI на `GET /openapi.json` и `GET /docs` без аутентификации.
@@ -14,6 +15,7 @@ API слушает порт 8000 (`127.0.0.1:8000` в Compose; перед ним
 | `GET /metrics` | нет | Prometheus (API). Worker отдаёт свои метрики на `:9100/metrics`. Оба держите внутренними. |
 | `GET /docs`, `GET /openapi.json` | нет | Сгенерированная схема API. |
 
+<!-- section: authentication -->
 ## Аутентификация
 
 Передайте ключ одним из способов:
@@ -29,10 +31,12 @@ API слушает порт 8000 (`127.0.0.1:8000` в Compose; перед ним
 
 Отсутствующий или неверный ключ — `401 {"detail": "invalid access key"}`. Эндпойнты webhook API key не принимают; они проверяют `X-Hub-Signature-256`. Никогда не передавайте ключ в URL.
 
+<!-- section: choosing-the-owner -->
 ## Выбор owner'а
 
 При нескольких owner'ах ([MULTI_OWNER.md](MULTI_OWNER.md)) запрос маршрутизируется по репозиторию. Чтобы явно выбрать owner'а, передайте `X-Review-Owner: <owner-id>` или `?owner=<owner-id>` (без учёта регистра, алиасы принимаются). Если оба заданы с разными значениями — `400`. Ключ owner'а всегда использует своего owner'а.
 
+<!-- section: post-api-v1-reviews -->
 ## `POST /api/v1/reviews`
 
 ```bash
@@ -50,6 +54,7 @@ $body = @{ pull_url = "https://github.com/example-org/example-repo/pull/1" } | C
 Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Headers $headers -ContentType "application/json" -Body $body
 ```
 
+<!-- section: body -->
 ### Тело запроса
 
 | Поле | Тип | По умолчанию | Описание |
@@ -65,6 +70,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 
 Эндпойнт всегда читает PR из GitHub с кредами owner'а и привязывает прогон к его текущему head. Draft- и fork-PR здесь принимаются, но worker их пропускает.
 
+<!-- section: response-202 -->
 ### Ответ `202`
 
 ```json
@@ -73,6 +79,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 
 `status` может быть `running` или `completed`, если `force: false` переиспользовал прогон.
 
+<!-- section: errors -->
 ### Ошибки
 
 | HTTP | `detail` | Значение |
@@ -94,6 +101,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 
 Если постановка в Redis не удалась, запрос завершается `500`, а прогон сохраняется как `failed` / `QUEUE_UNAVAILABLE`; следующий запрос его заменит.
 
+<!-- section: concurrency-guarantees -->
 ### Гарантии конкурентности
 
 - Постановка в очередь сериализуется по PR (репозиторий + номер) advisory lock'ом Postgres, который берёт и webhook. Запрос ждёт его не больше 20 с, затем получает `503 pr_queue_busy`.
@@ -102,6 +110,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 - Worker обрабатывает только `pending`-прогоны и захватывает их условным обновлением `pending → running`, поэтому из двух конкурирующих job ревью делает только одна.
 - Вытесненная job прерывается после коммита нового прогона (best effort, не больше 2 с).
 
+<!-- section: get-api-v1-reviews-review-run-id -->
 ## `GET /api/v1/reviews/{review_run_id}`
 
 ```json
@@ -119,10 +128,12 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 
 `404 review run not found` возвращается и для прогона другого owner'а, если используется ключ owner'а. Коды ошибок и пропусков: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#коды-ошибок-и-пропусков).
 
+<!-- section: get-api-v1-ops-status -->
 ## `GET /api/v1/ops/status`
 
 Только операторский ключ. Возвращает `in_flight` (число pending/running), `queue_jobs` (глубина очереди ARQ), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` и `hints` (диагноз простыми словами, например нет квоты модели или worker не разбирает очередь).
 
+<!-- section: webhooks -->
 ## Webhooks
 
 Подпишитесь на событие **Pull request**. Обрабатываемые actions: `opened`, `synchronize`, `reopened`, `ready_for_review` и `labeled` с меткой обхода size guard (она принудительно запускает новый прогон). Настройка: [GITHUB_SETUP.md](GITHUB_SETUP.md).

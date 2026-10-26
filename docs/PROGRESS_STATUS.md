@@ -1,3 +1,4 @@
+<!-- section: review-progress-status -->
 # Review progress status
 
 Webhook-triggered and manual (`POST /api/v1/reviews`) reviews report progress on the PR head commit, so the author can see whether the bot queued the PR, is working, skipped it or broke, without an extra comment. On by default; existing `config.yaml` files need no change.
@@ -12,6 +13,7 @@ progress_status:
 
 Keys and ranges: [CONFIGURATION.md](CONFIGURATION.md#progress_status). Every field can be overridden per owner in `owners.<id>.progress_status`, for example `mode: off` for an owner whose credentials lack the permission.
 
+<!-- section: github-app-check-run-autoreview -->
 ## GitHub App: check run `autoreview`
 
 - `queued` when the request is accepted and the job is queued, `in_progress` when a worker picks it up, then `completed`.
@@ -19,12 +21,14 @@ Keys and ranges: [CONFIGURATION.md](CONFIGURATION.md#progress_status). Every fie
 - Findings never produce `failure`, so the check can't block merges.
 - Needs the App permission **Checks: Read and write**.
 
+<!-- section: pat-commit-status-autoreview -->
 ## PAT: commit status `autoreview`
 
 - `pending` while queued or running, then `success` (review published or skipped), `failure` (bot error or timeout) or `error` (cancelled).
 - One-line description and a `target_url` pointing to the review comment.
 - A fine-grained PAT needs **Commit statuses: Read and write**; a classic PAT needs `repo:status` (included in `repo`).
 
+<!-- section: review-phases -->
 ## Review phases
 
 While a run is open, the check run summary and the commit status description show the current phase and when it started, in UTC (same format as the review comment):
@@ -46,6 +50,7 @@ While a run is open, the check run summary and the commit status description sho
 
 **Spotting a hung review:** the phase timestamp stops advancing. Model analysis normally takes the longest (up to `codex.timeout_seconds` per attempt, two attempts); a phase older than that, or any phase older than `WORKER_JOB_TIMEOUT`, means the run is stuck. The job timeout and the cleanup job below close such statuses as failed.
 
+<!-- section: reliability -->
 ## Reliability
 
 - Each status is written with the run owner's own credentials; `auto` picks the mode per owner from its credential type.
@@ -56,6 +61,7 @@ While a run is open, the check run summary and the commit status description sho
 - If the PR head moved between queueing and pickup, the worker does not review the new code under the old run: it closes the run as `HEAD_CHANGED` (status `cancelled` on the run's own SHA) and never reports on another commit.
 - Queue serialization, the 60 s in-flight grace and the conditional `pending → running` claim are described in [API.md](API.md#concurrency-guarantees). Owner-reason skips taken before the claim use the same `pending` condition: if another job already holds the run, nothing is written and its status is left alone. A job that ARQ retries after a worker crash finds its run `running` and is skipped; the next request for that SHA replaces it, and the cleanup job closes the stale status.
 
+<!-- section: same-commit-two-triggers -->
 ## Same commit, two triggers
 
 - At most one status per commit is open at a time.
@@ -64,17 +70,20 @@ While a run is open, the check run summary and the commit status description sho
 - A worker whose status was already closed by a newer run never writes to it again.
 - An open run whose job was lost is closed as `failure` when it is replaced.
 
+<!-- section: manual-runs -->
 ## Manual runs
 
 Manual runs report exactly like webhook runs: same owner credentials and mode, write order, skips, cancellation and disclosure rules. The run is bound to the PR's current head; a stale `head_sha` is rejected with `409 stale_head_sha` before anything is reported ([API.md](API.md#errors)). `"report_status": false` starts a run without a status; an open status of the run it replaces is still closed. Request errors (unknown owner, repository not allowed, GitHub unavailable) are HTTP errors and create no status.
 
 Scheduled digest runs report no status: they review no PR head.
 
+<!-- section: owners-disabled-or-removed -->
 ## Owners disabled or removed
 
 - **Owner disabled** after the webhook (`owner_disabled`): the worker, or the cleanup job for a stale status, closes the status as `skipped` with that owner's own credentials. The registry keeps a disabled owner's credentials for this purpose only; if they can't be loaded, the status is closed only in the database.
 - **Owner removed** from the config (`owner_not_configured`): **its open statuses can't be closed on GitHub.** No credentials exist for it, and the bot never uses another owner's or the global credentials, so the check run stays `queued` / `in_progress` (or the commit status `pending`). The cleanup job closes it in the database and logs a warning. To avoid this, disable the owner first (`enabled: false`), let its queued runs drain, then remove the block; or close the check runs by hand.
 
+<!-- section: review-comment -->
 ## Review comment
 
 The sticky PR comment starts with the verdict, the reviewed commit and when the analysis finished, always in UTC, with its duration:
@@ -94,10 +103,12 @@ Findings that are still open (`still_open`, `regressed`, `needs_human`) get a tr
 
 The cards under **Still open from previous review** use the same marker before the status, for example `#### [🟠 P1] [regressed] Token is not validated`; a redacted card keeps it too (`#### [🟠 P1] Potential security issue.`).
 
+<!-- section: what-a-status-discloses -->
 ## What a status discloses
 
 Summaries contain only the state, the skip reason or error code, finding counts and the comment link; a published review's check run summary ends with the review time in English, for example `Reviewed commit abc1234 at 2026-10-24 09:25:40 UTC (took 3m 12s).` (the commit status description leaves it out). While a run is open they show only the current phase and its start time. They never include model text, finding details or Jira text. The task key and task alignment are added for private repositories; for public repositories only the key is shown, and only when `public_repos.jira_disclosure` is `key_only` or `full`.
 
+<!-- section: has-sensitive-content -->
 ## `has_sensitive_content`
 
 Each run records `comment_url` and `has_sensitive_content`: whether the review comment it published would have contained security finding details or Jira text (unmet acceptance criteria, or any review text written with Jira context in the prompt) before the public repository policy was applied. `NULL` means unknown: runs from before migration `008_review_run_progress` and runs that published no review comment. The flag is groundwork for a later admin view; nothing acts on it yet.

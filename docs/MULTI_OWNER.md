@@ -1,7 +1,9 @@
+<!-- section: multiple-owners -->
 # Multiple owners
 
 One deployment can serve several GitHub owners (organizations or accounts), each with its own GitHub credentials, webhook secret, API key, Jira, Slack, policies and model key. A config without `owners:` keeps working exactly as before. How it works inside: [ARCHITECTURE.md](ARCHITECTURE.md#multiple-owners).
 
+<!-- section: modes -->
 ## Modes
 
 "Legacy GitHub credentials" means `GITHUB_TOKEN`/`GITHUB_PAT`, or both `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, set in the environment.
@@ -15,16 +17,19 @@ One deployment can serve several GitHub owners (organizations or accounts), each
 
 Two `default: true` owners, an owner named `default` in mode B, the same repo or `org/*` claimed by two owners, the same App installation or API key on two owners, an owner API key equal to `REVIEW_API_KEY`, or a missing required secret stop startup with an error that names the variable, never its value.
 
+<!-- section: routing -->
 ## Routing
 
 A request goes to: the explicit owner (`/api/v1/pull-request/<id>`, `X-Review-Owner` header, `?owner=` or an owner-scoped API key); else the owner listing the exact `org/repo` in `github.allowed_repos`; else the owner with `org/*`; else the owner whose non-zero `installation_id` matches the webhook; else `routing.unclaimed: default` (default owner) or `reject` (`unknown_owner`). The chosen owner's allowlist then applies. An explicit owner on a repo claimed by another owner gets 409 `owner_repo_conflict`; a webhook signed with one owner's secret for another owner's repo gets 403 `owner_signature_mismatch`. `REVIEW_API_KEY` is the operator key for all owners; `owners.<id>.api.key_env` is a key scoped to one owner, which sees only its own runs.
 
+<!-- section: secrets -->
 ## Secrets
 
 YAML holds only env var names (`*_env`) or key file paths; a literal secret is rejected. Without an explicit `*_env` the name is `OWNER_<ID>_<NAME>` (`<ID>` upper-cased, `-` → `_`): `GITHUB_TOKEN`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `REVIEW_API_KEY`, `JIRA_API_TOKEN`, `SLACK_BOT_TOKEN`, `OPENAI_API_KEY`; for example `OWNER_EXAMPLE_ORG_GITHUB_TOKEN`. `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY` (shared default model key) and worker/log/metrics settings stay shared. An invalid webhook secret disables webhooks only for that owner.
 
 Secret names in full: [ENVIRONMENT.md](ENVIRONMENT.md#per-owner-variables-owner_id_). Every owner key: [CONFIGURATION.md](CONFIGURATION.md#owners).
 
+<!-- section: example-two-organizations-with-pats -->
 ## Example: two organizations with PATs
 
 ```yaml
@@ -44,6 +49,7 @@ owners:
 
 A fine-grained PAT belongs to one resource owner (a user or one organization), so each owner needs its own token. Leave the legacy `GITHUB_TOKEN` empty to stay in mode D.
 
+<!-- section: connecting-another-organization -->
 ## Connecting another organization
 
 Two ways to connect another organization:
@@ -62,6 +68,7 @@ For Actions triggers, use the operator `REVIEW_API_KEY` with `X-Review-Owner: <o
 | `403 owner_forbidden` | A scoped API key was used for another owner |
 | `401` on `/pull-request/<id>` of a disabled owner | Unsigned or wrongly signed; a correct signature gets `202 owner_disabled` |
 
+<!-- section: keeping-pre-multi-owner-history -->
 ## Keeping pre-multi-owner history
 
 Findings, review runs and comment-author records written before the `owners:` block existed are stored under the legacy owner id `default`. They are bound explicitly, never through the `default: true` flag:
@@ -82,6 +89,7 @@ owners:
 ```
 
 
+<!-- section: jira-and-slack-per-owner -->
 ## Jira and Slack per owner
 
 A named owner uses only its own `jira` and `slack` blocks; nothing is inherited from the top-level sections or the legacy `default` owner. Without a `jira` block the owner makes no Jira requests; without a `slack` block it never posts, including the hourly digest. Jira reads, comments and transitions use the owner's site, account and `projects` (allowed project keys and their `rework_status`). Each owner with Slack gets its own digest in its own channel. Secrets are env var names: `api_token_env` / `bot_token_env`, or by default `OWNER_<ID>_JIRA_API_TOKEN` / `OWNER_<ID>_SLACK_BOT_TOKEN`. To share a Jira account or Slack bot between owners, point both at the same env var name.
@@ -105,6 +113,7 @@ owners:
 A disabled owner's webhook URL `/api/v1/pull-request/<id>` answers `owner_disabled` only to requests signed with that owner's webhook secret; other requests get 401.
 
 
+<!-- section: policies-and-model-per-owner -->
 ## Policies and model per owner
 
 `public_repos`, `language`, `features` (`jira_comment`, `jira_transition`, `digest_enabled`), `pr_description`, `size_guard` and `progress_status` can be overridden per owner. Overrides are partial and deep-merged over the top-level sections: unset fields keep the global value, and the merged section is validated like the global one (for example, `size_guard.hard` must stay at least `size_guard.soft`). They apply to everything that reads them for that owner's runs: the review prompt and comment, public-repository redaction, the size guard and its `override_label` (also in the webhook label check), PR description drafts, Jira comments/transitions and the digest. The digest schedule stays global; `features.digest_enabled` decides per owner.
@@ -128,6 +137,7 @@ owners:
 ```
 
 
+<!-- section: upgrade-and-rollback -->
 ## Upgrade and rollback
 
 1. Deploy the new image and run `alembic upgrade head` (Compose does this in `migrate`) with the config untouched: behaviour is unchanged and logs/metrics show `owner=default`.

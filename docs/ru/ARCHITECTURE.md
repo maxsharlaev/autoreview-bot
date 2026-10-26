@@ -1,7 +1,9 @@
+<!-- section: architecture -->
 # Архитектура
 
 Autoreview-bot — рекомендательный сервис: событие PR в GitHub → очередь → Codex CLI → проверенный JSON → один обновляемый комментарий в PR. Он не блокирует merge и не создаёт задачи в Jira. См. [роадмап](ROADMAP.md) и [английскую версию](../ARCHITECTURE.md).
 
+<!-- section: pipeline -->
 ## Конвейер
 
 ```text
@@ -25,6 +27,7 @@ Scheduler
   -> Slack, or only a database record
 ```
 
+<!-- section: components -->
 ## Компоненты
 
 | Компонент | Ответственность |
@@ -44,20 +47,24 @@ Scheduler
 | `app/workers` | Job'ы ARQ, дайджест, очистка статусов, метрики worker'а на `:9100` |
 | `GET /metrics`, `GET /api/v1/ops/status` | Prometheus и снимок очереди/ошибок |
 
+<!-- section: observability -->
 ## Наблюдаемость
 
 Эндпойнты Prometheus: API `:8000/metrics`, worker `:9100/metrics`. Grafana, Prometheus и Loki **не** входят в этот Compose-файл; эндпойнты скрейпит ваш Prometheus. Артефакты для импорта лежат в `observability/`. См. [OBSERVABILITY.md](OBSERVABILITY.md) и [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
+<!-- section: deduplication-and-concurrency -->
 ## Дедупликация и конкурентность
 
 Ключ — `{repository}:{pr_number}:{head_sha}`. Повторная доставка для того же SHA переиспользует `pending`, `running` или `completed` прогон; `failed` можно повторить. Новый SHA отменяет предыдущий прогон. Ручной `POST /api/v1/reviews` по умолчанию использует `force: true` — новый прогон на том же SHA. Разные PR выполняются параллельно (`WORKER_MAX_JOBS`).
 
 Запросы по одному PR сериализуются advisory lock'ом Postgres, ARQ job id детерминированы для каждого прогона, а worker захватывает прогон условным обновлением, поэтому конкурентные доставки не создают дублирующих прогонов. Worker перечитывает head PR перед стартом и закрывает прогон как `HEAD_CHANGED`, если он сдвинулся; для приватных репозиториев он проверяет ещё раз перед публикацией. Подробнее: [API.md](API.md#гарантии-конкурентности).
 
+<!-- section: api-authentication -->
 ## Аутентификация API
 
 `POST /api/v1/reviews`, `GET /api/v1/reviews/{id}` и `GET /api/v1/ops/status` требуют API key. `GET /metrics` предназначен для внутреннего скрейпинга; не открывайте его наружу. `POST /api/v1/pull-request` принимает только запросы с валидным `X-Hub-Signature-256` (без API key); без валидного секрета webhook он возвращает 503, а Actions и ручной API продолжают работать. См. [API.md](API.md), [GITHUB_SETUP.md](GITHUB_SETUP.md) и [SECURITY.md](../../SECURITY.md).
 
+<!-- section: data-model -->
 ## Модель данных
 
 - `repositories` — полное имя GitHub, enabled, owner, авторы комментариев
@@ -70,6 +77,7 @@ Scheduler
 
 Сырые diff не хранятся. Подробнее: [DATA_HANDLING.md](DATA_HANDLING.md).
 
+<!-- section: skips-and-errors -->
 ## Пропуски и ошибки
 
 - PR из форков и draft-PR: `skipped`.
@@ -81,10 +89,12 @@ Scheduler
 
 Все коды: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#коды-ошибок-и-пропусков).
 
+<!-- section: comment-language -->
 ## Язык комментария
 
 По умолчанию вывод на английском. `language.summary` управляет summary и заголовками замечаний; `language.details` — сценарием, доказательствами, рекомендацией и подписями комментария. Оба поддерживают `en` и `ru`.
 
+<!-- section: multiple-owners -->
 ## Несколько owner'ов
 
 `app/owners/` содержит модель owner'а. `OwnerRegistry.build()` один раз при старте (API и worker) читает env и `config.yaml`, всё проверяет и строит замороженный `OwnerContext` для каждого активного owner'а: креды GitHub, секрет webhook, API key, привязки Jira и Slack, ключ модели и эффективный конфиг owner'а. Глобальные настройки читаются ради кредов только там; адаптеры (`GitHubAppClient.from_credentials`, `JiraClient.from_binding`, `SlackClient.from_binding`, `Publisher.from_context`) принимают привязки owner'а. Конфиг без `owners:` даёт одного owner'а, `default`, чей эффективный конфиг — глобальный (режимы A–D: [MULTI_OWNER.md](MULTI_OWNER.md#режимы)).
