@@ -25,9 +25,9 @@ Compose из корня репозитория (`docker-compose.yml`):
 | `redis` | очередь ARQ | 6379 | **нет** |
 | `migrate` | `alembic upgrade head`, one-shot | — | нет |
 | `api` | FastAPI | 8000 | `127.0.0.1:8000` → HTTPS reverse proxy |
-| `worker` | Codex + clone + комментарий | 9100 | `127.0.0.1:9100` для локального scrape; для удалённого — внутренняя сеть |
+| `worker` | Codex + clone + комментарий | 9100 | **Нет**: только Docker-сеть (`expose`), поэтому реплики можно масштабировать |
 
-Compose не публикует порты Postgres и Redis на хост. API и метрики worker доступны только через `127.0.0.1`; для внешнего HTTPS и удалённого Prometheus настройте reverse proxy или закрытую сеть.
+Compose не публикует порты Postgres и Redis на хост. API публикуется только на `127.0.0.1:8000`, метрики worker на хост не публикуются вовсе; для внешнего HTTPS и удалённого Prometheus настройте reverse proxy или закрытую сеть.
 
 Worker **обязан** стартовать с `security_opt: seccomp:unconfined` и `apparmor:unconfined` (уже в Compose). Без этого Codex/`bwrap` в Docker падает.
 
@@ -43,7 +43,7 @@ Worker **обязан** стартовать с `security_opt: seccomp:unconfine
 | GitHub: **либо** fine-grained PAT, **либо** доступ создать GitHub App | clone + PR comment |
 | Jira (если нужно): URL, email сервис-аккаунта, API token, проект → `rework_status` | иначе в `config.yaml` выключить `jira_comment` / `jira_transition` |
 | Публичный HTTPS hostname, куда GitHub/Actions достучатся | например `https://review.internal.example.com` |
-| Куда скрейпить метрики | IP/DNS api:8000 и worker:9100 с ноды Prometheus |
+| Куда скрейпить метрики | API: IP/DNS `api:8000` с ноды Prometheus; worker: `worker:9100` только из Docker-сети стека (DNS-обнаружение реплик) |
 
 PAT (если без App), repository permissions:
 
@@ -119,14 +119,14 @@ features:
 ## Шаги деплоя
 
 1. Клон репозитория на хост, файлы `.env` и `config.yaml` как выше.
-2. Проверить, что Postgres/Redis не опубликованы на хосте; `8000` доступен reverse proxy через loopback, `9100` — только локальному или внутреннему Prometheus.
+2. Проверить, что Postgres/Redis не опубликованы на хосте; `8000` доступен reverse proxy через loopback, `9100` — только внутри Docker-сети.
 3. `docker compose up -d --build`. Дождаться `migrate` (exit 0), `api` и `worker` Up.
 4. Проверки с хоста / внутренней сети:
 
 ```bash
 curl -sS https://review.example.com/health      # {"status":"ok"} или аналог
 curl -sS https://review.example.com/is-ready    # ready, иначе Postgres/Redis
-curl -sS http://<worker>:9100/metrics | grep open_pr_review
+docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
 ```
 
 5. Reverse proxy + TLS. Проверить, что снаружи `/metrics` **не** открыт.
@@ -165,8 +165,8 @@ CI **этого** репозитория (`ci.yml`) ревью не запуск
 
 Приложение **не** шлёт метрики и логи наружу. Скрейпер ходит **к нам**.
 
-1. Prometheus: влить [observability/prometheus-scrape.yml](../../observability/prometheus-scrape.yml). Targets: `api:8000` и `worker:9100` (или host/IP, если scrape снаружи Docker-сети). Job names оставить `open-pr-review-api` / `open-pr-review-worker`.
-2. Rule file: [observability/alerts.yml](../../observability/alerts.yml) — `OpenPrReviewWorkerDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`.
+1. Prometheus: влить [observability/prometheus-scrape.yml](../../observability/prometheus-scrape.yml). API: `api:8000` (или host/IP, если scrape снаружи Docker-сети). Worker: Prometheus должен быть в Docker-сети стека (или иметь явную маршрутизацию в неё); job worker находит все реплики через `dns_sd_configs` по имени сервиса `worker`. Чтобы скрейпить worker с хоста, добавьте `docker-compose.override.yml` с `ports: ["127.0.0.1:9100:9100"]` для `worker` (см. [UPGRADE.md](../UPGRADE.md)); тогда worker нельзя масштабировать. Job names оставить `open-pr-review-api` / `open-pr-review-worker`.
+2. Rule file: [observability/alerts.yml](../../observability/alerts.yml) — `OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`. `OpenPrReviewWorkerDown` (`page`) срабатывает, когда DNS-обнаружение не находит ни одного worker: ревью копятся в очереди и не выполняются. `OpenPrReviewWorkerTargetDown` (`warning`) срабатывает, когда найденную реплику worker не удаётся скрейпить (`up == 0`); остальные реплики могут продолжать обрабатывать ревью. Ограничение: при нескольких репликах остановленная реплика пропадает из DNS-обнаружения, поэтому потеря части (не всех) реплик не вызывает ни одного из этих алертов; для этого используйте метрики Docker/оркестратора (желаемое и запущенное число реплик). Алерт на рост очереди запланирован (см. [OBSERVABILITY.md](../OBSERVABILITY.md)).
 3. Grafana: Import [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json). Datasource UID по умолчанию `prometheus` и `loki` — перенаправить на ваши.
 4. Логи: ваш агент (Promtail/Alloy) читает stdout контейнеров `api` и `worker`. Метки: Compose уже ставит `OPEN_PR_REVIEW_SERVICE`. Loki-клиента в сервисе **нет**; панель логов в дашборде пустая, пока агент не пишет в ваш Loki.
 

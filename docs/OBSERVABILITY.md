@@ -18,10 +18,10 @@ Point scrape jobs at the API and worker. Do not publish `/metrics` to the intern
 Merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.yml) into your Prometheus (or Alloy) config. Hostnames:
 
 - Same Docker network: `api:8000`, `worker:9100`
-- Published host ports: `localhost:8000`, `localhost:9100` (or the VM IP)
+- Published host ports: `localhost:8000` for the API only. The worker's `:9100` is exposed only on the Docker network, so Prometheus must join that network (or run in it). The bundled worker job uses `dns_sd_configs` on the `worker` service name, which returns one address per replica, so scaled workers are all scraped (Swarm: `tasks.worker`). A static `worker:9100` target would scrape only one replica.
 - Kubernetes: Service/Pod scrape / `PodMonitor` / `ServiceMonitor` on those ports
 
-Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`).
+Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) fires when DNS discovery finds no worker at all (`absent(up{job="open-pr-review-worker"})`): reviews queue and never run. `OpenPrReviewWorkerTargetDown` (`warning`) fires when a discovered worker replica cannot be scraped (`up == 0`); other replicas may still process reviews. Limitation: with scaled workers, a replica that stops disappears from Docker DNS discovery instead of reporting `up == 0`, so losing some but not all replicas fires neither alert. Detect partial loss with your Docker or orchestrator metrics (desired vs running replicas); a queue-backlog alert is planned as a follow-up.
 
 ## Grafana (existing)
 

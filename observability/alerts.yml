@@ -2,13 +2,23 @@ groups:
   - name: open-pr-review
     rules:
       - alert: OpenPrReviewWorkerDown
-        expr: up{job="open-pr-review-worker"} == 0
+        # With DNS discovery a stopped worker service leaves no target, so `absent` detects a total outage.
+        expr: absent(up{job="open-pr-review-worker"})
         for: 2m
         labels:
           severity: page
         annotations:
-          summary: Worker metrics endpoint is down
-          description: Prometheus cannot scrape worker:9100. Reviews will queue and never run.
+          summary: No worker discovered
+          description: DNS discovery finds no worker replica at all. Reviews will queue and never run.
+
+      - alert: OpenPrReviewWorkerTargetDown
+        expr: up{job="open-pr-review-worker"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker metrics target unreachable
+          description: A discovered worker replica cannot be scraped, which may mean lost review capacity; other replicas may still process reviews. Known limitation - a replica that stops drops out of Docker DNS discovery, so partial loss of replicas is not detected by this alert; use Docker/orchestrator desired-vs-running metrics for that (a queue-backlog alert is planned).
 
       - alert: OpenPrReviewApiDown
         expr: up{job="open-pr-review-api"} == 0
