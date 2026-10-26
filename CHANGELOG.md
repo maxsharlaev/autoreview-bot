@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dev Prometheus**: opt-in `docker-compose.observability.yml` runs a local
+  Prometheus on the stack's network with the bundled scrape jobs and alert
+  rules (UI on `127.0.0.1:9090`, no Alertmanager, tmpfs storage). See
+  `docs/OBSERVABILITY.md`.
+
 - **Documentation restructure** (English primary, Russian mirror): a short
   README with a docs index (`docs/README.md`), and new reference pages
   `docs/CONFIGURATION.md` (every `config.yaml` key with type, default, range and

@@ -25,6 +25,19 @@ Merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.y
 
 Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) fires when DNS discovery finds no worker at all (`absent(up{job="open-pr-review-worker"})`): reviews queue and never run. `OpenPrReviewWorkerTargetDown` (`warning`) fires when a discovered worker replica cannot be scraped (`up == 0`); other replicas may still process reviews. Limitation: with scaled workers, a replica that stops disappears from Docker DNS discovery instead of reporting `up == 0`, so losing some but not all replicas fires neither alert. Detect partial loss with your Docker or orchestrator metrics (desired vs running replicas); a queue-backlog alert is planned as a follow-up.
 
+<!-- section: dev-prometheus-optional -->
+## Dev Prometheus (optional)
+
+For local checks only, [docker-compose.observability.yml](../docker-compose.observability.yml) adds a `prometheus` service on the stack's Docker network. It loads [observability/dev/prometheus.yml](../observability/dev/prometheus.yml), which pulls in the same scrape jobs (`prometheus-scrape.yml`) and alert rules (`alerts.yml`) as above. The UI is published on `127.0.0.1:9090` only: targets at `/targets`, alerts at `/alerts`. There is no Alertmanager, and data lives in `tmpfs`, so it is lost when the container stops. Do not use it in production.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
+docker compose up -d --scale worker=2
+docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus
+```
+
+The first command starts Prometheus, the second scales workers (all replicas show up under `open-pr-review-worker`), the last removes Prometheus. Reload rules after editing `alerts.yml` by restarting the container.
+
 <!-- section: grafana-existing -->
 ## Grafana (existing)
 

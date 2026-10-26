@@ -25,6 +25,19 @@
 
 Загрузите [observability/alerts.yml](../../observability/alerts.yml) как rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) срабатывает, когда DNS-обнаружение не находит ни одного worker'а (`absent(up{job="open-pr-review-worker"})`): ревью копятся в очереди и не выполняются. `OpenPrReviewWorkerTargetDown` (`warning`) срабатывает, когда найденную реплику worker'а не удаётся скрейпить (`up == 0`); остальные реплики могут продолжать обрабатывать ревью. Ограничение: при нескольких репликах остановленная реплика пропадает из DNS-обнаружения Docker вместо того, чтобы сообщить `up == 0`, поэтому потеря части (не всех) реплик не вызывает ни одного из этих алертов. Отслеживайте частичную потерю метриками Docker или оркестратора (желаемое и запущенное число реплик); алерт на рост очереди запланирован как следующий шаг.
 
+<!-- section: dev-prometheus-optional -->
+## Prometheus для разработки (необязательно)
+
+Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервис `prometheus` в Docker-сеть стека. Он загружает [observability/dev/prometheus.yml](../../observability/dev/prometheus.yml), который подключает те же scrape jobs (`prometheus-scrape.yml`) и правила алертов (`alerts.yml`), что и выше. UI опубликован только на `127.0.0.1:9090`: цели на `/targets`, алерты на `/alerts`. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера. Не используйте его в продакшене.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
+docker compose up -d --scale worker=2
+docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus
+```
+
+Первая команда запускает Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет Prometheus. После правки `alerts.yml` перезапустите контейнер, чтобы перечитать правила.
+
 <!-- section: grafana-existing -->
 ## Grafana (существующая)
 

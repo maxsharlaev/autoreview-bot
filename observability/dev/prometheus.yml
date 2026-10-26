@@ -1,0 +1,11 @@
+# Dev-only Prometheus for docker-compose.observability.yml. Not for production.
+# Uses the same scrape jobs and alert rules that operators merge into their own Prometheus.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_config_files:
+  - /etc/prometheus/scrape.yml
