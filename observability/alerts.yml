@@ -6,7 +6,7 @@ groups:
         expr: absent(up{job="open-pr-review-worker"})
         for: 2m
         labels:
-          severity: critical
+          severity: page
         annotations:
           summary: No worker discovered
           description: DNS discovery finds no worker replica at all. Reviews will queue and never run.
