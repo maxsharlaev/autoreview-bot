@@ -1,0 +1,9 @@
+# Dev-only: load the bundled dashboards from /var/lib/grafana/dashboards.
+apiVersion: 1
+providers:
+  - name: autoreview-bot
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
