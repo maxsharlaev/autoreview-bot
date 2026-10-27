@@ -1,9 +1,10 @@
 // Dev-only log collector for docker-compose.observability.yml. Not for production.
-// Reads the stdout/stderr of this Compose project's containers through the Docker API
-// and pushes them to the dev Loki. Labels: service (Compose service name), container.
+// Reads the stdout/stderr of this Compose project's containers through the
+// docker-socket-proxy (read-only container API; no create/exec) and pushes them
+// to the dev Loki. Labels: service (Compose service name), container.
 
 discovery.docker "project" {
-  host = "unix:///var/run/docker.sock"
+  host = "tcp://docker-socket-proxy:2375"
   filter {
     name   = "label"
     values = ["com.docker.compose.project=" + sys.env("COMPOSE_PROJECT")]
@@ -26,7 +27,7 @@ discovery.relabel "project" {
 }
 
 loki.source.docker "project" {
-  host          = "unix:///var/run/docker.sock"
+  host          = "tcp://docker-socket-proxy:2375"
   targets       = discovery.docker.project.targets
   relabel_rules = discovery.relabel.project.rules
   forward_to    = [loki.write.dev.receiver]

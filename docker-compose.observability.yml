@@ -2,7 +2,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 # Prometheus: http://127.0.0.1:9090 (targets: /targets, alerts: /alerts).
 # Grafana: http://127.0.0.1:3000 (anonymous viewer; admin login is local-only, see docs/OBSERVABILITY.md).
-# Loki has no host port; Alloy ships this project's container logs to it.
+# Loki has no host port; Alloy ships this project's container logs to it via docker-socket-proxy.
 # Data is kept in tmpfs only.
 services:
   prometheus:
@@ -52,6 +52,37 @@ services:
     expose:
       - "3100"
 
+  # Only this service mounts the Docker socket. Alloy reaches it over the
+  # internal docker_proxy network; :ro on the socket is not an API boundary.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    environment:
+      CONTAINERS: "1" # GET container list/inspect/logs (what Alloy needs)
+      NETWORKS: "1" # GET networks; Alloy discovery needs this for network labels
+      POST: "0" # no create/start/stop/exec or other mutating methods
+      EXEC: "0"
+      IMAGES: "0"
+      VOLUMES: "0"
+      INFO: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      NODES: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+      AUTH: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy
+    # No host ports; only Alloy shares docker_proxy.
+
   alloy:
     image: grafana/alloy:v1.21.2
     command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
@@ -60,9 +91,15 @@ services:
       COMPOSE_PROJECT: "${COMPOSE_PROJECT_NAME}"
     volumes:
       - ./observability/dev/alloy.alloy:/etc/alloy/config.alloy:ro
-      # Read-only Docker API access to read container logs (dev only).
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     tmpfs:
       - /var/lib/alloy:mode=1777
     depends_on:
       - loki
+      - docker-socket-proxy
+    networks:
+      - default
+      - docker_proxy
+
+networks:
+  docker_proxy:
+    internal: true

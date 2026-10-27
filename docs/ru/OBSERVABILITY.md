@@ -28,7 +28,7 @@
 <!-- section: dev-prometheus-and-grafana-optional -->
 ## Prometheus, Grafana и Loki для разработки (необязательно)
 
-Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервисы `prometheus`, `grafana`, `loki` и `alloy` в Docker-сеть стека. Не используйте его в продакшене. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера.
+Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервисы `prometheus`, `grafana`, `loki`, `alloy` и `docker-socket-proxy` в Docker-сеть стека. Не используйте его в продакшене. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера.
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki
@@ -50,9 +50,9 @@ Grafana доступна только на `http://127.0.0.1:3000`. Она со�
 <!-- section: dev-loki-and-alloy -->
 ### Loki и Alloy
 
-Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работает одним бинарником без порта на хосте; Grafana обращается к нему по `http://loki:3100`. Хранилище — tmpfs на 512 МБ, компактор держит ретеншн 24 часа. Alloy ([observability/dev/alloy.alloy](../../observability/dev/alloy.alloy)) читает stdout и stderr контейнеров этого Compose-проекта через Docker socket, смонтированный только для чтения, и отправляет их в Loki с метками `service` (имя Compose-сервиса, например `worker`, `api`) и `container`. Пример для Explore: `{service="worker"}`.
+Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работает одним бинарником без порта на хосте; Grafana обращается к нему по `http://loki:3100`. Хранилище — tmpfs на 512 МБ, компактор держит ретеншн 24 часа. Alloy ([observability/dev/alloy.alloy](../../observability/dev/alloy.alloy)) читает stdout и stderr контейнеров этого Compose-проекта через закреплённый `tecnativa/docker-socket-proxy` во внутренней сети (без портов на хосте) и отправляет их в Loki с метками `service` (имя Compose-сервиса, например `worker`, `api`) и `container`. Пример для Explore: `{service="worker"}`.
 
-В логах ровно то, что показывает `docker compose logs`, и ничего больше, поэтому обращайтесь с ними так же: только для разработки, не открывайте Loki и Grafana дальше `127.0.0.1`. Доступ к socket только для чтения всё равно позволяет Alloy читать метаданные и логи всех контейнеров на хосте; он оставляет только контейнеры этого проекта. При первом запуске Loki отклоняет строки старше 7 дней от давно работающих контейнеров; это видно как ошибки `timestamp too old` в его логе и не страшно.
+В логах ровно то, что показывает `docker compose logs`, и ничего больше, поэтому обращайтесь с ними так же: только для разработки, не открывайте Loki и Grafana дальше `127.0.0.1`. Монтирование Docker socket с `:ro` — не граница API: socket монтирует только proxy, и он разрешает только чтение container-эндпоинтов (без create/exec). Proxy всё равно видит метаданные и логи всех контейнеров на хосте; Alloy оставляет только контейнеры этого проекта. При первом запуске Loki отклоняет строки старше 7 дней от давно работающих контейнеров; это видно как ошибки `timestamp too old` в его логе и не страшно.
 
 <!-- section: dev-prometheus-only-and-scaling -->
 ### Только Prometheus и масштабирование
@@ -60,7 +60,7 @@ Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работ
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --scale worker=2 worker
-docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana loki alloy
+docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana loki alloy docker-socket-proxy
 ```
 
 Первая команда запускает только Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет сервисы наблюдаемости.

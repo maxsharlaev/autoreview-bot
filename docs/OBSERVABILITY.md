@@ -28,7 +28,7 @@ Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`Op
 <!-- section: dev-prometheus-and-grafana-optional -->
 ## Dev Prometheus, Grafana and Loki (optional)
 
-For local checks only, [docker-compose.observability.yml](../docker-compose.observability.yml) adds `prometheus`, `grafana`, `loki` and `alloy` services on the stack's Docker network. Do not use it in production. There is no Alertmanager, and data lives in `tmpfs`, so it is lost when a container stops.
+For local checks only, [docker-compose.observability.yml](../docker-compose.observability.yml) adds `prometheus`, `grafana`, `loki`, `alloy` and `docker-socket-proxy` services on the stack's Docker network. Do not use it in production. There is no Alertmanager, and data lives in `tmpfs`, so it is lost when a container stops.
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki
@@ -50,9 +50,9 @@ Grafana is on `http://127.0.0.1:3000` only. It provisions a `Prometheus` datasou
 <!-- section: dev-loki-and-alloy -->
 ### Loki and Alloy
 
-Loki ([observability/dev/loki.yml](../observability/dev/loki.yml)) runs as a single binary with no host port; Grafana reaches it at `http://loki:3100`. Storage is a 512m tmpfs, and the compactor enforces 24h retention. Alloy ([observability/dev/alloy.alloy](../observability/dev/alloy.alloy)) reads the stdout and stderr of this Compose project's containers through the Docker socket, mounted read-only, and pushes them to Loki with the labels `service` (Compose service name, e.g. `worker`, `api`) and `container`. Explore example: `{service="worker"}`.
+Loki ([observability/dev/loki.yml](../observability/dev/loki.yml)) runs as a single binary with no host port; Grafana reaches it at `http://loki:3100`. Storage is a 512m tmpfs, and the compactor enforces 24h retention. Alloy ([observability/dev/alloy.alloy](../observability/dev/alloy.alloy)) reads the stdout and stderr of this Compose project's containers through a pinned `tecnativa/docker-socket-proxy` on an internal network (no host ports) and pushes them to Loki with the labels `service` (Compose service name, e.g. `worker`, `api`) and `container`. Explore example: `{service="worker"}`.
 
-The logs contain exactly what `docker compose logs` shows, nothing more, so treat them like those logs: dev only, and do not expose Loki or Grafana beyond `127.0.0.1`. Read-only socket access still lets Alloy read every container's metadata and logs on the host; it keeps only this project's containers. On the first start Loki rejects lines older than 7 days from long-running containers, which shows up as `timestamp too old` errors in its log and is harmless.
+The logs contain exactly what `docker compose logs` shows, nothing more, so treat them like those logs: dev only, and do not expose Loki or Grafana beyond `127.0.0.1`. Mounting the Docker socket `:ro` is not an API boundary: only the proxy mounts it, and the proxy allows only read container endpoints (no create/exec). The proxy can still see metadata and logs of every container on the host; Alloy keeps only this project's containers. On the first start Loki rejects lines older than 7 days from long-running containers, which shows up as `timestamp too old` errors in its log and is harmless.
 
 <!-- section: dev-prometheus-only-and-scaling -->
 ### Prometheus only and scaling
@@ -60,7 +60,7 @@ The logs contain exactly what `docker compose logs` shows, nothing more, so trea
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --scale worker=2 worker
-docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana loki alloy
+docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana loki alloy docker-socket-proxy
 ```
 
 The first command starts only Prometheus, the second scales workers (all replicas show up under `open-pr-review-worker`), the last removes the observability services.
