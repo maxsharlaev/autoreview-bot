@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Prometheus on the stack's network with the bundled scrape jobs and alert
   rules (UI on `127.0.0.1:9090`, no Alertmanager, tmpfs storage). See
   `docs/OBSERVABILITY.md`.
+- **Dev Loki**: the observability overlay also runs Loki (no host port, tmpfs
+  storage) and Alloy, which ships this Compose project's container logs to it
+  through the read-only Docker socket with a `service` label. Grafana gets a
+  `loki` datasource, so the dashboard's logs panel has data.
 - **Dev Grafana**: the observability overlay also runs Grafana on
   `127.0.0.1:3000` with a provisioned Prometheus datasource and the bundled
   dashboard as the home page, read-only (anonymous viewer, local-only `admin`

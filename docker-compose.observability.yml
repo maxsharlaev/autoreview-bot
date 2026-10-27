@@ -1,7 +1,8 @@
-# Opt-in dev Prometheus and Grafana on the stack's Docker network. Not for production.
+# Opt-in dev Prometheus, Grafana, Loki and Alloy on the stack's Docker network. Not for production.
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 # Prometheus: http://127.0.0.1:9090 (targets: /targets, alerts: /alerts).
 # Grafana: http://127.0.0.1:3000 (anonymous viewer; admin login is local-only, see docs/OBSERVABILITY.md).
+# Loki has no host port; Alloy ships this project's container logs to it.
 # Data is kept in tmpfs only.
 services:
   prometheus:
@@ -37,5 +38,31 @@ services:
       - /var/lib/grafana:mode=1777,exec # Grafana runs as uid 472; plugins need exec
     depends_on:
       - prometheus
+      - loki
     ports:
       - "127.0.0.1:3000:3000"
+
+  loki:
+    image: grafana/loki:3.7.9
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./observability/dev/loki.yml:/etc/loki/loki.yml:ro
+    tmpfs:
+      - /loki:mode=1777 # Loki runs as uid 10001
+    expose:
+      - "3100"
+
+  alloy:
+    image: grafana/alloy:v1.21.2
+    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
+    environment:
+      # Only containers of this Compose project are collected.
+      COMPOSE_PROJECT: "${COMPOSE_PROJECT_NAME}"
+    volumes:
+      - ./observability/dev/alloy.alloy:/etc/alloy/config.alloy:ro
+      # Read-only Docker API access to read container logs (dev only).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs:
+      - /var/lib/alloy:mode=1777
+    depends_on:
+      - loki
