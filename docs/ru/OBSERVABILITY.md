@@ -26,12 +26,12 @@
 Загрузите [observability/alerts.yml](../../observability/alerts.yml) как rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) срабатывает, когда не найдено ни одного worker'а (`absent(up{job="open-pr-review-worker"})`) или все известные цели worker'а недоступны (`max(up{job="open-pr-review-worker"}) == 0`): ревью копятся в очереди и не выполняются. Второй случай — обычный полный отказ: когда все worker'ы остановлены, имя `worker` перестаёт резолвиться, и Prometheus сохраняет последние найденные цели с `up == 0`. `OpenPrReviewWorkerTargetDown` (`warning`) срабатывает, когда найденную реплику worker'а не удаётся скрейпить (`up == 0`); остальные реплики могут продолжать обрабатывать ревью. При полном отказе он срабатывает вместе с `OpenPrReviewWorkerDown`. Ограничение: при нескольких репликах остановленная реплика пропадает из DNS-обнаружения Docker вместо того, чтобы сообщить `up == 0`, поэтому потеря части (не всех) реплик не вызывает ни одного из этих алертов. Отслеживайте частичную потерю метриками Docker или оркестратора (желаемое и запущенное число реплик); алерт на рост очереди запланирован как следующий шаг.
 
 <!-- section: dev-prometheus-and-grafana-optional -->
-## Prometheus и Grafana для разработки (необязательно)
+## Prometheus, Grafana и Loki для разработки (необязательно)
 
-Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервисы `prometheus` и `grafana` в Docker-сеть стека. Не используйте его в продакшене. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера.
+Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервисы `prometheus`, `grafana`, `loki`, `alloy` и `docker-socket-proxy` в Docker-сеть стека. Не используйте его в продакшене. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера.
 
 ```bash
-# Full stack with Prometheus and Grafana
+# Full stack with Prometheus, Grafana and Loki
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 # Stop everything (Postgres data is kept)
 docker compose -f docker-compose.yml -f docker-compose.observability.yml down
@@ -45,7 +45,16 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml down
 <!-- section: dev-grafana -->
 ### Grafana
 
-Grafana доступна только на `http://127.0.0.1:3000`. Она создаёт datasource `Prometheus` (uid `prometheus`, `http://prometheus:9090`) из [observability/dev/grafana/provisioning](../../observability/dev/grafana/provisioning) и загружает поставляемый дашборд [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json) как домашнюю страницу. Поставляемый дашборд доступен только для чтения, анонимные пользователи могут его смотреть. Вход как `admin` с паролем из `GRAFANA_ADMIN_PASSWORD` (по умолчанию `admin`, только локально) позволяет через **Save as** сделать копию для экспериментов; копия живёт до перезапуска контейнера. Постоянные изменения вносите в `observability/grafana/dashboards/autoreview-bot.json`. Панели логов нужен datasource Loki (uid `loki`), которого в overlay нет, поэтому она остаётся пустой.
+Grafana доступна только на `http://127.0.0.1:3000`. Она создаёт datasource `Prometheus` (uid `prometheus`, `http://prometheus:9090`) из [observability/dev/grafana/provisioning](../../observability/dev/grafana/provisioning) и загружает поставляемый дашборд [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json) как домашнюю страницу. Поставляемый дашборд доступен только для чтения, анонимные пользователи могут его смотреть. Вход как `admin` с паролем из `GRAFANA_ADMIN_PASSWORD` (по умолчанию `admin`, только локально) позволяет через **Save as** сделать копию для экспериментов; копия живёт до перезапуска контейнера. Постоянные изменения вносите в `observability/grafana/dashboards/autoreview-bot.json`. Также создаётся datasource `Loki` (uid `loki`, `http://loki:3100`) для панели логов дашборда.
+
+<!-- section: dev-loki-and-alloy -->
+### Loki и Alloy
+
+Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работает одним бинарником без порта на хосте; Grafana обращается к нему по `http://loki:3100`. Хранилище — tmpfs на 512 МБ, компактор держит ретеншн 24 часа. Alloy ([observability/dev/alloy.alloy](../../observability/dev/alloy.alloy)) читает stdout и stderr контейнеров этого Compose-проекта через закреплённый `wollomatic/socket-proxy` во внутренней сети (без портов на хосте) и отправляет их в Loki с метками `service` (имя Compose-сервиса, например `worker`, `api`) и `container`. Пример для Explore: `{service="worker"}`.
+
+В логах ровно то, что показывает `docker compose logs`, и ничего больше, поэтому обращайтесь с ними так же: только для разработки, не открывайте Loki и Grafana дальше `127.0.0.1`. Монтирование Docker socket с `:ro` — не граница API: socket монтирует только proxy. Allowlist proxy разрешает только GET list/inspect/logs и networks (плюс ping/version); archive, export, create и exec запрещены. Alloy фильтрует по этому Compose-проекту (имя, которое Compose выводит из каталога или `-p` / `COMPOSE_PROJECT_NAME`). При первом запуске Loki отклоняет строки старше 7 дней от давно работающих контейнеров; это видно как ошибки `timestamp too old` в его логе и не страшно.
+
+> **Предупреждение (принятый риск):** фильтр Compose-проекта живёт только в конфиге Alloy. Скомпрометированный Alloy через proxy может вызывать inspect и logs для **всех** контейнеров на хосте, включая переменные окружения и секреты посторонних контейнеров. Не запускайте этот logs overlay на машине с чувствительными контейнерами вне этого проекта. Только для разработки.
 
 <!-- section: dev-prometheus-only-and-scaling -->
 ### Только Prometheus и масштабирование
@@ -53,10 +62,10 @@ Grafana доступна только на `http://127.0.0.1:3000`. Она со�
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --scale worker=2 worker
-docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana
+docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana loki alloy docker-socket-proxy
 ```
 
-Первая команда запускает только Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет Prometheus и Grafana.
+Первая команда запускает только Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет сервисы наблюдаемости.
 
 <!-- section: grafana-existing -->
 ## Grafana (существующая)

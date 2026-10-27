@@ -1,7 +1,8 @@
-# Opt-in dev Prometheus and Grafana on the stack's Docker network. Not for production.
+# Opt-in dev Prometheus, Grafana, Loki and Alloy on the stack's Docker network. Not for production.
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 # Prometheus: http://127.0.0.1:9090 (targets: /targets, alerts: /alerts).
 # Grafana: http://127.0.0.1:3000 (anonymous viewer; admin login is local-only, see docs/OBSERVABILITY.md).
+# Loki has no host port; Alloy ships this project's container logs to it via wollomatic/socket-proxy.
 # Data is kept in tmpfs only.
 services:
   prometheus:
@@ -37,5 +38,56 @@ services:
       - /var/lib/grafana:mode=1777,exec # Grafana runs as uid 472; plugins need exec
     depends_on:
       - prometheus
+      - loki
     ports:
       - "127.0.0.1:3000:3000"
+
+  loki:
+    image: grafana/loki:3.7.9
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./observability/dev/loki.yml:/etc/loki/loki.yml:ro
+    tmpfs:
+      - /loki:size=512m,mode=1777 # Loki runs as uid 10001; cap keeps retention failures bounded
+    expose:
+      - "3100"
+
+  # Only this service mounts the Docker socket. Alloy reaches it over the
+  # internal docker_proxy network; :ro on the socket is not an API boundary.
+  # Allowlist is path-exact: list/inspect/logs/networks (+ ping/version). Archive,
+  # export, create, and exec are denied.
+  docker-socket-proxy:
+    image: wollomatic/socket-proxy:1.13.2
+    # Docker Desktop socket is root:root mode 660; root is required to connect.
+    user: "0:0"
+    command:
+      - '-listenip=0.0.0.0'
+      - '-allowfrom=alloy'
+      - '-allowHEAD=/(_ping|v[0-9]+\.[0-9]+/_ping)'
+      - '-allowGET=/(_ping|version|v[0-9]+\.[0-9]+/(_ping|version|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs)|networks(/[a-zA-Z0-9_.-]+)?))'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy
+    # No host ports; only Alloy shares docker_proxy.
+
+  alloy:
+    image: grafana/alloy:v1.21.2
+    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
+    environment:
+      # Follows the Compose project name (directory or -p / COMPOSE_PROJECT_NAME).
+      COMPOSE_PROJECT: "${COMPOSE_PROJECT_NAME:-autoreview-bot}"
+    volumes:
+      - ./observability/dev/alloy.alloy:/etc/alloy/config.alloy:ro
+    tmpfs:
+      - /var/lib/alloy:mode=1777
+    depends_on:
+      - loki
+      - docker-socket-proxy
+    networks:
+      - default
+      - docker_proxy
+
+networks:
+  docker_proxy:
+    internal: true
