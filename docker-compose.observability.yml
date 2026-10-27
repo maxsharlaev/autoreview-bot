@@ -48,7 +48,7 @@ services:
     volumes:
       - ./observability/dev/loki.yml:/etc/loki/loki.yml:ro
     tmpfs:
-      - /loki:mode=1777 # Loki runs as uid 10001
+      - /loki:size=512m,mode=1777 # Loki runs as uid 10001; cap keeps retention failures bounded
     expose:
       - "3100"
 

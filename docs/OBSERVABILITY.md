@@ -50,7 +50,7 @@ Grafana is on `http://127.0.0.1:3000` only. It provisions a `Prometheus` datasou
 <!-- section: dev-loki-and-alloy -->
 ### Loki and Alloy
 
-Loki ([observability/dev/loki.yml](../observability/dev/loki.yml)) runs as a single binary with no host port; Grafana reaches it at `http://loki:3100`. Alloy ([observability/dev/alloy.alloy](../observability/dev/alloy.alloy)) reads the stdout and stderr of this Compose project's containers through the Docker socket, mounted read-only, and pushes them to Loki with the labels `service` (Compose service name, e.g. `worker`, `api`) and `container`. Explore example: `{service="worker"}`.
+Loki ([observability/dev/loki.yml](../observability/dev/loki.yml)) runs as a single binary with no host port; Grafana reaches it at `http://loki:3100`. Storage is a 512m tmpfs, and the compactor enforces 24h retention. Alloy ([observability/dev/alloy.alloy](../observability/dev/alloy.alloy)) reads the stdout and stderr of this Compose project's containers through the Docker socket, mounted read-only, and pushes them to Loki with the labels `service` (Compose service name, e.g. `worker`, `api`) and `container`. Explore example: `{service="worker"}`.
 
 The logs contain exactly what `docker compose logs` shows, nothing more, so treat them like those logs: dev only, and do not expose Loki or Grafana beyond `127.0.0.1`. Read-only socket access still lets Alloy read every container's metadata and logs on the host; it keeps only this project's containers. On the first start Loki rejects lines older than 7 days from long-running containers, which shows up as `timestamp too old` errors in its log and is harmless.
 

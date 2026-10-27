@@ -1,5 +1,5 @@
 # Dev-only single-binary Loki for docker-compose.observability.yml. Not for production.
-# Storage lives under /loki, which the overlay mounts as tmpfs.
+# Storage lives under /loki, which the overlay mounts as tmpfs (size-capped).
 auth_enabled: false
 
 server:
@@ -29,6 +29,13 @@ schema_config:
 
 limits_config:
   retention_period: 24h
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 1h
+  delete_request_store: filesystem
 
 analytics:
   reporting_enabled: false

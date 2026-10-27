@@ -50,7 +50,7 @@ Grafana доступна только на `http://127.0.0.1:3000`. Она со�
 <!-- section: dev-loki-and-alloy -->
 ### Loki и Alloy
 
-Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работает одним бинарником без порта на хосте; Grafana обращается к нему по `http://loki:3100`. Alloy ([observability/dev/alloy.alloy](../../observability/dev/alloy.alloy)) читает stdout и stderr контейнеров этого Compose-проекта через Docker socket, смонтированный только для чтения, и отправляет их в Loki с метками `service` (имя Compose-сервиса, например `worker`, `api`) и `container`. Пример для Explore: `{service="worker"}`.
+Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работает одним бинарником без порта на хосте; Grafana обращается к нему по `http://loki:3100`. Хранилище — tmpfs на 512 МБ, компактор держит ретеншн 24 часа. Alloy ([observability/dev/alloy.alloy](../../observability/dev/alloy.alloy)) читает stdout и stderr контейнеров этого Compose-проекта через Docker socket, смонтированный только для чтения, и отправляет их в Loki с метками `service` (имя Compose-сервиса, например `worker`, `api`) и `container`. Пример для Explore: `{service="worker"}`.
 
 В логах ровно то, что показывает `docker compose logs`, и ничего больше, поэтому обращайтесь с ними так же: только для разработки, не открывайте Loki и Grafana дальше `127.0.0.1`. Доступ к socket только для чтения всё равно позволяет Alloy читать метаданные и логи всех контейнеров на хосте; он оставляет только контейнеры этого проекта. При первом запуске Loki отклоняет строки старше 7 дней от давно работающих контейнеров; это видно как ошибки `timestamp too old` в его логе и не страшно.
 
