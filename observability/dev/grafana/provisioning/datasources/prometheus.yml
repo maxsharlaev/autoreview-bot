@@ -1,0 +1,11 @@
+# Dev-only Grafana datasource for docker-compose.observability.yml.
+# The uid matches the bundled dashboard (observability/grafana/dashboards/autoreview-bot.json).
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

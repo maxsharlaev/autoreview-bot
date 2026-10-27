@@ -25,18 +25,38 @@ Merge [observability/prometheus-scrape.yml](../observability/prometheus-scrape.y
 
 Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) fires when no worker is discovered (`absent(up{job="open-pr-review-worker"})`) or every known worker target is down (`max(up{job="open-pr-review-worker"}) == 0`): reviews queue and never run. The second case is the usual total outage: when all workers stop, the `worker` name stops resolving and Prometheus keeps the last discovered targets at `up == 0`. `OpenPrReviewWorkerTargetDown` (`warning`) fires when a discovered worker replica cannot be scraped (`up == 0`); other replicas may still process reviews. In a total outage it fires alongside `OpenPrReviewWorkerDown`. Limitation: with scaled workers, a replica that stops disappears from Docker DNS discovery instead of reporting `up == 0`, so losing some but not all replicas fires neither alert. Detect partial loss with your Docker or orchestrator metrics (desired vs running replicas); a queue-backlog alert is planned as a follow-up.
 
-<!-- section: dev-prometheus-optional -->
-## Dev Prometheus (optional)
+<!-- section: dev-prometheus-and-grafana-optional -->
+## Dev Prometheus and Grafana (optional)
 
-For local checks only, [docker-compose.observability.yml](../docker-compose.observability.yml) adds a `prometheus` service on the stack's Docker network. It loads [observability/dev/prometheus.yml](../observability/dev/prometheus.yml), which pulls in the same scrape jobs (`prometheus-scrape.yml`) and alert rules (`alerts.yml`) as above. The UI is published on `127.0.0.1:9090` only: targets at `/targets`, alerts at `/alerts`. There is no Alertmanager, and data lives in `tmpfs`, so it is lost when the container stops. Do not use it in production.
+For local checks only, [docker-compose.observability.yml](../docker-compose.observability.yml) adds `prometheus` and `grafana` services on the stack's Docker network. Do not use it in production. There is no Alertmanager, and data lives in `tmpfs`, so it is lost when a container stops.
+
+```bash
+# Full stack with Prometheus and Grafana
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+# Stop everything (Postgres data is kept)
+docker compose -f docker-compose.yml -f docker-compose.observability.yml down
+```
+
+<!-- section: dev-prometheus -->
+### Prometheus
+
+[observability/dev/prometheus.yml](../observability/dev/prometheus.yml) pulls in the same scrape jobs (`prometheus-scrape.yml`) and alert rules (`alerts.yml`) as above. The UI is on `http://127.0.0.1:9090` only: targets at `/targets`, alerts at `/alerts`. Reload rules after editing `alerts.yml` by restarting the container. CI runs `promtool check config` on this assembled config (same image and mounts as the overlay) and `promtool check rules` on `alerts.yml`.
+
+<!-- section: dev-grafana -->
+### Grafana
+
+Grafana is on `http://127.0.0.1:3000` only. It provisions a `Prometheus` datasource (uid `prometheus`, `http://prometheus:9090`) from [observability/dev/grafana/provisioning](../observability/dev/grafana/provisioning) and loads the bundled dashboard [observability/grafana/dashboards/autoreview-bot.json](../observability/grafana/dashboards/autoreview-bot.json) as the home page. Anonymous users can view it; to edit, sign in as `admin` with the password from `GRAFANA_ADMIN_PASSWORD` (default `admin`, local only). The logs panel needs a Loki datasource (uid `loki`), which the overlay does not include, so it stays empty.
+
+<!-- section: dev-prometheus-only-and-scaling -->
+### Prometheus only and scaling
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
-docker compose up -d --scale worker=2
-docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --scale worker=2 worker
+docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana
 ```
 
-The first command starts Prometheus, the second scales workers (all replicas show up under `open-pr-review-worker`), the last removes Prometheus. Reload rules after editing `alerts.yml` by restarting the container. CI runs `promtool check config` on this assembled config (same image and mounts as the overlay) and `promtool check rules` on `alerts.yml`.
+The first command starts only Prometheus, the second scales workers (all replicas show up under `open-pr-review-worker`), the last removes Prometheus and Grafana.
 
 <!-- section: grafana-existing -->
 ## Grafana (existing)
