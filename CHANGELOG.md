@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/OBSERVABILITY.md`.
 - **Dev Grafana**: the observability overlay also runs Grafana on
   `127.0.0.1:3000` with a provisioned Prometheus datasource and the bundled
-  dashboard as the home page (anonymous viewer, local-only `admin` login from
-  `GRAFANA_ADMIN_PASSWORD`, default `admin`).
+  dashboard as the home page, read-only (anonymous viewer, local-only `admin`
+  login from `GRAFANA_ADMIN_PASSWORD`, default `admin`; edit the JSON in the
+  repository for permanent changes).
 
 - **Documentation restructure** (English primary, Russian mirror): a short
   README with a docs index (`docs/README.md`), and new reference pages

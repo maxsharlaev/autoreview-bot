@@ -45,7 +45,7 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml down
 <!-- section: dev-grafana -->
 ### Grafana
 
-Grafana доступна только на `http://127.0.0.1:3000`. Она создаёт datasource `Prometheus` (uid `prometheus`, `http://prometheus:9090`) из [observability/dev/grafana/provisioning](../../observability/dev/grafana/provisioning) и загружает поставляемый дашборд [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json) как домашнюю страницу. Анонимные пользователи могут его смотреть; для правки войдите как `admin` с паролем из `GRAFANA_ADMIN_PASSWORD` (по умолчанию `admin`, только локально). Панели логов нужен datasource Loki (uid `loki`), которого в overlay нет, поэтому она остаётся пустой.
+Grafana доступна только на `http://127.0.0.1:3000`. Она создаёт datasource `Prometheus` (uid `prometheus`, `http://prometheus:9090`) из [observability/dev/grafana/provisioning](../../observability/dev/grafana/provisioning) и загружает поставляемый дашборд [observability/grafana/dashboards/autoreview-bot.json](../../observability/grafana/dashboards/autoreview-bot.json) как домашнюю страницу. Поставляемый дашборд доступен только для чтения, анонимные пользователи могут его смотреть. Вход как `admin` с паролем из `GRAFANA_ADMIN_PASSWORD` (по умолчанию `admin`, только локально) позволяет через **Save as** сделать копию для экспериментов; копия живёт до перезапуска контейнера. Постоянные изменения вносите в `observability/grafana/dashboards/autoreview-bot.json`. Панели логов нужен datasource Loki (uid `loki`), которого в overlay нет, поэтому она остаётся пустой.
 
 <!-- section: dev-prometheus-only-and-scaling -->
 ### Только Prometheus и масштабирование

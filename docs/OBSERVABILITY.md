@@ -45,7 +45,7 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml down
 <!-- section: dev-grafana -->
 ### Grafana
 
-Grafana is on `http://127.0.0.1:3000` only. It provisions a `Prometheus` datasource (uid `prometheus`, `http://prometheus:9090`) from [observability/dev/grafana/provisioning](../observability/dev/grafana/provisioning) and loads the bundled dashboard [observability/grafana/dashboards/autoreview-bot.json](../observability/grafana/dashboards/autoreview-bot.json) as the home page. Anonymous users can view it; to edit, sign in as `admin` with the password from `GRAFANA_ADMIN_PASSWORD` (default `admin`, local only). The logs panel needs a Loki datasource (uid `loki`), which the overlay does not include, so it stays empty.
+Grafana is on `http://127.0.0.1:3000` only. It provisions a `Prometheus` datasource (uid `prometheus`, `http://prometheus:9090`) from [observability/dev/grafana/provisioning](../observability/dev/grafana/provisioning) and loads the bundled dashboard [observability/grafana/dashboards/autoreview-bot.json](../observability/grafana/dashboards/autoreview-bot.json) as the home page. The provisioned dashboard is read-only, and anonymous users can view it. Signing in as `admin` with the password from `GRAFANA_ADMIN_PASSWORD` (default `admin`, local only) lets you use **Save as** to make a copy for experiments; the copy lasts until the container restarts. Make permanent changes in `observability/grafana/dashboards/autoreview-bot.json`. The logs panel needs a Loki datasource (uid `loki`), which the overlay does not include, so it stays empty.
 
 <!-- section: dev-prometheus-only-and-scaling -->
 ### Prometheus only and scaling
