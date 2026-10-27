@@ -23,7 +23,20 @@
 - Опубликованные порты хоста: `localhost:8000` только для API. `:9100` worker'а открыт только в Docker-сети, поэтому Prometheus должен подключиться к этой сети (или работать в ней). Поставляемый job worker'а использует `dns_sd_configs` по имени сервиса `worker`, который возвращает по адресу на каждую реплику, так что скрейпятся все масштабированные worker'ы (Swarm: `tasks.worker`). Статическая цель `worker:9100` скрейпила бы только одну реплику.
 - Kubernetes: scrape Service/Pod / `PodMonitor` / `ServiceMonitor` на этих портах
 
-Загрузите [observability/alerts.yml](../../observability/alerts.yml) как rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) срабатывает, когда DNS-обнаружение не находит ни одного worker'а (`absent(up{job="open-pr-review-worker"})`): ревью копятся в очереди и не выполняются. `OpenPrReviewWorkerTargetDown` (`warning`) срабатывает, когда найденную реплику worker'а не удаётся скрейпить (`up == 0`); остальные реплики могут продолжать обрабатывать ревью. Ограничение: при нескольких репликах остановленная реплика пропадает из DNS-обнаружения Docker вместо того, чтобы сообщить `up == 0`, поэтому потеря части (не всех) реплик не вызывает ни одного из этих алертов. Отслеживайте частичную потерю метриками Docker или оркестратора (желаемое и запущенное число реплик); алерт на рост очереди запланирован как следующий шаг.
+Загрузите [observability/alerts.yml](../../observability/alerts.yml) как rule file (`OpenPrReviewWorkerDown`, `OpenPrReviewWorkerTargetDown`, `OpenPrReviewApiDown`, `OpenPrReviewCodexQuota`, `OpenPrReviewQueueNotDraining`, `OpenPrReviewStaleReviews`). `OpenPrReviewWorkerDown` (`page`) срабатывает, когда не найдено ни одного worker'а (`absent(up{job="open-pr-review-worker"})`) или все известные цели worker'а недоступны (`max(up{job="open-pr-review-worker"}) == 0`): ревью копятся в очереди и не выполняются. Второй случай — обычный полный отказ: когда все worker'ы остановлены, имя `worker` перестаёт резолвиться, и Prometheus сохраняет последние найденные цели с `up == 0`. `OpenPrReviewWorkerTargetDown` (`warning`) срабатывает, когда найденную реплику worker'а не удаётся скрейпить (`up == 0`); остальные реплики могут продолжать обрабатывать ревью. При полном отказе он срабатывает вместе с `OpenPrReviewWorkerDown`. Ограничение: при нескольких репликах остановленная реплика пропадает из DNS-обнаружения Docker вместо того, чтобы сообщить `up == 0`, поэтому потеря части (не всех) реплик не вызывает ни одного из этих алертов. Отслеживайте частичную потерю метриками Docker или оркестратора (желаемое и запущенное число реплик); алерт на рост очереди запланирован как следующий шаг.
+
+<!-- section: dev-prometheus-optional -->
+## Prometheus для разработки (необязательно)
+
+Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервис `prometheus` в Docker-сеть стека. Он загружает [observability/dev/prometheus.yml](../../observability/dev/prometheus.yml), который подключает те же scrape jobs (`prometheus-scrape.yml`) и правила алертов (`alerts.yml`), что и выше. UI опубликован только на `127.0.0.1:9090`: цели на `/targets`, алерты на `/alerts`. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера. Не используйте его в продакшене.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
+docker compose up -d --scale worker=2
+docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus
+```
+
+Первая команда запускает Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет Prometheus. После правки `alerts.yml` перезапустите контейнер, чтобы перечитать правила. CI запускает `promtool check config` на этом собранном конфиге (тот же образ и те же mounts, что в overlay) и `promtool check rules` на `alerts.yml`.
 
 <!-- section: grafana-existing -->
 ## Grafana (существующая)

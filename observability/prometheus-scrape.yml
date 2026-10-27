@@ -1,4 +1,4 @@
-# Snippets for an *existing* Prometheus. Do not run Prometheus from this repo.
+# Snippets for an *existing* Prometheus (the dev overlay docker-compose.observability.yml also loads this file).
 # Merge `scrape_configs` and load `alerts.yml` as a rule file.
 # Prometheus must be on the same Docker network as the stack (or reach it another way).
 # The API port is published on 127.0.0.1:8000, so a Prometheus on the host can use localhost:8000.

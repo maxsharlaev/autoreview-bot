@@ -1,0 +1,17 @@
+# Opt-in dev Prometheus on the stack's Docker network. Not for production.
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
+# UI: http://127.0.0.1:9090 (targets: /targets, alerts: /alerts). Data is kept in tmpfs only.
+services:
+  prometheus:
+    image: prom/prometheus:v3.7.2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./observability/dev/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus-scrape.yml:/etc/prometheus/scrape.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    tmpfs:
+      - /prometheus:mode=1777 # Prometheus runs as nobody
+    ports:
+      - "127.0.0.1:9090:9090"

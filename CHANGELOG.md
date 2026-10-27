@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dev Prometheus**: opt-in `docker-compose.observability.yml` runs a local
+  Prometheus on the stack's network with the bundled scrape jobs and alert
+  rules (UI on `127.0.0.1:9090`, no Alertmanager, tmpfs storage). See
+  `docs/OBSERVABILITY.md`.
+
 - **Documentation restructure** (English primary, Russian mirror): a short
   README with a docs index (`docs/README.md`), and new reference pages
   `docs/CONFIGURATION.md` (every `config.yaml` key with type, default, range and
@@ -128,7 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scraped `127.0.0.1:9100`, switch to the Docker network (see
   `docs/UPGRADE.md`).
   The worker alert is split: `OpenPrReviewWorkerDown` (`page`) fires when no
-  worker replica is discovered (`absent(up{job="open-pr-review-worker"})`), and
+  worker replica is discovered (`absent(up{job="open-pr-review-worker"})`) or
+  every known worker target is down (`max(...) == 0`; after all workers stop,
+  Prometheus keeps the last DNS-discovered target at `up == 0`), and
   the new `OpenPrReviewWorkerTargetDown` (`warning`) fires when a discovered
   replica cannot be scraped (`up == 0`). Neither detects losing only some
   replicas (a stopped replica leaves DNS discovery); see
