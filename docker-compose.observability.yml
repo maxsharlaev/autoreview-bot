@@ -75,8 +75,7 @@ services:
     image: grafana/alloy:v1.21.2
     command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
     environment:
-      # Must match com.docker.compose.project (default name: autoreview-bot).
-      # Override with COMPOSE_PROJECT_NAME / -p; keep this in sync (see docs).
+      # Follows the Compose project name (directory or -p / COMPOSE_PROJECT_NAME).
       COMPOSE_PROJECT: "${COMPOSE_PROJECT_NAME:-autoreview-bot}"
     volumes:
       - ./observability/dev/alloy.alloy:/etc/alloy/config.alloy:ro

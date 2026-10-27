@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tmpfs, 24h retention via the compactor) and Alloy, which ships this Compose
   project's container logs to it through a pinned `wollomatic/socket-proxy`
   (GET list/inspect/logs/networks only; no archive/export/create/exec) with a
-  `service` label. The Compose project name defaults to `autoreview-bot`.
-  Grafana gets a `loki` datasource, so the dashboard's logs panel has data.
+  `service` label. Grafana gets a `loki` datasource, so the dashboard's logs
+  panel has data.
 - **Dev Grafana**: the observability overlay also runs Grafana on
   `127.0.0.1:3000` with a provisioned Prometheus datasource and the bundled
   dashboard as the home page, read-only (anonymous viewer, local-only `admin`
