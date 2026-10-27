@@ -2,7 +2,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 # Prometheus: http://127.0.0.1:9090 (targets: /targets, alerts: /alerts).
 # Grafana: http://127.0.0.1:3000 (anonymous viewer; admin login is local-only, see docs/OBSERVABILITY.md).
-# Loki has no host port; Alloy ships this project's container logs to it via docker-socket-proxy.
+# Loki has no host port; Alloy ships this project's container logs to it via wollomatic/socket-proxy.
 # Data is kept in tmpfs only.
 services:
   prometheus:
@@ -54,29 +54,17 @@ services:
 
   # Only this service mounts the Docker socket. Alloy reaches it over the
   # internal docker_proxy network; :ro on the socket is not an API boundary.
+  # Allowlist is path-exact: list/inspect/logs/networks (+ ping/version). Archive,
+  # export, create, and exec are denied.
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.5.0
-    environment:
-      CONTAINERS: "1" # GET container list/inspect/logs (what Alloy needs)
-      NETWORKS: "1" # GET networks; Alloy discovery needs this for network labels
-      POST: "0" # no create/start/stop/exec or other mutating methods
-      EXEC: "0"
-      IMAGES: "0"
-      VOLUMES: "0"
-      INFO: "0"
-      BUILD: "0"
-      COMMIT: "0"
-      CONFIGS: "0"
-      DISTRIBUTION: "0"
-      NODES: "0"
-      PLUGINS: "0"
-      SECRETS: "0"
-      SERVICES: "0"
-      SESSION: "0"
-      SWARM: "0"
-      SYSTEM: "0"
-      TASKS: "0"
-      AUTH: "0"
+    image: wollomatic/socket-proxy:1.13.2
+    # Docker Desktop socket is root:root mode 660; root is required to connect.
+    user: "0:0"
+    command:
+      - '-listenip=0.0.0.0'
+      - '-allowfrom=alloy'
+      - '-allowHEAD=/(_ping|v[0-9]+\.[0-9]+/_ping)'
+      - '-allowGET=/(_ping|version|v[0-9]+\.[0-9]+/(_ping|version|containers/json|containers/[a-zA-Z0-9_.-]+/(json|logs)|networks(/[a-zA-Z0-9_.-]+)?))'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
@@ -87,8 +75,9 @@ services:
     image: grafana/alloy:v1.21.2
     command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
     environment:
-      # Only containers of this Compose project are collected.
-      COMPOSE_PROJECT: "${COMPOSE_PROJECT_NAME}"
+      # Must match com.docker.compose.project (default name: autoreview-bot).
+      # Override with COMPOSE_PROJECT_NAME / -p; keep this in sync (see docs).
+      COMPOSE_PROJECT: "${COMPOSE_PROJECT_NAME:-autoreview-bot}"
     volumes:
       - ./observability/dev/alloy.alloy:/etc/alloy/config.alloy:ro
     tmpfs:
