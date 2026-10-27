@@ -104,6 +104,8 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf 
 | `open_pr_review_codex_attempts_total{result}` | `ok`, `CODEX_QUOTA`, `CODEX_AUTH`, … |
 | `open_pr_review_review_enqueue_total{result}` | `queued` или `reused` |
 
+`open_pr_review_arq_queue_jobs`, `open_pr_review_review_in_flight`, `open_pr_review_review_stale_in_flight` и `open_pr_review_review_recent_failures` — глобальные (общий Redis / Postgres). API и каждый worker экспортируют одни и те же значения, поэтому поставляемый дашборд и алерты оборачивают их в `max(...)` (или `max by (error_code)`), чтобы показывать одно число и срабатывать один раз.
+
 `CODEX_QUOTA` при повторных попытках PR — это закончившиеся кредиты OpenAI: API по-прежнему отвечает 202, worker быстро падает. Это не зависание.
 
 Шаги дежурного: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

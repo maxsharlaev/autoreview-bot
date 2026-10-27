@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Dashboard / alerts:** wrap global gauges (`arq_queue_jobs`, `review_in_flight`,
+  `stale_in_flight`, `recent_failures`) in `max(...)` so Grafana stats and alerts
+  show one value when the API and every worker export the same series.
 ### Added
 
 - **Dev Prometheus**: opt-in `docker-compose.observability.yml` runs a local

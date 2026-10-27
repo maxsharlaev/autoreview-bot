@@ -39,7 +39,7 @@ groups:
           description: Codex returned CODEX_QUOTA. Top up https://platform.openai.com/settings/organization/billing/ — reviews will keep failing.
 
       - alert: OpenPrReviewQueueNotDraining
-        expr: open_pr_review_arq_queue_jobs > 0 and open_pr_review_review_in_flight{status="running"} == 0
+        expr: max(open_pr_review_arq_queue_jobs) > 0 and max(open_pr_review_review_in_flight{status="running"}) == 0
         for: 5m
         labels:
           severity: page
@@ -48,7 +48,7 @@ groups:
           description: ARQ has waiting jobs and zero running review_runs. Check worker logs and `docker compose ps worker`.
 
       - alert: OpenPrReviewStaleReviews
-        expr: open_pr_review_review_stale_in_flight > 0
+        expr: max(open_pr_review_review_stale_in_flight) > 0
         for: 5m
         labels:
           severity: warning
