@@ -9,15 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Review-agent execution policy:** each Codex run gets a dedicated `CODEX_HOME`
-  with `shell_environment_policy` (`inherit = "none"`, minimal `PATH`/`HOME`/…
-  `set`, default `KEY`/`SECRET`/`TOKEN` excludes) so agent-spawned processes do
-  not inherit the model key, plus execpolicy prefix rules that allow a small
-  read-only set and forbid interpreters, package managers, network tools,
-  build/test runners and known bypass prefixes. Codex 0.164/0.165 has no
-  default-deny for in-sandbox commands, so execpolicy is best-effort; actual
-  containment is key isolation + read-only FS + no network (see
-  [SECURITY.md](SECURITY.md)). Worker image pins `@openai/codex@0.164.0`.
+- **Review-agent execution policy + sandbox fail-closed:** each Codex run gets a dedicated `CODEX_HOME` with `shell_environment_policy` (`inherit = "core"`, default `KEY`/`SECRET`/`TOKEN` excludes; **PATH is not set in policy** so the `codex-linux-sandbox` helper stays resolvable) so agent-spawned processes do not inherit the model key, plus execpolicy prefix rules that allow a small read-only set and forbid interpreters, package managers, network tools, build/test runners and known bypass prefixes. AR-001/AR-002-class gaps are **accepted platform limitations** for public repos (no PATH wrappers / `noexec`). Verified on Codex 0.164.0: sandboxed commands get a fresh PID namespace; planted worker canary and worker secret names are not visible via `/proc/*/environ` inside the sandbox. Reviews **fail closed** with `CODEX_SANDBOX` when the Linux sandbox cannot start (userns / helper); `codex.allow_unsandboxed` defaults to `false` (trusted-dev hatch only). Strict path on the roadmap: ephemeral per-review container without secrets. See [SECURITY.md](SECURITY.md). Worker image pins `@openai/codex@0.164.0`.
+
 
 - **Dashboard / alerts:** wrap global gauges (`arq_queue_jobs`, `review_in_flight`,
   `stale_in_flight`, `recent_failures`) in `max(...)` so Grafana stats and alerts

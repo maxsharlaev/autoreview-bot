@@ -5,7 +5,15 @@ from pathlib import Path
 
 from app.progress import ReviewProgress
 from app.security.sandbox import sandbox_env
-from app.services.codex_runner import CodexLogFilter, _emit_codex_line, build_codex_command, classify_codex_error
+from app.services.codex_runner import (
+    CodexLogFilter,
+    _emit_codex_line,
+    _looks_like_sandbox_failure,
+    build_codex_command,
+    classify_codex_error,
+    probe_linux_sandbox,
+)
+from app.services.constants import CODEX_SANDBOX
 from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_UNAVAILABLE
 
 
@@ -21,7 +29,7 @@ def test_codex_command_auto_runs_safe_and_rejects_dangerous() -> None:
     assert cmd.index("--ask-for-approval") < cmd.index("exec")
     assert 'approval_policy="never"' in cmd
     assert 'model_reasoning_effort="medium"' in cmd
-    assert 'shell_environment_policy.inherit="none"' in cmd
+    assert 'shell_environment_policy.inherit="core"' in cmd
     assert "shell_environment_policy.ignore_default_excludes=false" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     assert "--yolo" not in cmd
@@ -103,7 +111,8 @@ def test_codex_log_bwrap_userns_once(caplog) -> None:
     filt.emit(msg)
     filt.emit(msg)
     filt.emit("exited 1 in 0ms:")
-    assert caplog.text.count("cannot create user namespaces") == 1
+    assert filt.sandbox_unavailable is True
+    assert caplog.text.count("linux sandbox unavailable") == 1
     assert "exited 1" not in caplog.text
 
 
@@ -137,3 +146,45 @@ def test_codex_log_warns_on_real_errors(caplog) -> None:
     assert "CODEX_UNAVAILABLE" in caplog.text
     assert "stream disconnected" in caplog.text
     assert "no credits remaining" in caplog.text
+
+
+def test_looks_like_sandbox_failure_patterns() -> None:
+    assert _looks_like_sandbox_failure("no permissions to create a new namespace")
+    assert _looks_like_sandbox_failure("unprivileged_userns_clone=1")
+    assert _looks_like_sandbox_failure("bwrap: execvp codex-linux-sandbox: No such file")
+    assert not _looks_like_sandbox_failure("exited 0 in 12ms")
+
+
+def test_codex_log_marks_sandbox_unavailable_on_helper_missing() -> None:
+    filt = CodexLogFilter()
+    filt.emit("bwrap: execvp codex-linux-sandbox: No such file or directory")
+    assert filt.sandbox_unavailable is True
+
+
+def test_probe_linux_sandbox_reports_failure(monkeypatch) -> None:
+    import subprocess
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = (
+            "bwrap: No permissions to create a new namespace, likely because the kernel "
+            "does not allow non-privileged user namespaces."
+        )
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
+    err = probe_linux_sandbox({"PATH": "/usr/bin"}, binary="codex")
+    assert err is not None
+    assert "namespace" in err.lower() or "permissions" in err.lower()
+
+
+def test_probe_linux_sandbox_ok(monkeypatch) -> None:
+    import subprocess
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
+    assert probe_linux_sandbox({"PATH": "/usr/bin"}, binary="codex") is None

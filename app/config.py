@@ -136,6 +136,9 @@ class CodexYaml(BaseModel):
     reasoning_effort: str = "medium"
     sandbox: str = "read-only"
     approval_policy: str = "never"
+    # When False (default), reviews refuse to run if the Linux sandbox cannot start
+    # (e.g. userns unavailable). Set True only for trusted private/dev escape hatch.
+    allow_unsandboxed: bool = False
     timeout_seconds: int = 600
     max_files: int = 100
     max_diff_lines: int = 20000

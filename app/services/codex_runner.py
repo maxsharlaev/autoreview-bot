@@ -5,6 +5,7 @@ import contextlib
 import logging
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -12,7 +13,13 @@ from pathlib import Path
 from app.metrics import record_codex_attempt
 from app.security.codex_policy import prepare_codex_home
 from app.security.sandbox import sandbox_env
-from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_TIMEOUT, CODEX_UNAVAILABLE
+from app.services.constants import (
+    CODEX_AUTH,
+    CODEX_QUOTA,
+    CODEX_SANDBOX,
+    CODEX_TIMEOUT,
+    CODEX_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +89,7 @@ def build_codex_command(
     # `--ask-for-approval` is a global flag. `codex exec --ask-for-approval` is rejected
     # by current CLI; it must come before the subcommand. Exec also takes -c.
     # shell_environment_policy is also written to CODEX_HOME/config.toml; the -c
-    # overrides below reinforce inherit=none even if a layer merges oddly.
+    # overrides below reinforce inherit=core even if a layer merges oddly.
     cmd = [
         binary,
         "--ask-for-approval",
@@ -100,7 +107,7 @@ def build_codex_command(
         "-c",
         f'approval_policy="{approval_policy}"',
         "-c",
-        'shell_environment_policy.inherit="none"',
+        'shell_environment_policy.inherit="core"',
         "-c",
         "shell_environment_policy.ignore_default_excludes=false",
     ]
@@ -156,6 +163,41 @@ def _looks_like_source_code(text_after_prefix: str) -> bool:
     return any(text.startswith(pattern) for pattern in _SOURCE_CODE_PATTERNS)
 
 
+def _looks_like_sandbox_failure(text_lower: str) -> bool:
+    """True when Codex/bwrap reports the Linux sandbox cannot start."""
+    needles = (
+        "no permissions to create a new namespace",
+        "unprivileged_userns_clone",
+        "execvp codex-linux-sandbox",
+        "could not start sandbox",
+        "failed to create user namespace",
+    )
+    return any(n in text_lower for n in needles)
+
+
+def probe_linux_sandbox(env: dict[str, str], *, binary: str) -> str | None:
+    """Return an error snippet if ``codex sandbox`` cannot run ``/bin/true``, else None.
+
+    Used as a fail-closed preflight before spending a model call.
+    """
+    try:
+        completed = subprocess.run(
+            [binary, "sandbox", "--", "/bin/true"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"sandbox probe failed: {exc}"
+    blob = ((completed.stdout or "") + "\n" + (completed.stderr or "")).lower()
+    if completed.returncode != 0 or _looks_like_sandbox_failure(blob):
+        snippet = (completed.stderr or completed.stdout or "sandbox probe failed").strip()
+        return snippet[:240] or "linux sandbox probe failed"
+    return None
+
+
 class CodexLogFilter:
     """Codex writes the session, prompt echo, and tool output to stderr."""
 
@@ -165,6 +207,7 @@ class CodexLogFilter:
         self._exec_cmd_logged = False
         self._bwrap_path = False
         self._bwrap_userns = False
+        self.sandbox_unavailable = False
 
     def _flush_skip(self, what: str) -> None:
         if self._skip_count:
@@ -214,12 +257,13 @@ class CodexLogFilter:
                 self._bwrap_path = True
                 logger.info("codex using bundled bubblewrap (bwrap not on PATH)")
             return
-        if "no permissions to create a new namespace" in low or "unprivileged_userns_clone" in low:
+        if _looks_like_sandbox_failure(low):
+            self.sandbox_unavailable = True
             if not self._bwrap_userns:
                 self._bwrap_userns = True
                 logger.warning(
-                    "codex bubblewrap cannot create user namespaces in this container; "
-                    "inner shell commands fail. The prompt diff is still used."
+                    "codex linux sandbox unavailable (user namespaces or sandbox helper); "
+                    "reviews will fail closed unless codex.allow_unsandboxed is true"
                 )
             return
         if stripped == "codex":
@@ -291,6 +335,7 @@ async def run_codex(
     reasoning_effort: str = "medium",
     sandbox: str = "read-only",
     approval_policy: str = "never",
+    allow_unsandboxed: bool = False,
 ) -> str:
     binary = shutil.which("codex")
     if not binary:
@@ -311,10 +356,28 @@ async def run_codex(
     )
     # Per-run CODEX_HOME: shell_environment_policy (no model key for children) +
     # execpolicy rules. Codex's own process still receives the key via sandbox_env.
-    with tempfile.TemporaryDirectory(prefix="opr-codex-home-") as home_name:
+    # Codex refuses PATH aliases when CODEX_HOME is under a "temporary" dir
+    # such as /tmp (bwrap then cannot find codex-linux-sandbox). Prefer /var/tmp.
+    _codex_home_root = Path("/var/tmp")
+    if not _codex_home_root.is_dir():
+        _codex_home_root = Path(tempfile.gettempdir())
+    with tempfile.TemporaryDirectory(prefix="opr-codex-home-", dir=str(_codex_home_root)) as home_name:
         seed_env = sandbox_env(openai_api_key)
         codex_home = prepare_codex_home(Path(home_name), seed_env)
         env = sandbox_env(openai_api_key, codex_home=codex_home)
+        probe_err = await asyncio.to_thread(probe_linux_sandbox, env, binary=binary)
+        if probe_err:
+            if allow_unsandboxed:
+                logger.warning(
+                    "codex sandbox unavailable but allow_unsandboxed=true; continuing: %s",
+                    probe_err,
+                )
+            else:
+                record_codex_attempt(result=CODEX_SANDBOX, duration_s=0)
+                raise CodexRunnerError(
+                    CODEX_SANDBOX,
+                    f"linux sandbox unavailable (fail closed): {probe_err}",
+                )
         logger.info(
             "codex start model=%s effort=%s sandbox=%s timeout=%ss cwd=%s auth=CODEX_API_KEY codex_home=%s",
             model,
@@ -369,6 +432,12 @@ async def run_codex(
                 await heartbeat
 
         elapsed = int(time.monotonic() - started)
+        if log_filter.sandbox_unavailable and not allow_unsandboxed:
+            record_codex_attempt(result=CODEX_SANDBOX, duration_s=elapsed)
+            raise CodexRunnerError(
+                CODEX_SANDBOX,
+                "linux sandbox became unavailable during the run (fail closed)",
+            )
         if process.returncode != 0:
             blob = "".join(collected)[-8000:]
             code = classify_codex_error(blob)

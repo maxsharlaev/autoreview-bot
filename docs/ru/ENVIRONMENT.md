@@ -89,7 +89,7 @@ Worker запускает `git` и `codex` с окружением из allowlis
 | Подпроцесс | Переменные, передаваемые если заданы |
 | --- | --- |
 | `git clone` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`/`TMP`/`TEMP`, `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (в любом регистре), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`; плюс токен GitHub owner'а прогона через `GIT_ASKPASS`. |
-| `codex exec` | `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`/`TMP`/`TEMP`, `OPENAI_BASE_URL`, `CODEX_HOME` (каталог на прогон с `shell_environment_policy` и правилами execpolicy), `XDG_CACHE_HOME`, `SSL_CERT_FILE`; плюс `OPENAI_API_KEY` и `CODEX_API_KEY` со значением ключа модели owner'а прогона для самого Codex. Процессы, которые запускает агент, эти ключи не наследуют (`inherit = "none"` и минимальный `set`). Execpolicy — best-effort (в Codex нет default-deny внутри песочницы); см. [SECURITY.md](../../SECURITY.md). |
+| `codex exec` | `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`/`TMP`/`TEMP`, `OPENAI_BASE_URL`, `CODEX_HOME` (каталог на каждый запуск с `shell_environment_policy` и правилами execpolicy), `XDG_CACHE_HOME`, `SSL_CERT_FILE`; плюс `OPENAI_API_KEY` и `CODEX_API_KEY` со значением ключа модели owner'а именно для процесса Codex. Команды, которые запускает агент, эти ключи не наследуют (`inherit = "core"` плюс исключения KEY/SECRET/TOKEN по умолчанию; PATH в policy не переопределяется). Execpolicy — best-effort; AR-001/AR-002 приняты как ограничения платформы; sandbox fail-closed, пока не включён `codex.allow_unsandboxed` — см. [SECURITY.md](../../SECURITY.md). |
 
 <!-- section: tests-only -->
 ## Только для тестов

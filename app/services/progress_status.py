@@ -33,6 +33,7 @@ from app.services.constants import (
     SKIP_OWNER_NOT_CONFIGURED,
     SKIP_REPO,
     SKIP_TOO_LARGE,
+    CODEX_SANDBOX,
 )
 from app.services.review_time import format_utc, status_line
 
@@ -88,6 +89,7 @@ _FAILURE_TEXT = {
     GITHUB_UNAVAILABLE: "GitHub was unavailable",
     GIT_FORBIDDEN: "the repository could not be cloned",
     GIT_REF_NOT_FOUND: "the head commit could not be fetched",
+    CODEX_SANDBOX: "the review sandbox is unavailable",
 }
 
 
