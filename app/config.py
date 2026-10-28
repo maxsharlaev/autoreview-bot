@@ -142,7 +142,7 @@ class CodexYaml(BaseModel):
     # (e.g. userns unavailable). Set True only for trusted private/dev escape hatch.
     # Also gates which sandbox modes are accepted: only read-only unless True.
     allow_unsandboxed: bool = False
-    # M1: only in_process. container is rejected until the launcher backend ships.
+    # M2: in_process (default) or container (dedicated launcher; fail closed, no fallback).
     runner_backend: str = "in_process"
     timeout_seconds: int = 600
     max_files: int = 100
@@ -154,13 +154,9 @@ class CodexYaml(BaseModel):
     @classmethod
     def validate_runner_backend(cls, value: str) -> str:
         name = (value or "").strip()
-        if name == "in_process":
+        if name in {"in_process", "container"}:
             return name
-        if name == "container":
-            raise ValueError(
-                "codex.runner_backend='container' is not implemented yet (planned: dedicated launcher service in M2+)"
-            )
-        raise ValueError(f"unknown codex.runner_backend={name!r}; only 'in_process' is supported")
+        raise ValueError(f"unknown codex.runner_backend={name!r}; supported: 'in_process', 'container'")
 
     @model_validator(mode="after")
     def validate_sandbox_mode(self) -> CodexYaml:

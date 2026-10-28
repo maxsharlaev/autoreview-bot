@@ -152,7 +152,13 @@ async def clone_head(
     head_ref: str | None = None,
     pr_number: int | None = None,
 ) -> Path:
-    dest = Path(tempfile.mkdtemp(prefix="ai-review-"))
+    checkout_root = os.environ.get("OPR_CHECKOUT_BASE", "").strip()
+    if checkout_root:
+        root = Path(checkout_root)
+        root.mkdir(parents=True, exist_ok=True)
+        dest = Path(tempfile.mkdtemp(prefix="ai-review-", dir=str(root)))
+    else:
+        dest = Path(tempfile.mkdtemp(prefix="ai-review-"))
     origin = public_github_url(owner, repo)
     askpass = dest.parent / f"{dest.name}.askpass"
     askpass.write_text(_ASKPASS, encoding="utf-8")

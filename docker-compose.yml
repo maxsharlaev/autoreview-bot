@@ -12,6 +12,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - internal
 
   redis:
     image: redis:7-alpine
@@ -20,6 +22,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - internal
 
   migrate:
     build:
@@ -36,6 +40,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - internal
 
   api:
     build:
@@ -58,6 +64,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks:
+      - internal
 
   worker:
     build:
@@ -70,9 +78,13 @@ services:
       REDIS_URL: redis://redis:6379/0
       OPEN_PR_REVIEW_SERVICE: worker
       METRICS_PORT: "9100"
+      LAUNCHER_URL: http://launcher:8080
+      LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
+      OPR_CHECKOUT_BASE: /var/opr/checkouts
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./prompts:/app/prompts:ro
+      - opr_checkouts:/var/opr/checkouts
     # Metrics stay on the Docker network (no host port), so `--scale worker=N` works.
     # Scrape every replica by service DNS name; see observability/prometheus-scrape.yml.
     expose:
@@ -89,6 +101,44 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks:
+      - internal
+
+  launcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.launcher
+    env_file:
+      - .env
+    environment:
+      LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:?Set LAUNCHER_TOKEN in .env (shared with worker)}"
+      OPR_CHECKOUT_BASE: /var/opr/checkouts
+      OPR_REVIEW_IMAGE: opr-review:local
+      OPR_REVIEW_NETWORK: autoreview_review_egress
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      # High trust: this is the only service that mounts the Docker socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - opr_checkouts:/var/opr/checkouts
+    expose:
+      - "8080"
+    networks:
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
+
 
 volumes:
   postgres_data:
+  opr_checkouts:
+
+networks:
+  default:
+    name: autoreview_default
+  internal:
+    name: autoreview_internal
+  review_egress:
+    name: autoreview_review_egress
+    # MVP: internet-capable for the model API; not attached to postgres/redis/api.
+    # Strict egress allowlist arrives with the M3 model-API proxy.

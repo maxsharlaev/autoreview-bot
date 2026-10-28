@@ -1,0 +1,25 @@
+# Dedicated review launcher: the ONLY service that mounts the Docker socket.
+# Keep this image minimal; do not put GitHub/Jira/Slack/DB credentials here.
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin launcher
+
+COPY pyproject.toml README.md ./
+COPY app ./app
+
+RUN pip install --no-cache-dir . \
+    && chown -R launcher:launcher /app
+
+# Socket access: Compose mounts docker.sock; run as root so the socket is usable
+# without host docker GID gymnastics on Docker Desktop.
+USER root
+EXPOSE 8080
+CMD ["uvicorn", "app.launcher.main:app", "--host", "0.0.0.0", "--port", "8080"]
