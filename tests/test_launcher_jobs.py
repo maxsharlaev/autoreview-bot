@@ -10,6 +10,8 @@ import pytest
 from app.launcher.docker_api import DockerApiError
 from app.launcher.jobs import LauncherJobError, run_review_job
 
+REPO_SECCOMP = Path(__file__).resolve().parents[1] / "docker" / "review" / "seccomp" / "review-bwrap.json"
+
 
 class FakeDocker:
     def __init__(self) -> None:
@@ -44,6 +46,7 @@ class FakeDocker:
 @pytest.fixture()
 def staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
+    monkeypatch.setenv("OPR_REVIEW_SECCOMP_PROFILE", str(REPO_SECCOMP))
     job = tmp_path / "jobdeadbeef"
     repo = job / "repo"
     repo.mkdir(parents=True)

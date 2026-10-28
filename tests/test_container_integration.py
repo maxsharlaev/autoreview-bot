@@ -77,9 +77,15 @@ def test_canary_env_absent_in_review_container(review_image: str) -> None:
     )
     assert result.returncode == 0
     # Inspect hard-coded launcher env keys for absence of worker secrets.
+    import os
     import tempfile
 
     from app.launcher.spec import build_container_config, build_host_config
+
+    os.environ.setdefault(
+        "OPR_REVIEW_SECCOMP_PROFILE",
+        str(Path(__file__).resolve().parents[1] / "docker" / "review" / "seccomp" / "review-bwrap.json"),
+    )
 
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)

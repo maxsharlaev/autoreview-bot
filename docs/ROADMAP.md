@@ -88,6 +88,7 @@ A five-month sequence of verifiable milestones, not fixed release dates: each st
 
 Smaller items already agreed, independent of the monthly plan:
 
+- **Linux-host AppArmor for review containers:** Docker Desktop does not enforce AppArmor; on Linux hosts, add a dedicated profile instead of leaving the default.
 - **Webhook delivery deduplication:** remember `X-GitHub-Delivery` ids so a redelivered event is recognized before any GitHub call.
 - **Narrower installation tokens:** request App installation tokens scoped to the reviewed repository and only the permissions a step needs.
 - **Grafana per owner:** an `owner` dimension in dashboards and alerts, so each owner's queue, failures and cost are visible separately.

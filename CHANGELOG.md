@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- Narrow seccomp profile for review containers (`docker/review/seccomp/review-bwrap.json`) instead of `seccomp=unconfined`; `scripts/stack.ps1` / `scripts/stack.sh` for compose overlays.
 - **M2 container review backend** (launcher via opt-in `docker-compose.container-runner.yml`; default Compose/CI unchanged): optional `codex.runner_backend: container` runs each Codex review in an ephemeral container via a dedicated **launcher** service (the only holder of the Docker socket). Hard-coded create spec: RO checkout, cap_drop ALL, no-new-privileges, resource limits, `opr.review=1` label, always remove + orphan reaper. Model key via env into the review process only (M3 will replace with a model-API proxy). Fail closed (`CODEX_SANDBOX`) with no fallback to `in_process`. Default remains `in_process`.
 
 

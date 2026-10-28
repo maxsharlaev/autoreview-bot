@@ -119,12 +119,35 @@ Set a non-empty allowlist: an empty list allows any repository the credentials c
 
 Custom review instructions: copy `prompts/review.md` to `prompts/local/review.md`, edit the copy and set `codex.prompt_file: prompts/local/review.md`. `prompts/local/` is git-ignored; Compose mounts `./prompts` read-only into the worker, and the path is relative to `/app` in the container. Keep the output schema and untrusted-input rules in a replacement prompt. A missing file fails the review explicitly. File edits apply to the next review; changing the path needs a worker restart.
 
+<!-- section: compose-scripts -->
+## Compose helper scripts
+
+Preferred local commands (from the repo root):
+
+```powershell
+.\scripts\stack.ps1 up
+.\scripts\stack.ps1 up -Observability
+.\scripts\stack.ps1 up -Container
+.\scripts\stack.ps1 status
+.\scripts\stack.ps1 down
+```
+
+```bash
+./scripts/stack.sh up
+./scripts/stack.sh up --observability
+./scripts/stack.sh up --container
+./scripts/stack.sh status
+./scripts/stack.sh down
+```
+
+`-Container` / `--container` adds `docker-compose.container-runner.yml` and requires `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). Raw `docker compose -f …` commands remain supported as an alternative.
+
 <!-- section: deployment-steps -->
 ## Deployment steps
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
 2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only inside the Docker network.
-3. `docker compose up -d --build`. Wait for `migrate` (exit 0), then `api` and `worker` Up. For `codex.runner_backend: container`: set `LAUNCHER_TOKEN` in `.env`, build the review image (`docker build -f Dockerfile.review -t opr-review:local .`), and start with the overlay (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`).
+3. `./scripts/stack.ps1 up` (or `./scripts/stack.sh up`). Wait for `migrate` (exit 0), then `api` and `worker` Up. For `codex.runner_backend: container`: set `LAUNCHER_TOKEN` in `.env`, build the review image (`docker build -f Dockerfile.review -t opr-review:local .`), then `./scripts/stack.ps1 up -Container` (or `./scripts/stack.sh up --container`). Alternative: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`.
 4. Checks from the host or internal network:
 
    ```bash

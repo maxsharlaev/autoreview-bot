@@ -21,6 +21,40 @@ DEFAULT_NANO_CPUS = 1_000_000_000  # 1 CPU
 DEFAULT_PIDS_LIMIT = 256
 DEFAULT_TMPFS_SIZE = "64m"
 
+# Default path baked into Dockerfile.launcher; override via env for tests/dev only.
+# Never taken from the worker HTTP request.
+DEFAULT_REVIEW_SECCOMP_PROFILE_PATH = Path("/opt/opr-seccomp/review-bwrap.json")
+
+
+def review_seccomp_profile_path() -> Path:
+    override = os.environ.get("OPR_REVIEW_SECCOMP_PROFILE", "").strip()
+    return Path(override) if override else DEFAULT_REVIEW_SECCOMP_PROFILE_PATH
+
+
+def load_review_seccomp_profile(path: Path | None = None) -> str:
+    """Return the seccomp JSON text for SecurityOpt ``seccomp=<json>``.
+
+    Docker Engine expects the profile body (CLI embeds file contents the same way).
+    """
+    profile_path = path or review_seccomp_profile_path()
+    text = profile_path.read_text(encoding="utf-8")
+    data = __import__("json").loads(text)
+    if not isinstance(data, dict) or "syscalls" not in data:
+        raise RuntimeError(f"invalid seccomp profile at {profile_path}")
+    # Compact JSON keeps HostConfig smaller; preserve key order from file via loads/dumps.
+    return __import__("json").dumps(data, separators=(",", ":"))
+
+
+def review_security_opt(*, seccomp_json: str | None = None) -> list[str]:
+    """Hard-coded security options for review containers (never unconfined)."""
+    profile = seccomp_json if seccomp_json is not None else load_review_seccomp_profile()
+    if "unconfined" in profile.lower():
+        raise RuntimeError("review seccomp profile must not be unconfined")
+    return [
+        "no-new-privileges:true",
+        f"seccomp={profile}",
+    ]
+
 
 @dataclass(frozen=True)
 class ReviewJobFiles:
@@ -67,13 +101,7 @@ def build_host_config(
         "Binds": binds,
         "CapDrop": ["ALL"],
         "Privileged": False,
-        "SecurityOpt": [
-            "no-new-privileges:true",
-            # Same as the worker Compose service: Docker's default seccomp/AppArmor
-            # block bubblewrap (CLONE_NEWUSER). Codex still sandboxes with bwrap.
-            "seccomp=unconfined",
-            "apparmor=unconfined",
-        ],
+        "SecurityOpt": review_security_opt(),
         "Memory": _parse_memory_bytes(memory),
         "NanoCpus": nano_cpus,
         "PidsLimit": pids_limit,
@@ -141,9 +169,21 @@ def assert_safe_host_config(host_config: dict[str, Any]) -> None:
         raise RuntimeError("CapDrop ALL required")
     if host_config.get("Privileged"):
         raise RuntimeError("privileged review containers are forbidden")
-    security = host_config.get("SecurityOpt") or []
-    if not any("no-new-privileges" in str(s) for s in security):
+    security = [str(s) for s in (host_config.get("SecurityOpt") or [])]
+    if not any("no-new-privileges" in s for s in security):
         raise RuntimeError("no-new-privileges required")
+    if any("seccomp=unconfined" in s.lower() for s in security):
+        raise RuntimeError("seccomp=unconfined is forbidden for review containers")
+    if any("apparmor=unconfined" in s.lower() for s in security):
+        raise RuntimeError("apparmor=unconfined is forbidden for review containers")
+    seccomp_opts = [s for s in security if s.startswith("seccomp=")]
+    if len(seccomp_opts) != 1:
+        raise RuntimeError("exactly one seccomp= SecurityOpt required")
+    body = seccomp_opts[0].removeprefix("seccomp=")
+    if not body.lstrip().startswith("{"):
+        raise RuntimeError("seccomp SecurityOpt must embed the profile JSON body")
+    if '"syscalls"' not in body and "'syscalls'" not in body:
+        raise RuntimeError("seccomp profile JSON missing syscalls")
 
 
 def _parse_memory_bytes(value: str) -> int:

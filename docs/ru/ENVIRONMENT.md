@@ -84,7 +84,7 @@
 <!-- section: review-launcher -->
 ## Review launcher (container backend)
 
-Нужен только при `codex.runner_backend: container`. Подключайте Compose overlay `docker-compose.container-runner.yml` (см. [DEPLOY.md](DEPLOY.md)); обычный `docker compose up` / CI build **не** поднимает launcher. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)). Пустой `LAUNCHER_TOKEN` не ломает интерполяцию compose; процесс launcher и worker отказываются стартовать (fail closed), если выбран container backend без токена (≥ 16 символов).
+Нужен только при `codex.runner_backend: container`. Включайте через `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (или Compose overlay `docker-compose.container-runner.yml`; см. [DEPLOY.md](DEPLOY.md)); обычный `docker compose up` / CI build **не** поднимает launcher. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)). Пустой `LAUNCHER_TOKEN` не ломает интерполяцию compose; процесс launcher и worker отказываются стартовать (fail closed), если выбран container backend без токена (≥ 16 символов).
 
 | Variable | Default | Read by | Purpose |
 | --- | --- | --- | --- |
@@ -96,6 +96,7 @@
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper удаляет labeled review-контейнеры старше этого TTL. |
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | Как часто reaper сканирует orphan review-контейнеры. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
+| `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
 | `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | Только M2: ключ модели в env процесса Codex. Уйдёт после model-API proxy в M3. |
 

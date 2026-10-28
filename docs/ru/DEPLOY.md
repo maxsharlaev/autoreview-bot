@@ -119,12 +119,35 @@ features:
 
 Свои инструкции ревью: скопируйте `prompts/review.md` в `prompts/local/review.md`, отредактируйте копию и задайте `codex.prompt_file: prompts/local/review.md`. `prompts/local/` в git-ignore; Compose монтирует `./prompts` в worker только для чтения, а путь задаётся относительно `/app` в контейнере. Сохраните в заменяющем промпте схему вывода и правила для недоверенного ввода. Отсутствующий файл явно проваливает ревью. Правки файла применяются к следующему ревью; смена пути требует перезапуска worker'а.
 
+<!-- section: compose-scripts -->
+## Скрипты Compose
+
+Предпочтительные локальные команды (из корня репозитория):
+
+```powershell
+.\scripts\stack.ps1 up
+.\scripts\stack.ps1 up -Observability
+.\scripts\stack.ps1 up -Container
+.\scripts\stack.ps1 status
+.\scripts\stack.ps1 down
+```
+
+```bash
+./scripts/stack.sh up
+./scripts/stack.sh up --observability
+./scripts/stack.sh up --container
+./scripts/stack.sh status
+./scripts/stack.sh down
+```
+
+`-Container` / `--container` подключает `docker-compose.container-runner.yml` и требует `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). «Сырые» команды `docker compose -f …` остаются запасным вариантом.
+
 <!-- section: deployment-steps -->
 ## Шаги деплоя
 
 1. Склонируйте репозиторий на хост; создайте `.env` и `config.yaml`, как описано выше.
 2. Проверьте, что Postgres/Redis не опубликованы на хосте, `8000` доступен reverse proxy через loopback, а `9100` — только внутри Docker-сети.
-3. `docker compose up -d --build`. Дождитесь `migrate` (exit 0), затем `api` и `worker` в состоянии Up. Для `codex.runner_backend: container`: задайте `LAUNCHER_TOKEN` в `.env`, соберите review-образ (`docker build -f Dockerfile.review -t opr-review:local .`) и поднимите стек с overlay (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`).
+3. `./scripts/stack.ps1 up` (или `./scripts/stack.sh up`). Дождитесь `migrate` (exit 0), затем `api` и `worker` в состоянии Up. Для `codex.runner_backend: container`: задайте `LAUNCHER_TOKEN` в `.env`, соберите review-образ (`docker build -f Dockerfile.review -t opr-review:local .`), затем `./scripts/stack.ps1 up -Container` (или `./scripts/stack.sh up --container`). Альтернатива: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`.
 4. Проверки с хоста или из внутренней сети:
 
    ```bash

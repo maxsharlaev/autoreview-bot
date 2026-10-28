@@ -84,7 +84,7 @@ A missing variable marked required, or a missing variable named explicitly in `c
 <!-- section: review-launcher -->
 ## Review launcher (container backend)
 
-Used only when `codex.runner_backend: container`. Enable the Compose overlay `docker-compose.container-runner.yml` (see [DEPLOY.md](DEPLOY.md)); the base `docker compose up` / CI build does **not** load the launcher. The **launcher** is the only Compose service that mounts the Docker socket — treat `LAUNCHER_TOKEN` and host socket access as high trust ([SECURITY.md](../SECURITY.md)). An empty `LAUNCHER_TOKEN` does not break compose interpolation; the launcher process and the worker refuse to start (fail closed) when the container backend is selected without a token (≥ 16 characters).
+Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (or the Compose overlay `docker-compose.container-runner.yml`; see [DEPLOY.md](DEPLOY.md)); the base `docker compose up` / CI build does **not** load the launcher. The **launcher** is the only Compose service that mounts the Docker socket — treat `LAUNCHER_TOKEN` and host socket access as high trust ([SECURITY.md](../SECURITY.md)). An empty `LAUNCHER_TOKEN` does not break compose interpolation; the launcher process and the worker refuse to start (fail closed) when the container backend is selected without a token (≥ 16 characters).
 
 | Variable | Default | Read by | Purpose |
 | --- | --- | --- | --- |
@@ -96,6 +96,7 @@ Used only when `codex.runner_backend: container`. Enable the Compose overlay `do
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper removes labeled review containers older than this. |
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | How often the reaper scans for orphan review containers. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
+| `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Docker Engine endpoint. Compose sets the unix socket; do not point this at a remote daemon from an untrusted network. |
 | `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | M2 only: per-run model key for the Codex process env. Removed once the M3 model-API proxy lands. |
 
