@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show one value when the API and every worker export the same series.
 ### Added
 
+- **ReviewExecutor (M1):** `codex.runner_backend` selects how Codex runs. Only `in_process` is implemented (delegates to the existing `run_codex` path with no behavior change). `container` is rejected at config load until the dedicated launcher backend ships. See [ARCHITECTURE.md](docs/ARCHITECTURE.md#review-executor-backends).
+
 - **Dev Prometheus**: opt-in `docker-compose.observability.yml` runs a local
   Prometheus on the stack's network with the bundled scrape jobs and alert
   rules (UI on `127.0.0.1:9090`, no Alertmanager, tmpfs storage). See

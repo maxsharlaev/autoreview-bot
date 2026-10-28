@@ -35,7 +35,7 @@ from app.models import (
 from app.owners.registry import DEFAULT_OWNER_ID, OwnerRegistry, get_owner_registry
 from app.paths import data_file
 from app.progress import ReviewProgress
-from app.services.codex_runner import CodexRunnerError, run_codex
+from app.services.codex_runner import CodexRunnerError
 from app.services.comment_render import FindingTransitionView, RenderInput, review_has_sensitive_content
 from app.services.constants import (
     AI_OUTPUT_INVALID,
@@ -77,6 +77,7 @@ from app.services.progress_status import (
     locked_state,
 )
 from app.services.publisher import Publisher, empty_verified
+from app.services.review_executor import get_review_executor
 from app.services.review_time import analysis_record
 from app.services.size_guard import SIZE_SKIP_MARKER, classify_pr_size, hard_skip_comment
 from app.services.untrusted import strip_boundary_tags
@@ -165,7 +166,7 @@ async def run_review(
     github: GitHubAppClient | None = None,
     jira: JiraClient | None = None,
     publisher: Publisher | None = None,
-    codex_fn=run_codex,
+    codex_fn=None,
     registry: OwnerRegistry | None = None,
 ) -> ReviewRun:
     """Run one review; the progress status is always finalized, including on errors and timeouts."""
@@ -460,6 +461,8 @@ async def _run_review(
 
     # Build clients from owner context (unless overridden for testing)
     config = config or ctx.config
+    if codex_fn is None:
+        codex_fn = get_review_executor(config.codex.runner_backend).run
     if github is None:
         # M2: Only trust comment authors recorded for this owner
         previous_authors = tuple(

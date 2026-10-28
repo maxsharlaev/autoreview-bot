@@ -40,12 +40,25 @@ Scheduler
 | `app/adapters/slack.py` | Необязательные уведомления; по умолчанию выключены |
 | `app/owners/` | Реестр owner'ов, маршрутизация, креды и конфиг по owner'ам |
 | `app/services/orchestrator.py` | Один прогон ревью |
-| `app/services/codex_runner.py` | Подпроцесс Codex с ограниченным окружением, `CODEX_HOME` на запуск (изоляция ключа + best-effort execpolicy denylist), gate режима sandbox + preflight fail-closed (`CODEX_SANDBOX`); см. [SECURITY.md](../../SECURITY.md) |
+| `app/services/review_executor.py` | Протокол `ReviewExecutor` и factory (`codex.runner_backend`); `in_process` делегирует в `codex_runner` |
+| `app/services/codex_runner.py` | In-process подпроцесс Codex: ограниченное окружение, `CODEX_HOME` на запуск (изоляция ключа + best-effort execpolicy denylist), gate режима sandbox + preflight fail-closed (`CODEX_SANDBOX`); см. [SECURITY.md](../../SECURITY.md) |
 | `app/services/verifier.py` | JSON Schema, пути замечаний, ограничение числа |
 | `app/services/publisher.py` | Sticky-комментарий, запись в Jira, Slack |
 | `app/services/progress_status.py` | Check run / commit status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |
 | `app/workers` | Job'ы ARQ, дайджест, очистка статусов, метрики worker'а на `:9100` |
 | `GET /metrics`, `GET /api/v1/ops/status` | Prometheus и снимок очереди/ошибок |
+
+<!-- section: review-executor-backends -->
+## Бэкенды ReviewExecutor
+
+Codex вызывается через `ReviewExecutor` (`app/services/review_executor.py`). Ключ конфига: `codex.runner_backend`.
+
+| Backend | Статус | Роль |
+| --- | --- | --- |
+| `in_process` | **Текущий default** | Worker запускает `codex exec` in-process (текущий sandbox preflight, fail-closed, env allowlist). |
+| `container` | Запланирован (не реализован) | Эфемерный контейнер на каждый review **без секретов worker**. M2: отдельный сервис-**launcher** держит Docker socket и поднимает только review-контейнеры по hard-coded spec; worker передаёт только job id и путь checkout (не generic ContainerCreate proxy). M3: model-API egress proxy, чтобы review-контейнер не держал ключ модели; после этого `container` может стать default. |
+
+См. [ROADMAP.md](ROADMAP.md#запланированные-доработки) и [SECURITY.md](../../SECURITY.md).
 
 <!-- section: observability -->
 ## Наблюдаемость
