@@ -81,6 +81,24 @@
 
 Отсутствие обязательной переменной или переменной, явно названной в `codex.api_key_env`, останавливает API и worker при старте с ошибкой, называющей её. Отсутствие остальных переменных только пишет предупреждение при старте.
 
+<!-- section: review-launcher -->
+## Review launcher (container backend)
+
+Нужен только при `codex.runner_backend: container`. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)).
+
+| Variable | Default | Read by | Purpose |
+| --- | --- | --- | --- |
+| `LAUNCHER_TOKEN` | (required for launcher) | worker, launcher | Общий bearer-токен для `POST /v1/reviews`. Сгенерируйте длинное случайное значение (`openssl rand -hex 32`). |
+| `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL launcher во внутренней сети. |
+| `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Корень общего тома со staged checkout; launcher отвергает path traversal вне этой базы. |
+| `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Тег review-образа из `Dockerfile.review`. |
+| `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker-сеть review-контейнеров (не postgres/redis/api). |
+| `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper удаляет labeled review-контейнеры старше этого TTL. |
+| `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | Как часто reaper сканирует orphan review-контейнеры. |
+| `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
+| `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | Только M2: ключ модели в env процесса Codex. Уйдёт после model-API proxy в M3. |
+
 <!-- section: passed-through-to-subprocesses -->
 ## Передаётся подпроцессам
 

@@ -73,6 +73,8 @@ progress_status:
   timeout_seconds: 5 # per GitHub call
 
 codex:
+  # in_process (default) or container (needs launcher + LAUNCHER_TOKEN)
+  runner_backend: in_process
   model: gpt-5.6-sol
   prompt_file: "" # optional: prompts/local/review.md (relative to the service working directory)
   reasoning_effort: medium

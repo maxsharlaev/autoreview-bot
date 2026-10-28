@@ -56,7 +56,9 @@ Codex вызывается через `ReviewExecutor` (`app/services/review_exe
 | Backend | Статус | Роль |
 | --- | --- | --- |
 | `in_process` | **Текущий default** | Worker запускает `codex exec` in-process (текущий sandbox preflight, fail-closed, env allowlist). |
-| `container` | Запланирован (не реализован) | Эфемерный контейнер на каждый review **без секретов worker**. M2: отдельный сервис-**launcher** держит Docker socket и поднимает только review-контейнеры по hard-coded spec; worker передаёт только job id и путь checkout (не generic ContainerCreate proxy). M3: model-API egress proxy, чтобы review-контейнер не держал ключ модели; после этого `container` может стать default. |
+| `container` | **Реализован (opt-in)** | Эфемерный контейнер на каждый review **без секретов worker** (GitHub/Jira/Slack/DB). Отдельный сервис-**launcher** держит Docker socket и поднимает только review-контейнеры по hard-coded spec; worker передаёт только `{job_id, checkout_ref}` (не generic ContainerCreate proxy). Ключ модели в M2 передаётся в env процесса Codex; M3 добавит model-API egress proxy, после чего `container` может стать default. Ошибки launcher/container → `CODEX_SANDBOX` **без** fallback на `in_process`. |
+
+При `runner_backend: container` Compose поднимает сервис `launcher` во внутренней сети с Docker socket и общим томом `opr_checkouts`. Review-контейнеры подключаются только к `review_egress` (в MVP есть выход в интернет к model API; **не** к postgres/redis/api). Строгий allowlist egress — в M3 вместе с proxy. Образ review (`Dockerfile.review`): pinned Codex `0.164.0`, git, ripgrep, ca-certificates, bubblewrap — без кода приложения и без `.env`.
 
 См. [ROADMAP.md](ROADMAP.md#запланированные-доработки) и [SECURITY.md](../../SECURITY.md).
 

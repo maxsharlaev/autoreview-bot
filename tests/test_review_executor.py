@@ -20,9 +20,10 @@ def test_get_review_executor_in_process() -> None:
     assert isinstance(executor, InProcessReviewExecutor)
 
 
-def test_get_review_executor_rejects_container() -> None:
-    with pytest.raises(ValueError, match="not implemented yet"):
-        get_review_executor(CONTAINER_BACKEND)
+def test_get_review_executor_container() -> None:
+    from app.services.container_executor import ContainerReviewExecutor
+
+    assert isinstance(get_review_executor(CONTAINER_BACKEND), ContainerReviewExecutor)
 
 
 def test_get_review_executor_rejects_unknown() -> None:
@@ -35,9 +36,8 @@ def test_codex_yaml_default_runner_backend() -> None:
     assert cfg.runner_backend == IN_PROCESS_BACKEND
 
 
-def test_codex_yaml_rejects_container() -> None:
-    with pytest.raises(ValidationError, match="not implemented yet"):
-        CodexYaml(runner_backend="container")
+def test_codex_yaml_accepts_container() -> None:
+    assert CodexYaml(runner_backend="container").runner_backend == CONTAINER_BACKEND
 
 
 def test_codex_yaml_rejects_unknown_backend() -> None:

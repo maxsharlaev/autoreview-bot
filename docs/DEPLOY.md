@@ -124,7 +124,7 @@ Custom review instructions: copy `prompts/review.md` to `prompts/local/review.md
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
 2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only inside the Docker network.
-3. `docker compose up -d --build`. Wait for `migrate` (exit 0), then `api` and `worker` Up.
+3. docker compose up -d --build. Wait for migrate (exit 0), then pi and worker Up. For codex.runner_backend: container, also build the review image (docker build -f Dockerfile.review -t opr-review:local .), set LAUNCHER_TOKEN in .env, and ensure the launcher service is up.
 4. Checks from the host or internal network:
 
    ```bash
