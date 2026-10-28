@@ -104,6 +104,8 @@ Ship container stdout with **your** agent. Compose sets `OPEN_PR_REVIEW_SERVICE=
 | `open_pr_review_codex_attempts_total{result}` | `ok`, `CODEX_QUOTA`, `CODEX_AUTH`, … |
 | `open_pr_review_review_enqueue_total{result}` | `queued` vs `reused` |
 
+`open_pr_review_arq_queue_jobs`, `open_pr_review_review_in_flight`, `open_pr_review_review_stale_in_flight`, and `open_pr_review_review_recent_failures` are global (shared Redis / Postgres). The API and every worker export the same values, so the bundled dashboard and alerts wrap them in `max(...)` (or `max by (error_code)`) to show one number and fire one alert.
+
 `CODEX_QUOTA` while you retry PRs is empty OpenAI credits: API still returns 202, the worker fails fast. That is not a hang.
 
 On-call steps: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

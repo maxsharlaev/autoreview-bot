@@ -87,3 +87,9 @@ jobs:
           docker run --rm --entrypoint promtool \
             -v "$PWD/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
             "$PROMETHEUS_IMAGE" check rules /etc/prometheus/alerts.yml
+      - name: Test alert rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/observability:/etc/prometheus:ro" \
+            -w /etc/prometheus \
+            "$PROMETHEUS_IMAGE" test rules /etc/prometheus/alerts_test.yml

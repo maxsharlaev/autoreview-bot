@@ -1,0 +1,40 @@
+# Unit tests for observability/alerts.yml (promtool test rules).
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Two scrape targets export the same global gauges (api + worker). Alerts must
+  # fire once, not once per duplicate series.
+  - interval: 1m
+    input_series:
+      - series: 'open_pr_review_arq_queue_jobs{job="open-pr-review-api",instance="api:8000"}'
+        values: '3x10'
+      - series: 'open_pr_review_arq_queue_jobs{job="open-pr-review-worker",instance="worker:9100"}'
+        values: '3x10'
+      - series: 'open_pr_review_review_in_flight{job="open-pr-review-api",instance="api:8000",status="running"}'
+        values: '0x10'
+      - series: 'open_pr_review_review_in_flight{job="open-pr-review-worker",instance="worker:9100",status="running"}'
+        values: '0x10'
+      - series: 'open_pr_review_review_stale_in_flight{job="open-pr-review-api",instance="api:8000"}'
+        values: '2x10'
+      - series: 'open_pr_review_review_stale_in_flight{job="open-pr-review-worker",instance="worker:9100"}'
+        values: '2x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OpenPrReviewQueueNotDraining
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: Jobs queued but no worker is running them
+              description: ARQ has waiting jobs and zero running review_runs. Check worker logs and `docker compose ps worker`.
+      - eval_time: 6m
+        alertname: OpenPrReviewStaleReviews
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Review runs stuck in pending/running
+              description: One or more review_runs have not updated for 15+ minutes. Worker crash, Codex hang, or dead ARQ job.
