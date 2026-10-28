@@ -316,8 +316,7 @@ async def run_codex(
         codex_home = prepare_codex_home(Path(home_name), seed_env)
         env = sandbox_env(openai_api_key, codex_home=codex_home)
         logger.info(
-            "codex start model=%s effort=%s sandbox=%s timeout=%ss cwd=%s auth=CODEX_API_KEY "
-            "codex_home=%s",
+            "codex start model=%s effort=%s sandbox=%s timeout=%ss cwd=%s auth=CODEX_API_KEY codex_home=%s",
             model,
             reasoning_effort,
             sandbox,

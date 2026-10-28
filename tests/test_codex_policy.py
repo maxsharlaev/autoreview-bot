@@ -50,9 +50,7 @@ def test_sandbox_env_sets_codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "GITHUB_TOKEN" not in env
 
 
-def test_planted_program_run_under_policy_cannot_see_model_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_planted_program_run_under_policy_cannot_see_model_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A program the agent would spawn cannot read the model key.
 
     Codex applies ``shell_environment_policy`` from CODEX_HOME to agent-spawned
@@ -78,8 +76,8 @@ def test_planted_program_run_under_policy_cannot_see_model_key(
     probe = tmp_path / "planted_probe"
     probe.write_text(
         "#!/bin/sh\n"
-        "echo \"OPENAI_API_KEY=${OPENAI_API_KEY-<unset>}\"\n"
-        "echo \"CODEX_API_KEY=${CODEX_API_KEY-<unset>}\"\n"
+        'echo "OPENAI_API_KEY=${OPENAI_API_KEY-<unset>}"\n'
+        'echo "CODEX_API_KEY=${CODEX_API_KEY-<unset>}"\n'
         "env\n",
         encoding="utf-8",
     )
