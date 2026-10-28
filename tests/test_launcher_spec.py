@@ -23,36 +23,38 @@ def _seccomp_profile(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_host_config_drops_caps_ro_checkout_no_socket(tmp_path: Path) -> None:
-    checkout = tmp_path / "repo"
-    checkout.mkdir()
-    work = tmp_path / "work"
-    work.mkdir()
-    prompt = tmp_path / "prompt.txt"
-    prompt.write_text("hi", encoding="utf-8")
-    schema = tmp_path / "schema.json"
-    schema.write_text("{}", encoding="utf-8")
-    host = build_host_config(checkout=checkout, work_dir=work, prompt=prompt, schema=schema)
+    host = build_host_config(
+        volume_name="opr_checkouts",
+        checkout_subpath="job1/repo",
+        work_subpath="job1/.opr-work",
+        prompt_subpath="job1/prompt.txt",
+        schema_subpath="job1/schema.json",
+    )
     assert "ALL" in host["CapDrop"]
     assert host["Privileged"] is False
     assert any("no-new-privileges" in s for s in host["SecurityOpt"])
     assert host["PidsLimit"] == 256
     assert host["Memory"] > 0
     assert host["NanoCpus"] > 0
-    assert any(b.endswith(":/checkout:ro") for b in host["Binds"])
-    assert not any("docker.sock" in b for b in host["Binds"])
+    assert not host.get("Binds")
+    mounts = host["Mounts"]
+    checkout = next(m for m in mounts if m["Target"] == "/checkout")
+    assert checkout["Type"] == "volume"
+    assert checkout["Source"] == "opr_checkouts"
+    assert checkout["ReadOnly"] is True
+    assert checkout["VolumeOptions"]["Subpath"] == "job1/repo"
+    assert not any("docker.sock" in str(m).lower() for m in mounts)
     assert_safe_host_config(host)
 
 
 def test_security_opt_uses_embedded_seccomp_never_unconfined(tmp_path: Path) -> None:
-    checkout = tmp_path / "repo"
-    checkout.mkdir()
-    work = tmp_path / "work"
-    work.mkdir()
-    prompt = tmp_path / "prompt.txt"
-    prompt.write_text("hi", encoding="utf-8")
-    schema = tmp_path / "schema.json"
-    schema.write_text("{}", encoding="utf-8")
-    host = build_host_config(checkout=checkout, work_dir=work, prompt=prompt, schema=schema)
+    host = build_host_config(
+        volume_name="opr_checkouts",
+        checkout_subpath="job1/repo",
+        work_subpath="job1/.opr-work",
+        prompt_subpath="job1/prompt.txt",
+        schema_subpath="job1/schema.json",
+    )
     joined = " ".join(host["SecurityOpt"]).lower()
     assert "seccomp=unconfined" not in joined
     assert "apparmor=unconfined" not in joined
@@ -64,9 +66,62 @@ def test_security_opt_uses_embedded_seccomp_never_unconfined(tmp_path: Path) -> 
     assert any("unshare" in (e.get("names") or []) for e in body["syscalls"])
 
 
-def test_assert_safe_rejects_socket_mount(tmp_path: Path) -> None:
+def _ok_mounts(*, checkout_ro: bool = True) -> list[dict]:
+    return [
+        {
+            "Type": "volume",
+            "Source": "opr_checkouts",
+            "Target": "/checkout",
+            "ReadOnly": checkout_ro,
+            "VolumeOptions": {"Subpath": "job1/repo"},
+        },
+        {
+            "Type": "volume",
+            "Source": "opr_checkouts",
+            "Target": "/job/prompt.txt",
+            "ReadOnly": True,
+            "VolumeOptions": {"Subpath": "job1/prompt.txt"},
+        },
+        {
+            "Type": "volume",
+            "Source": "opr_checkouts",
+            "Target": "/job/schema.json",
+            "ReadOnly": True,
+            "VolumeOptions": {"Subpath": "job1/schema.json"},
+        },
+        {
+            "Type": "volume",
+            "Source": "opr_checkouts",
+            "Target": "/work",
+            "ReadOnly": False,
+            "VolumeOptions": {"Subpath": "job1/.opr-work"},
+        },
+    ]
+
+
+def test_assert_safe_rejects_binds(tmp_path: Path) -> None:
     host = {
         "Binds": ["/var/run/docker.sock:/var/run/docker.sock"],
+        "Mounts": _ok_mounts(),
+        "CapDrop": ["ALL"],
+        "Privileged": False,
+        "SecurityOpt": review_security_opt(),
+    }
+    with pytest.raises(RuntimeError, match="volume Mounts"):
+        assert_safe_host_config(host)
+
+
+def test_assert_safe_rejects_socket_volume(tmp_path: Path) -> None:
+    mounts = _ok_mounts()
+    mounts[0] = {
+        "Type": "volume",
+        "Source": "/var/run/docker.sock",
+        "Target": "/checkout",
+        "ReadOnly": True,
+        "VolumeOptions": {"Subpath": "job1/repo"},
+    }
+    host = {
+        "Mounts": mounts,
         "CapDrop": ["ALL"],
         "Privileged": False,
         "SecurityOpt": review_security_opt(),
@@ -77,7 +132,7 @@ def test_assert_safe_rejects_socket_mount(tmp_path: Path) -> None:
 
 def test_assert_safe_rejects_rw_checkout(tmp_path: Path) -> None:
     host = {
-        "Binds": ["/data/repo:/checkout:rw"],
+        "Mounts": _ok_mounts(checkout_ro=False),
         "CapDrop": ["ALL"],
         "Privileged": False,
         "SecurityOpt": review_security_opt(),
@@ -88,7 +143,7 @@ def test_assert_safe_rejects_rw_checkout(tmp_path: Path) -> None:
 
 def test_assert_safe_rejects_seccomp_unconfined() -> None:
     host = {
-        "Binds": ["/data/repo:/checkout:ro"],
+        "Mounts": _ok_mounts(),
         "CapDrop": ["ALL"],
         "Privileged": False,
         "SecurityOpt": ["no-new-privileges:true", "seccomp=unconfined"],
@@ -105,15 +160,13 @@ def test_load_review_seccomp_profile_roundtrip() -> None:
 
 
 def test_container_config_labels_and_env(tmp_path: Path) -> None:
-    checkout = tmp_path / "repo"
-    checkout.mkdir()
-    work = tmp_path / "work"
-    work.mkdir()
-    prompt = tmp_path / "prompt.txt"
-    prompt.write_text("hi", encoding="utf-8")
-    schema = tmp_path / "schema.json"
-    schema.write_text("{}", encoding="utf-8")
-    host = build_host_config(checkout=checkout, work_dir=work, prompt=prompt, schema=schema)
+    host = build_host_config(
+        volume_name="opr_checkouts",
+        checkout_subpath="job1/repo",
+        work_subpath="job1/.opr-work",
+        prompt_subpath="job1/prompt.txt",
+        schema_subpath="job1/schema.json",
+    )
     cfg = build_container_config(
         job_id="abc",
         host_config=host,

@@ -79,26 +79,57 @@ def container_name(job_id: str) -> str:
     return f"opr-review-{job_id}"
 
 
+def checkout_volume_name() -> str:
+    """Named volume that holds staged checkouts (daemon-side; never a launcher-local bind)."""
+    return os.environ.get("OPR_CHECKOUT_VOLUME", "opr_checkouts").strip() or "opr_checkouts"
+
+
+def _volume_mount(
+    *,
+    volume_name: str,
+    subpath: str,
+    target: str,
+    read_only: bool,
+) -> dict[str, Any]:
+    """Docker Mount using Type=volume + VolumeOptions.Subpath (Engine >= 26 / API >= 1.45)."""
+    rel = (subpath or "").strip().replace(chr(92), "/")
+    if not rel or rel.startswith("/") or ".." in rel.split("/"):
+        raise RuntimeError(f"invalid volume subpath: {subpath!r}")
+    return {
+        "Type": "volume",
+        "Source": volume_name,
+        "Target": target,
+        "ReadOnly": read_only,
+        "VolumeOptions": {"Subpath": rel},
+    }
+
+
 def build_host_config(
     *,
-    checkout: Path,
-    work_dir: Path,
-    prompt: Path,
-    schema: Path,
+    checkout_subpath: str,
+    work_subpath: str,
+    prompt_subpath: str,
+    schema_subpath: str,
+    volume_name: str | None = None,
     memory: str = DEFAULT_MEMORY,
     nano_cpus: int = DEFAULT_NANO_CPUS,
     pids_limit: int = DEFAULT_PIDS_LIMIT,
 ) -> dict[str, Any]:
-    """Docker HostConfig body: caps dropped, no privileges, RO checkout, no socket."""
-    # Bind mounts: checkout RO, job files RO, work RW. Never mount docker.sock.
-    binds = [
-        f"{checkout}:/checkout:ro",
-        f"{prompt}:/job/prompt.txt:ro",
-        f"{schema}:/job/schema.json:ro",
-        f"{work_dir}:/work:rw",
+    """Docker HostConfig: volume Subpath mounts (not launcher-local binds), caps dropped.
+
+    Bind sources that are paths inside the launcher container are wrong: the Docker
+    daemon resolves binds on the *host*. Staged files live on the named volume
+    ``opr_checkouts``; mount per-job subpaths via VolumeOptions.Subpath instead.
+    """
+    vol = (volume_name or checkout_volume_name()).strip() or checkout_volume_name()
+    mounts = [
+        _volume_mount(volume_name=vol, subpath=checkout_subpath, target="/checkout", read_only=True),
+        _volume_mount(volume_name=vol, subpath=prompt_subpath, target="/job/prompt.txt", read_only=True),
+        _volume_mount(volume_name=vol, subpath=schema_subpath, target="/job/schema.json", read_only=True),
+        _volume_mount(volume_name=vol, subpath=work_subpath, target="/work", read_only=False),
     ]
     return {
-        "Binds": binds,
+        "Mounts": mounts,
         "CapDrop": ["ALL"],
         "Privileged": False,
         "SecurityOpt": review_security_opt(),
@@ -159,12 +190,37 @@ def build_container_config(
 def assert_safe_host_config(host_config: dict[str, Any]) -> None:
     """Fail closed if a future edit accidentally weakens the hard-coded spec."""
     binds = host_config.get("Binds") or []
-    for bind in binds:
-        lower = bind.lower()
-        if "docker.sock" in lower or "/var/run/docker" in lower:
+    if binds:
+        raise RuntimeError("review containers must use volume Mounts, not Binds")
+    mounts = host_config.get("Mounts") or []
+    if not mounts:
+        raise RuntimeError("review container Mounts required")
+    checkout_ro = False
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            raise RuntimeError("invalid mount entry")
+        src = str(mount.get("Source") or "")
+        target = str(mount.get("Target") or "")
+        mtype = str(mount.get("Type") or "").lower()
+        lower_src = src.lower()
+        if "docker.sock" in lower_src or "/var/run/docker" in lower_src:
             raise RuntimeError("review container must never mount the docker socket")
-        if bind.rstrip().endswith(":/checkout:rw") or ":/checkout:rw" in bind:
-            raise RuntimeError("checkout mount must be read-only")
+        if "docker.sock" in target.lower():
+            raise RuntimeError("review container must never mount the docker socket")
+        if mtype != "volume":
+            raise RuntimeError("review mounts must be Type=volume (daemon Subpath)")
+        vol_opts = mount.get("VolumeOptions") or {}
+        if not isinstance(vol_opts, dict) or not str(vol_opts.get("Subpath") or "").strip():
+            raise RuntimeError("volume mount requires VolumeOptions.Subpath")
+        sub = str(vol_opts.get("Subpath")).replace(chr(92), "/")
+        if sub.startswith("/") or ".." in sub.split("/"):
+            raise RuntimeError("VolumeOptions.Subpath must be a safe relative path")
+        if target == "/checkout":
+            if not mount.get("ReadOnly", False):
+                raise RuntimeError("checkout mount must be read-only")
+            checkout_ro = True
+    if not checkout_ro:
+        raise RuntimeError("RO /checkout volume mount required")
     if "ALL" not in (host_config.get("CapDrop") or []):
         raise RuntimeError("CapDrop ALL required")
     if host_config.get("Privileged"):

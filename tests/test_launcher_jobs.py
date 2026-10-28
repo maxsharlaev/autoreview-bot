@@ -47,6 +47,7 @@ class FakeDocker:
 def staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
     monkeypatch.setenv("OPR_REVIEW_SECCOMP_PROFILE", str(REPO_SECCOMP))
+    monkeypatch.setenv("OPR_CHECKOUT_VOLUME", "opr_checkouts")
     job = tmp_path / "jobdeadbeef"
     repo = job / "repo"
     repo.mkdir(parents=True)
@@ -91,8 +92,13 @@ def test_run_review_job_create_spec(staged, monkeypatch: pytest.MonkeyPatch) -> 
     assert fake.created is not None
     host = fake.created["HostConfig"]
     assert "ALL" in host["CapDrop"]
-    assert any(b.endswith(":/checkout:ro") for b in host["Binds"])
-    assert not any("docker.sock" in b for b in host["Binds"])
+    assert not host.get("Binds")
+    mounts = host["Mounts"]
+    checkout = next(m for m in mounts if m["Target"] == "/checkout")
+    assert checkout["Type"] == "volume"
+    assert checkout["ReadOnly"] is True
+    assert checkout["VolumeOptions"]["Subpath"] == f"{job_id}/repo"
+    assert not any("docker.sock" in str(m).lower() for m in mounts)
     assert host["Privileged"] is False
     assert fake.created["Labels"]["opr.review"] == "1"
     assert fake.removed == ["cid123"]

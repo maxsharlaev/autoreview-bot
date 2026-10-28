@@ -91,6 +91,7 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `LAUNCHER_TOKEN` | (required when overlay/container backend is used) | worker, launcher | Shared bearer token for `POST /v1/reviews`. Generate a long random value (`openssl rand -hex 32`). |
 | `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL of the launcher service on the internal network. |
 | `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Shared volume root for staged checkouts; launcher rejects path traversal outside this base. |
+| `OPR_CHECKOUT_VOLUME` | `opr_checkouts` | launcher | Named Docker volume for review `Type=volume` mounts with `VolumeOptions.Subpath` (not launcher-local binds; requires Engine ≥ 26 / API ≥ 1.45). |
 | `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Review image tag built from `Dockerfile.review`. |
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker network attached to review containers (not postgres/redis/api). |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper removes labeled review containers older than this. |

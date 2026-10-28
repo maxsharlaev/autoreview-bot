@@ -13,6 +13,7 @@ from app.launcher.spec import (
     assert_safe_host_config,
     build_container_config,
     build_host_config,
+    checkout_volume_name,
     container_name,
 )
 
@@ -49,6 +50,11 @@ def stage_paths(job_id: str, checkout_ref: str) -> tuple[Path, Path, Path, Path,
         raise LauncherJobError("CODEX_SANDBOX", "staged prompt/schema missing for job")
     work = job_work_dir(base, jid)
     work.mkdir(parents=True, exist_ok=True)
+    # Review containers run as uid 1000; volume dirs created here are root-owned.
+    try:
+        os.chmod(work, 0o777)
+    except OSError:
+        pass
     out_file = work / "out.json"
     if out_file.exists():
         out_file.unlink()
@@ -66,6 +72,16 @@ def read_job_meta(job_dir: Path) -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+
+def _volume_subpath(base: Path, path: Path) -> str:
+    """Return a POSIX-relative subpath of ``path`` under ``base`` for VolumeOptions.Subpath."""
+    rel = path.resolve().relative_to(base.resolve())
+    text = rel.as_posix()
+    if not text or text.startswith("/") or ".." in text.split("/"):
+        raise LauncherJobError("CODEX_SANDBOX", "staged path escapes checkout volume")
+    return text
 
 
 def run_review_job(
@@ -92,11 +108,13 @@ def run_review_job(
     approval_policy = str(meta.get("approval_policy") or "never")
     allow_unsandboxed = bool(meta.get("allow_unsandboxed") or False)
 
+    base = checkout_base()
     host_config = build_host_config(
-        checkout=checkout,
-        work_dir=work,
-        prompt=prompt,
-        schema=schema,
+        volume_name=checkout_volume_name(),
+        checkout_subpath=_volume_subpath(base, checkout),
+        work_subpath=_volume_subpath(base, work),
+        prompt_subpath=_volume_subpath(base, prompt),
+        schema_subpath=_volume_subpath(base, schema),
     )
     assert_safe_host_config(host_config)
     config = build_container_config(

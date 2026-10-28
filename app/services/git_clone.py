@@ -8,6 +8,7 @@ import stat
 import tempfile
 from pathlib import Path
 
+from app.services.checkout_safety import neutralize_escaping_symlinks
 from app.services.constants import GIT_FORBIDDEN, GIT_REF_NOT_FOUND
 from app.services.constants import GITHUB_UNAVAILABLE as GIT_CLONE_FAILED
 
@@ -195,6 +196,9 @@ async def clone_head(
     finally:
         askpass.unlink(missing_ok=True)
         env.pop("GIT_PASSWORD", None)
+    removed = neutralize_escaping_symlinks(dest)
+    if removed:
+        logger.info("neutralized %s escaping symlink(s) in checkout", removed)
     logger.info("git checkout ready %s/%s@%s", owner, repo, sha[:12])
     return dest
 

@@ -11,6 +11,7 @@ services:
       LAUNCHER_URL: http://launcher:8080
       LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
       OPR_CHECKOUT_BASE: /var/opr/checkouts
+      OPR_CHECKOUT_VOLUME: opr_checkouts
     volumes:
       - opr_checkouts:/var/opr/checkouts
     depends_on:
@@ -26,6 +27,7 @@ services:
     environment:
       LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
       OPR_CHECKOUT_BASE: /var/opr/checkouts
+      OPR_CHECKOUT_VOLUME: opr_checkouts
       OPR_REVIEW_IMAGE: opr-review:local
       OPR_REVIEW_NETWORK: autoreview_review_egress
       DOCKER_HOST: unix:///var/run/docker.sock
@@ -43,6 +45,7 @@ services:
 
 volumes:
   opr_checkouts:
+    name: opr_checkouts
 
 networks:
   review_egress:

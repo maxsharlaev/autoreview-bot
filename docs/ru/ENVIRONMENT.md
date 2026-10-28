@@ -91,6 +91,7 @@
 | `LAUNCHER_TOKEN` | (required when overlay/container backend is used) | worker, launcher | Общий bearer-токен для `POST /v1/reviews`. Сгенерируйте длинное случайное значение (`openssl rand -hex 32`). |
 | `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL launcher во внутренней сети. |
 | `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Корень общего тома со staged checkout; launcher отвергает path traversal вне этой базы. |
+| `OPR_CHECKOUT_VOLUME` | `opr_checkouts` | launcher | Имя Docker volume для Mounts `Type=volume` + `VolumeOptions.Subpath` (не launcher-local bind; нужен Engine ≥ 26 / API ≥ 1.45). |
 | `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Тег review-образа из `Dockerfile.review`. |
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker-сеть review-контейнеров (не postgres/redis/api). |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper удаляет labeled review-контейнеры старше этого TTL. |

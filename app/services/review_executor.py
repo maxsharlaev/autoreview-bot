@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from app.services.checkout_safety import neutralize_escaping_symlinks
 from app.services.codex_runner import run_codex
 
 IN_PROCESS_BACKEND = "in_process"
@@ -51,6 +52,8 @@ class InProcessReviewExecutor:
         approval_policy: str = "never",
         allow_unsandboxed: bool = False,
     ) -> str:
+        # Defense in depth: drop escaping symlinks before in-process Codex sees the tree.
+        neutralize_escaping_symlinks(checkout)
         return await run_codex(
             checkout=checkout,
             prompt=prompt,

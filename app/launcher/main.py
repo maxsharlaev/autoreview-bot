@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.launcher.auth import require_launcher_auth
+from app.launcher.docker_api import DockerApiError, DockerClient
 from app.launcher.jobs import LauncherJobError, run_review_job
 from app.launcher.paths import CheckoutPathError, validate_job_id
 from app.launcher.reaper import reaper_loop
@@ -40,6 +41,15 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             "LAUNCHER_TOKEN missing or too short (need >= 16 chars); refusing to start the review launcher"
         )
+    # Fail closed if the daemon cannot mount volume Subpaths (ARB-27-001).
+    docker = DockerClient()
+    try:
+        docker.ping()
+        docker.require_volume_subpath_support()
+    except DockerApiError as exc:
+        raise RuntimeError(f"Docker Engine unsuitable for review launcher: {exc}") from exc
+    finally:
+        docker.close()
     stop = asyncio.Event()
     task = asyncio.create_task(reaper_loop(stop), name="opr-review-reaper")
     app.state.reaper_stop = stop

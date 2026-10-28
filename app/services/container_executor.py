@@ -11,6 +11,7 @@ from pathlib import Path
 
 import httpx
 
+from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
 from app.services.constants import CODEX_SANDBOX
 
@@ -110,7 +111,8 @@ class ContainerReviewExecutor:
                 pass
         except ValueError:
             pass
-        shutil.copytree(src, repo_dir, dirs_exist_ok=False)
+        # Never dereference symlinks (ARB-27-002): preserve links then drop escapes.
+        safe_copytree(src, repo_dir)
 
     async def _call_launcher(self, *, job_id: str, checkout_ref: str, model_api_key: str) -> str:
         headers = {

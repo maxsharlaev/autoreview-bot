@@ -78,7 +78,6 @@ def test_canary_env_absent_in_review_container(review_image: str) -> None:
     assert result.returncode == 0
     # Inspect hard-coded launcher env keys for absence of worker secrets.
     import os
-    import tempfile
 
     from app.launcher.spec import build_container_config, build_host_config
 
@@ -87,28 +86,24 @@ def test_canary_env_absent_in_review_container(review_image: str) -> None:
         str(Path(__file__).resolve().parents[1] / "docker" / "review" / "seccomp" / "review-bwrap.json"),
     )
 
-    with tempfile.TemporaryDirectory() as td:
-        base = Path(td)
-        checkout = base / "repo"
-        checkout.mkdir()
-        work = base / "work"
-        work.mkdir()
-        prompt = base / "prompt.txt"
-        prompt.write_text("p", encoding="utf-8")
-        schema = base / "schema.json"
-        schema.write_text("{}", encoding="utf-8")
-        host = build_host_config(checkout=checkout, work_dir=work, prompt=prompt, schema=schema)
-        cfg = build_container_config(
-            job_id="t",
-            host_config=host,
-            model="m",
-            timeout_seconds=10,
-            reasoning_effort="low",
-            sandbox="read-only",
-            approval_policy="never",
-            allow_unsandboxed=False,
-            model_api_key="sk",
-        )
+    host = build_host_config(
+        volume_name="opr_checkouts",
+        checkout_subpath="job1/repo",
+        work_subpath="job1/.opr-work",
+        prompt_subpath="job1/prompt.txt",
+        schema_subpath="job1/schema.json",
+    )
+    cfg = build_container_config(
+        job_id="t",
+        host_config=host,
+        model="m",
+        timeout_seconds=10,
+        reasoning_effort="low",
+        sandbox="read-only",
+        approval_policy="never",
+        allow_unsandboxed=False,
+        model_api_key="sk",
+    )
     joined = "\n".join(cfg["Env"])
     assert "DATABASE_URL" not in joined
     assert "GITHUB" not in joined

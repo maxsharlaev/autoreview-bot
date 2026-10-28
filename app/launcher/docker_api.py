@@ -73,6 +73,37 @@ class DockerClient:
         if r.status_code != 200:
             raise DockerApiError("docker ping failed", status_code=r.status_code, body=r.text)
 
+
+    def version(self) -> dict[str, Any]:
+        r = self._http().get("/version")
+        if r.status_code != 200:
+            raise DockerApiError("docker version failed", status_code=r.status_code, body=r.text[:500])
+        data = r.json()
+        if not isinstance(data, dict):
+            raise DockerApiError("docker version returned non-object")
+        return data
+
+    def api_version_tuple(self) -> tuple[int, ...]:
+        data = self.version()
+        raw = str(data.get("ApiVersion") or data.get("apiVersion") or "").strip()
+        if not raw:
+            raise DockerApiError("docker version missing ApiVersion")
+        parts: list[int] = []
+        for piece in raw.split("."):
+            if not piece.isdigit():
+                raise DockerApiError(f"unparseable Docker ApiVersion: {raw!r}")
+            parts.append(int(piece))
+        return tuple(parts)
+
+    def require_volume_subpath_support(self) -> None:
+        """Fail closed unless Engine API supports volume Mount Subpath (API >= 1.45 / Engine 26+)."""
+        ver = self.api_version_tuple()
+        if ver < (1, 45):
+            raise DockerApiError(
+                f"Docker Engine API {'.'.join(str(x) for x in ver)} is too old; "
+                "need ApiVersion >= 1.45 (Engine 26+) for volume Subpath mounts"
+            )
+
     def create_container(self, name: str, config: dict[str, Any]) -> str:
         r = self._http().post("/containers/create", params={"name": name}, json=config)
         if r.status_code not in (200, 201):
