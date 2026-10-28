@@ -171,10 +171,17 @@ def test_probe_linux_sandbox_reports_failure(monkeypatch) -> None:
             "does not allow non-privileged user namespaces."
         )
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
-    err = probe_linux_sandbox({"PATH": "/usr/bin"}, binary="codex")
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    err = probe_linux_sandbox({"PATH": "/usr/bin"}, binary="codex", sandbox="read-only")
     assert err is not None
     assert "namespace" in err.lower() or "permissions" in err.lower()
+    assert seen and 'sandbox_mode="read-only"' in seen[0]
 
 
 def test_probe_linux_sandbox_ok(monkeypatch) -> None:
@@ -185,5 +192,31 @@ def test_probe_linux_sandbox_ok(monkeypatch) -> None:
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
-    assert probe_linux_sandbox({"PATH": "/usr/bin"}, binary="codex") is None
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert probe_linux_sandbox({"PATH": "/usr/bin"}, binary="codex", sandbox="read-only") is None
+    assert seen and 'sandbox_mode="read-only"' in seen[0]
+
+
+def test_probe_linux_sandbox_uses_same_mode_as_review(monkeypatch) -> None:
+    import subprocess
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert probe_linux_sandbox({"PATH": "/usr/bin"}, binary="codex", sandbox="danger-full-access") is None
+    assert seen and 'sandbox_mode="danger-full-access"' in seen[0]

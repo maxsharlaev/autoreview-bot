@@ -40,7 +40,7 @@ Scheduler
 | `app/adapters/slack.py` | Необязательные уведомления; по умолчанию выключены |
 | `app/owners/` | Реестр owner'ов, маршрутизация, креды и конфиг по owner'ам |
 | `app/services/orchestrator.py` | Один прогон ревью |
-| `app/services/codex_runner.py` | Подпроцесс Codex с ограниченным окружением, `CODEX_HOME` на запуск (изоляция ключа + best-effort execpolicy), preflight sandbox fail-closed (`CODEX_SANDBOX`); см. [SECURITY.md](../../SECURITY.md) |
+| `app/services/codex_runner.py` | Подпроцесс Codex с ограниченным окружением, `CODEX_HOME` на запуск (изоляция ключа + best-effort execpolicy denylist), gate режима sandbox + preflight fail-closed (`CODEX_SANDBOX`); см. [SECURITY.md](../../SECURITY.md) |
 | `app/services/verifier.py` | JSON Schema, пути замечаний, ограничение числа |
 | `app/services/publisher.py` | Sticky-комментарий, запись в Jira, Slack |
 | `app/services/progress_status.py` | Check run / commit status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |

@@ -5,6 +5,31 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+SAFE_SANDBOX_MODE = "read-only"
+
+
+def validate_review_sandbox(sandbox: str, *, allow_unsandboxed: bool) -> str:
+    """Return the sandbox mode, or raise ValueError when it is unsafe for public runs.
+
+    When ``allow_unsandboxed`` is false (default), only ``read-only`` is accepted so
+    ``codex exec`` cannot be pointed at ``danger-full-access`` / ``workspace-write``
+    while the fail-closed preflight still passes. The escape hatch must be set
+    explicitly for trusted private/dev.
+    """
+    mode = (sandbox or "").strip()
+    if not mode:
+        raise ValueError("codex.sandbox must not be empty")
+    if allow_unsandboxed:
+        return mode
+    if mode != SAFE_SANDBOX_MODE:
+        raise ValueError(
+            f"codex.sandbox={mode!r} is not allowed when codex.allow_unsandboxed is false; "
+            f"only {SAFE_SANDBOX_MODE!r} is accepted "
+            "(set allow_unsandboxed=true only for trusted private/dev)"
+        )
+    return mode
+
+
 ALLOWED_ENV = {
     "PATH",
     "HOME",

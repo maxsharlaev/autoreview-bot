@@ -1,4 +1,4 @@
-"""Codex CODEX_HOME policy: shell env isolation + execpolicy allowlist.
+"""Codex CODEX_HOME policy: shell env isolation + execpolicy denylist.
 
 Codex 0.164.0 (and 0.165.x) supports:
 - ``shell_environment_policy`` in ``config.toml`` / ``-c`` (applies to agent-spawned
@@ -10,8 +10,9 @@ Codex 0.164.0 (and 0.165.x) supports:
 The worker prepares a dedicated ``CODEX_HOME`` per run so agent-spawned children
 do not inherit the model key (``inherit = "core"`` + default KEY/SECRET/TOKEN
 excludes; PATH is not set in policy so the sandbox helper stays resolvable),
-and so a small read-only tool set is allowlisted while interpreters, package
-managers, network tools and known bypass prefixes are forbidden. See SECURITY.md.
+and so a best-effort denylist forbids interpreters, package managers, network
+tools and known bypass prefixes (no allow rules; Codex has no in-sandbox
+default-deny). See SECURITY.md.
 """
 
 from __future__ import annotations
@@ -38,16 +39,9 @@ _SET_ENV_KEYS = (
 _DEFAULT_EXCLUDE_RE = re.compile(r"(KEY|SECRET|TOKEN)", re.IGNORECASE)
 
 REVIEW_RULES = r"""# autoreview-bot review-agent execpolicy (Codex Starlark).
-# Allow a small read-only inspection set; forbid interpreters, package managers,
-# network tools, opaque shells, build/test runners, and known allowlist bypass
-# prefixes. Rules mainly gate escalation outside the sandbox (Codex has no
-# default-deny for unmatched in-sandbox commands); see SECURITY.md.
-
-prefix_rule(
-    pattern = ["rg"],
-    decision = "allow",
-    justification = "Read-only search",
-)
+# Best-effort denylist only: forbid interpreters, package managers, network tools,
+# opaque shells, build/test runners, and known bypass prefixes. There are no allow
+# rules and Codex has no default-deny for unmatched in-sandbox commands; see SECURITY.md.
 
 prefix_rule(
     pattern = ["rg", "--pre"],
@@ -59,48 +53,6 @@ prefix_rule(
     pattern = ["rg", "--pre-glob"],
     decision = "forbidden",
     justification = "rg preprocessor hooks are forbidden",
-)
-
-prefix_rule(
-    pattern = ["cat"],
-    decision = "allow",
-    justification = "Read file contents",
-)
-
-prefix_rule(
-    pattern = ["ls"],
-    decision = "allow",
-    justification = "List directory",
-)
-
-prefix_rule(
-    pattern = ["head"],
-    decision = "allow",
-    justification = "Read file head",
-)
-
-prefix_rule(
-    pattern = ["git", "diff"],
-    decision = "allow",
-    justification = "Read-only git diff",
-)
-
-prefix_rule(
-    pattern = ["git", "log"],
-    decision = "allow",
-    justification = "Read-only git log",
-)
-
-prefix_rule(
-    pattern = ["git", "show"],
-    decision = "allow",
-    justification = "Read-only git show",
-)
-
-prefix_rule(
-    pattern = ["git", "status"],
-    decision = "allow",
-    justification = "Read-only git status",
 )
 
 prefix_rule(

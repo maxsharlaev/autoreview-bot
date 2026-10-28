@@ -9,7 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Review-agent execution policy + sandbox fail-closed:** each Codex run gets a dedicated `CODEX_HOME` with `shell_environment_policy` (`inherit = "core"`, default `KEY`/`SECRET`/`TOKEN` excludes; **PATH is not set in policy** so the `codex-linux-sandbox` helper stays resolvable) so agent-spawned processes do not inherit the model key, plus execpolicy prefix rules that allow a small read-only set and forbid interpreters, package managers, network tools, build/test runners and known bypass prefixes. AR-001/AR-002-class gaps are **accepted platform limitations** for public repos (no PATH wrappers / `noexec`). Verified on Codex 0.164.0: sandboxed commands get a fresh PID namespace; planted worker canary and worker secret names are not visible via `/proc/*/environ` inside the sandbox. Reviews **fail closed** with `CODEX_SANDBOX` when the Linux sandbox cannot start (userns / helper); `codex.allow_unsandboxed` defaults to `false` (trusted-dev hatch only). Strict path on the roadmap: ephemeral per-review container without secrets. See [SECURITY.md](SECURITY.md). Worker image pins `@openai/codex@0.164.0`.
+- **AR-003 sandbox mode gate:** when `codex.allow_unsandboxed` is `false` (default),
+  only `codex.sandbox: read-only` is accepted at config load; `workspace-write` and
+  `danger-full-access` fail startup with a clear error. The Linux sandbox preflight
+  uses the same `sandbox_mode` as `codex exec`. Escape hatch: `allow_unsandboxed: true`.
+
+- **Execpolicy denylist only:** review-agent rules no longer include `allow` prefixes;
+  they are a best-effort forbid list. Containment remains no secrets in child env +
+  read-only FS + no network + PID namespace + fail-closed (see SECURITY.md).
+
+- **Review-agent execution policy + sandbox fail-closed:** each Codex run gets a dedicated `CODEX_HOME` with `shell_environment_policy` (`inherit = "core"`, default `KEY`/`SECRET`/`TOKEN` excludes; **PATH is not set in policy** so the `codex-linux-sandbox` helper stays resolvable) so agent-spawned processes do not inherit the model key, plus execpolicy denylist (forbid-only) rules for interpreters, package managers, network tools, build/test runners and known bypass prefixes. AR-001/AR-002-class gaps are **accepted platform limitations** for public repos (no PATH wrappers / `noexec`). Verified on Codex 0.164.0: sandboxed commands get a fresh PID namespace; planted worker canary and worker secret names are not visible via `/proc/*/environ` inside the sandbox. Reviews **fail closed** with `CODEX_SANDBOX` when the Linux sandbox cannot start (userns / helper); `codex.allow_unsandboxed` defaults to `false` (trusted-dev hatch only). Strict path on the roadmap: ephemeral per-review container without secrets. See [SECURITY.md](SECURITY.md). Worker image pins `@openai/codex@0.164.0`.
 
 
 - **Dashboard / alerts:** wrap global gauges (`arq_queue_jobs`, `review_in_flight`,

@@ -1,4 +1,4 @@
-"""Execution policy: model-key isolation for agent children + execpolicy allowlist."""
+"""Execution policy: model-key isolation for agent children + execpolicy denylist."""
 
 from __future__ import annotations
 
@@ -34,9 +34,8 @@ def test_prepare_codex_home_writes_shell_environment_policy(tmp_path: Path) -> N
     assert "CODEX_API_KEY" not in policy["set"]
     assert (home / "rules" / RULES_FILENAME).is_file()
     rules = (home / "rules" / RULES_FILENAME).read_text(encoding="utf-8")
-    assert 'pattern = ["rg"]' in rules
+    assert 'decision = "allow"' not in rules
     assert 'pattern = ["rg", "--pre"]' in rules
-    assert 'pattern = ["sed", "-n"]' not in rules
     assert 'pattern = ["python3"]' in rules
     assert 'decision = "forbidden"' in rules
 
@@ -119,11 +118,13 @@ def _execpolicy_decision(rules: Path, command: list[str]) -> dict:
 
 
 @requires_codex
-def test_execpolicy_allows_readonly_forbids_interpreters(tmp_path: Path) -> None:
+def test_execpolicy_denylist_forbids_interpreters_not_allow_rules(tmp_path: Path) -> None:
+    """Denylist only: dangerous prefixes are forbidden; read-only tools are unmatched."""
     home = prepare_codex_home(tmp_path / "codex-home", sandbox_env("sk-unused"))
     rules = rules_path(home)
+    assert 'decision = "allow"' not in rules.read_text(encoding="utf-8")
 
-    allowed = [
+    unmatched = [
         ["rg", "--version"],
         ["cat", "README.md"],
         ["ls", "-la"],
@@ -133,9 +134,10 @@ def test_execpolicy_allows_readonly_forbids_interpreters(tmp_path: Path) -> None
         ["git", "show", "HEAD"],
         ["git", "status"],
     ]
-    for command in allowed:
+    for command in unmatched:
         payload = _execpolicy_decision(rules, command)
-        assert payload.get("decision") == "allow", command
+        assert payload.get("decision") != "allow", command
+        assert payload.get("decision") != "forbidden", command
 
     forbidden = [
         ["python3", "-c", "print(1)"],
@@ -178,7 +180,7 @@ def test_execpolicy_forbids_known_bypass_prefixes(tmp_path: Path, command: list[
 
 @requires_codex
 def test_execpolicy_sed_is_not_allowlisted(tmp_path: Path) -> None:
-    """sed is not on the allowlist; a plain sed invocation must not decide allow."""
+    """sed is not denylisted by a broad prefix alone; plain sed must not decide allow."""
     home = prepare_codex_home(tmp_path / "codex-home", sandbox_env("sk-unused"))
     payload = _execpolicy_decision(rules_path(home), ["sed", "-n", "1p", "README.md"])
     assert payload.get("decision") != "allow"

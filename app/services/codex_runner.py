@@ -12,7 +12,7 @@ from pathlib import Path
 
 from app.metrics import record_codex_attempt
 from app.security.codex_policy import prepare_codex_home
-from app.security.sandbox import sandbox_env
+from app.security.sandbox import sandbox_env, validate_review_sandbox
 from app.services.constants import (
     CODEX_AUTH,
     CODEX_QUOTA,
@@ -175,14 +175,22 @@ def _looks_like_sandbox_failure(text_lower: str) -> bool:
     return any(n in text_lower for n in needles)
 
 
-def probe_linux_sandbox(env: dict[str, str], *, binary: str) -> str | None:
+def probe_linux_sandbox(env: dict[str, str], *, binary: str, sandbox: str = "read-only") -> str | None:
     """Return an error snippet if ``codex sandbox`` cannot run ``/bin/true``, else None.
 
-    Used as a fail-closed preflight before spending a model call.
+    Uses the same ``sandbox_mode`` the review will pass to ``codex exec`` so the
+    preflight and the real invocation share one effective mode.
     """
     try:
         completed = subprocess.run(
-            [binary, "sandbox", "--", "/bin/true"],
+            [
+                binary,
+                "sandbox",
+                "-c",
+                f'sandbox_mode="{sandbox}"',
+                "--",
+                "/bin/true",
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -345,6 +353,12 @@ async def run_codex(
         record_codex_attempt(result=CODEX_AUTH, duration_s=0)
         raise CodexRunnerError(CODEX_AUTH, "OPENAI_API_KEY is empty")
 
+    try:
+        sandbox = validate_review_sandbox(sandbox, allow_unsandboxed=allow_unsandboxed)
+    except ValueError as exc:
+        record_codex_attempt(result=CODEX_SANDBOX, duration_s=0)
+        raise CodexRunnerError(CODEX_SANDBOX, str(exc)) from exc
+
     cmd = build_codex_command(
         binary=binary,
         schema_path=schema_path,
@@ -365,7 +379,7 @@ async def run_codex(
         seed_env = sandbox_env(openai_api_key)
         codex_home = prepare_codex_home(Path(home_name), seed_env)
         env = sandbox_env(openai_api_key, codex_home=codex_home)
-        probe_err = await asyncio.to_thread(probe_linux_sandbox, env, binary=binary)
+        probe_err = await asyncio.to_thread(probe_linux_sandbox, env, binary=binary, sandbox=sandbox)
         if probe_err:
             if allow_unsandboxed:
                 logger.warning(
