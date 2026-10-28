@@ -13,7 +13,6 @@ from app.services.codex_runner import (
     classify_codex_error,
     probe_linux_sandbox,
 )
-from app.services.constants import CODEX_SANDBOX
 from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_UNAVAILABLE
 
 

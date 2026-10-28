@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from app.config import AppConfig
 from app.services.constants import (
+    CODEX_SANDBOX,
     GIT_FORBIDDEN,
     GIT_REF_NOT_FOUND,
     GITHUB_UNAVAILABLE,
@@ -33,7 +34,6 @@ from app.services.constants import (
     SKIP_OWNER_NOT_CONFIGURED,
     SKIP_REPO,
     SKIP_TOO_LARGE,
-    CODEX_SANDBOX,
 )
 from app.services.review_time import format_utc, status_line
 
