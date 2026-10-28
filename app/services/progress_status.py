@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from app.config import AppConfig
 from app.services.constants import (
+    CODEX_SANDBOX,
     GIT_FORBIDDEN,
     GIT_REF_NOT_FOUND,
     GITHUB_UNAVAILABLE,
@@ -88,6 +89,7 @@ _FAILURE_TEXT = {
     GITHUB_UNAVAILABLE: "GitHub was unavailable",
     GIT_FORBIDDEN: "the repository could not be cloned",
     GIT_REF_NOT_FOUND: "the head commit could not be fetched",
+    CODEX_SANDBOX: "the review sandbox is unavailable",
 }
 
 

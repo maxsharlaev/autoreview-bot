@@ -12,6 +12,8 @@ import yaml
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.security.sandbox import validate_review_sandbox
+
 logger = logging.getLogger(__name__)
 
 
@@ -136,11 +138,20 @@ class CodexYaml(BaseModel):
     reasoning_effort: str = "medium"
     sandbox: str = "read-only"
     approval_policy: str = "never"
+    # When False (default), reviews refuse to run if the Linux sandbox cannot start
+    # (e.g. userns unavailable). Set True only for trusted private/dev escape hatch.
+    # Also gates which sandbox modes are accepted: only read-only unless True.
+    allow_unsandboxed: bool = False
     timeout_seconds: int = 600
     max_files: int = 100
     max_diff_lines: int = 20000
     max_findings: int = 20
     max_file_bytes: int = 524288
+
+    @model_validator(mode="after")
+    def validate_sandbox_mode(self) -> CodexYaml:
+        validate_review_sandbox(self.sandbox, allow_unsandboxed=self.allow_unsandboxed)
+        return self
 
 
 class RoutingYaml(BaseModel, extra="forbid"):

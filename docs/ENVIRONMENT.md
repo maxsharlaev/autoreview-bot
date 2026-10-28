@@ -89,7 +89,7 @@ The worker starts `git` and `codex` with an allowlisted environment, not its own
 | Subprocess | Variables passed when set |
 | --- | --- |
 | `git clone` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`/`TMP`/`TEMP`, `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (either case), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`; plus the run owner's GitHub token through `GIT_ASKPASS`. |
-| `codex exec` | `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`/`TMP`/`TEMP`, `OPENAI_BASE_URL`, `CODEX_HOME`, `XDG_CACHE_HOME`, `SSL_CERT_FILE`; plus `OPENAI_API_KEY` and `CODEX_API_KEY` set to the run owner's model key. |
+| `codex exec` | `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`/`TMP`/`TEMP`, `OPENAI_BASE_URL`, `CODEX_HOME` (per-run directory with `shell_environment_policy` and execpolicy rules), `XDG_CACHE_HOME`, `SSL_CERT_FILE`; plus `OPENAI_API_KEY` and `CODEX_API_KEY` set to the run owner's model key for Codex itself. Agent-spawned commands do not inherit those keys (`inherit = "core"` plus default `KEY`/`SECRET`/`TOKEN` excludes; PATH is not overridden in policy). Execpolicy is a best-effort denylist (no allow rules; no Codex default-deny). AR-001/AR-002 accepted as platform limits; sandbox fails closed unless `codex.allow_unsandboxed`; when that flag is false only `read-only` is accepted for `codex.sandbox` - see [SECURITY.md](../SECURITY.md). |
 
 <!-- section: tests-only -->
 ## Tests only

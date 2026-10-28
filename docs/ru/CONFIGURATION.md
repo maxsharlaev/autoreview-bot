@@ -145,7 +145,8 @@ Check run или commit status на head PR. Подробнее: [PROGRESS_STATU
 | `codex.reasoning_effort` | string | `medium` | да | Reasoning effort Codex. |
 | `codex.api_key_env` | имя переменной | — | **только owner** | Переменная с ключом модели для этого owner'а (если задан — обязательна и в API, и в worker'е). Без него: `OWNER_<ID>_OPENAI_API_KEY`, иначе общий `OPENAI_API_KEY`. |
 | `codex.prompt_file` | путь | `""` | — | Замена промпта ревью, например `prompts/local/review.md`. Пусто — используется [`prompts/review.md`](../../prompts/review.md). Относительно рабочего каталога (`/app` в Docker). Отсутствующий файл проваливает ревью. Подставляются `{{summary_language}}` и `{{details_language}}`. |
-| `codex.sandbox` | string | `read-only` | — | Значение `--sandbox` Codex. Оставьте `read-only`. |
+| `codex.sandbox` | string | `read-only` | - | Значение `--sandbox` Codex. Когда `allow_unsandboxed` равен `false` (по умолчанию), при старте допускается **только** `read-only`; `workspace-write` и `danger-full-access` отклоняются. |
+| `codex.allow_unsandboxed` | bool | `false` | - | Только escape hatch для trusted/dev. Когда `false` (по умолчанию), review **fail closed** с `CODEX_SANDBOX`, если Linux sandbox не стартует, и `codex.sandbox` должен быть `read-only`. Не включать для публичных репозиториев. |
 | `codex.approval_policy` | string | `never` | — | Политика подтверждений Codex. Оставьте `never`: в worker'е некому отвечать на запросы. |
 | `codex.timeout_seconds` | int | `600` | — | Таймаут одного вызова Codex. Держите его ниже `WORKER_JOB_TIMEOUT`. |
 | `codex.max_files` | int | `100` | — | Если изменённых файлов в PR больше, считая и пропущенные (lockfile'ы, бинарные и другие файлы, не отправляемые модели): модель не вызывается, PR получает комментарий `PR_TOO_LARGE_FOR_AI_REVIEW`. |

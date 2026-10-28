@@ -145,7 +145,8 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 | `codex.reasoning_effort` | string | `medium` | yes | Codex reasoning effort. |
 | `codex.api_key_env` | env var name | — | **owner only** | Model key variable for this owner (required when set, in both the API and the worker). Without it: `OWNER_<ID>_OPENAI_API_KEY`, else the shared `OPENAI_API_KEY`. |
 | `codex.prompt_file` | path | `""` | — | Replacement review prompt, e.g. `prompts/local/review.md`. Empty uses [`prompts/review.md`](../prompts/review.md). Relative to the working directory (`/app` in Docker). A missing file fails the review. `{{summary_language}}` and `{{details_language}}` are substituted. |
-| `codex.sandbox` | string | `read-only` | — | Codex `--sandbox` value. Keep `read-only`. |
+| `codex.sandbox` | string | `read-only` | - | Codex `--sandbox` value. When `allow_unsandboxed` is `false` (default), **only** `read-only` is accepted at startup; `workspace-write` and `danger-full-access` are rejected. |
+| `codex.allow_unsandboxed` | bool | `false` | - | Trusted-dev escape hatch only. When `false` (default), reviews **fail closed** with `CODEX_SANDBOX` if the Linux sandbox cannot start, and `codex.sandbox` must be `read-only`. Do not enable for public repos. |
 | `codex.approval_policy` | string | `never` | — | Codex approval policy. Keep `never`: nobody answers prompts in a worker. |
 | `codex.timeout_seconds` | int | `600` | — | Timeout of one Codex call. Keep it below `WORKER_JOB_TIMEOUT`. |
 | `codex.max_files` | int | `100` | — | More changed files in the PR than this, counting skipped files too (lockfiles, binaries and other files not sent to the model): no model call, the PR gets the `PR_TOO_LARGE_FOR_AI_REVIEW` comment. |

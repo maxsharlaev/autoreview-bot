@@ -30,7 +30,7 @@ RUN apt-get update \
     && chmod u+s /usr/bin/bwrap \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @openai/codex \
+    && npm install -g @openai/codex@0.164.0 \
     && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 9100

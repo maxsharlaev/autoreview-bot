@@ -750,6 +750,7 @@ async def _run_review(
                     reasoning_effort=config.codex.reasoning_effort,
                     sandbox=config.codex.sandbox,
                     approval_policy=config.codex.approval_policy,
+                    allow_unsandboxed=config.codex.allow_unsandboxed,
                 )
                 payload = parse_json_payload(raw_text)
                 verified = verify_review(

@@ -40,7 +40,7 @@ Scheduler
 | `app/adapters/slack.py` | Optional notifications; disabled by default |
 | `app/owners/` | Owner registry, routing, per-owner credentials and config |
 | `app/services/orchestrator.py` | One review run |
-| `app/services/codex_runner.py` | Codex subprocess with a restricted environment |
+| `app/services/codex_runner.py` | Codex subprocess with a restricted environment, per-run `CODEX_HOME` (key isolation + best-effort execpolicy denylist), sandbox mode gate + preflight fail-closed (`CODEX_SANDBOX`); see [SECURITY.md](../SECURITY.md) |
 | `app/services/verifier.py` | JSON Schema, finding paths, count cap |
 | `app/services/publisher.py` | Sticky comment, Jira write, Slack |
 | `app/services/progress_status.py` | Check run / commit status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |

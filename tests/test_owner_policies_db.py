@@ -286,6 +286,7 @@ async def test_codex_subprocess_gets_only_run_owner_model_key(
     with (
         patch.object(codex_runner.shutil, "which", lambda _name: "/opt/fake/codex"),
         patch.object(codex_runner.asyncio, "create_subprocess_exec", fake_exec),
+        patch.object(codex_runner, "probe_linux_sandbox", lambda *a, **k: None),
     ):
         result = await _full_review(
             session_factory, tmp_path, owner_id=owner_id, full_name=full_name, codex_fn=codex_runner.run_codex
