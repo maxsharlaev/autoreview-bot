@@ -59,7 +59,7 @@ Codex is invoked through a `ReviewExecutor` (`app/services/review_executor.py`).
 | `container` | **Implemented (opt-in)** | Ephemeral per-review container with **no worker secrets** (GitHub/Jira/Slack/DB). Dedicated **launcher** service holds the Docker socket and only starts review containers from a hard-coded spec; the worker sends `{job_id, checkout_ref}` only (not a generic ContainerCreate proxy). Model key is passed to the Codex process env for M2; M3 adds a model-API egress proxy so the container need not hold the key, then `container` can become the default. Fail closed: launcher/container errors map to `CODEX_SANDBOX` with **no** fallback to `in_process`. |
 
 
-When `runner_backend: container`, Compose runs a `launcher` service on the internal network with the Docker socket and the shared `opr_checkouts` volume. Review containers join only `review_egress` (internet for the model API in MVP; **not** attached to postgres/redis/api). Strict egress allowlisting waits for the M3 proxy. The review image (`Dockerfile.review`) contains pinned Codex `0.164.0`, git, ripgrep, ca-certificates and bubblewrap — no app code and no `.env`.
+When `runner_backend: container`, enable the Compose overlay `docker-compose.container-runner.yml` so a `launcher` service runs on the internal network with the Docker socket and the shared `opr_checkouts` volume. Review containers join only `review_egress` (internet for the model API in MVP; **not** attached to postgres/redis/api). Strict egress allowlisting waits for the M3 proxy. The review image (`Dockerfile.review`) contains pinned Codex `0.164.0`, git, ripgrep, ca-certificates and bubblewrap — no app code and no `.env`.
 
 See [ROADMAP.md](ROADMAP.md#planned-follow-ups) and [SECURITY.md](../SECURITY.md).
 

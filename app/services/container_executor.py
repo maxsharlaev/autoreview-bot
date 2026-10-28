@@ -54,7 +54,9 @@ class ContainerReviewExecutor:
         approval_policy: str = "never",
         allow_unsandboxed: bool = False,
     ) -> str:
-        if not self._launcher_token or len(self._launcher_token) < 16:
+        from app.launcher.token import launcher_token_is_configured
+
+        if not launcher_token_is_configured(self._launcher_token):
             raise CodexRunnerError(CODEX_SANDBOX, "LAUNCHER_TOKEN missing or too short (fail closed)")
         if not (openai_api_key or "").strip():
             raise CodexRunnerError(CODEX_SANDBOX, "model api key empty for container backend (fail closed)")

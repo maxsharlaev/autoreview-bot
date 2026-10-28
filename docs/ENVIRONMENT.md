@@ -84,11 +84,11 @@ A missing variable marked required, or a missing variable named explicitly in `c
 <!-- section: review-launcher -->
 ## Review launcher (container backend)
 
-Used only when `codex.runner_backend: container`. The **launcher** is the only Compose service that mounts the Docker socket — treat `LAUNCHER_TOKEN` and host socket access as high trust ([SECURITY.md](../SECURITY.md)).
+Used only when `codex.runner_backend: container`. Enable the Compose overlay `docker-compose.container-runner.yml` (see [DEPLOY.md](DEPLOY.md)); the base `docker compose up` / CI build does **not** load the launcher. The **launcher** is the only Compose service that mounts the Docker socket — treat `LAUNCHER_TOKEN` and host socket access as high trust ([SECURITY.md](../SECURITY.md)). An empty `LAUNCHER_TOKEN` does not break compose interpolation; the launcher process and the worker refuse to start (fail closed) when the container backend is selected without a token (≥ 16 characters).
 
 | Variable | Default | Read by | Purpose |
 | --- | --- | --- | --- |
-| `LAUNCHER_TOKEN` | (required for launcher) | worker, launcher | Shared bearer token for `POST /v1/reviews`. Generate a long random value (`openssl rand -hex 32`). |
+| `LAUNCHER_TOKEN` | (required when overlay/container backend is used) | worker, launcher | Shared bearer token for `POST /v1/reviews`. Generate a long random value (`openssl rand -hex 32`). |
 | `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL of the launcher service on the internal network. |
 | `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Shared volume root for staged checkouts; launcher rejects path traversal outside this base. |
 | `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Review image tag built from `Dockerfile.review`. |

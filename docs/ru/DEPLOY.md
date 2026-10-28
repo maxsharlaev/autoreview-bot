@@ -124,7 +124,7 @@ features:
 
 1. Склонируйте репозиторий на хост; создайте `.env` и `config.yaml`, как описано выше.
 2. Проверьте, что Postgres/Redis не опубликованы на хосте, `8000` доступен reverse proxy через loopback, а `9100` — только внутри Docker-сети.
-3. docker compose up -d --build. Дождитесь migrate (exit 0), затем pi и worker в состоянии Up. Для codex.runner_backend: container дополнительно соберите review-образ (docker build -f Dockerfile.review -t opr-review:local .), задайте LAUNCHER_TOKEN в .env и поднимите сервис launcher.
+3. `docker compose up -d --build`. Дождитесь `migrate` (exit 0), затем `api` и `worker` в состоянии Up. Для `codex.runner_backend: container`: задайте `LAUNCHER_TOKEN` в `.env`, соберите review-образ (`docker build -f Dockerfile.review -t opr-review:local .`) и поднимите стек с overlay (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`).
 4. Проверки с хоста или из внутренней сети:
 
    ```bash

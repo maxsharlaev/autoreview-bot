@@ -15,6 +15,7 @@ from app.launcher.auth import require_launcher_auth
 from app.launcher.jobs import LauncherJobError, run_review_job
 from app.launcher.paths import CheckoutPathError, validate_job_id
 from app.launcher.reaper import reaper_loop
+from app.launcher.token import launcher_token_is_configured
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,10 @@ class RunReviewResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not launcher_token_is_configured():
+        raise RuntimeError(
+            "LAUNCHER_TOKEN missing or too short (need >= 16 chars); refusing to start the review launcher"
+        )
     stop = asyncio.Event()
     task = asyncio.create_task(reaper_loop(stop), name="opr-review-reaper")
     app.state.reaper_stop = stop

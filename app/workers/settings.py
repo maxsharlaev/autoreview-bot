@@ -14,6 +14,7 @@ from app.metrics import WORKER_JOBS_IN_PROGRESS, WORKER_UP, record_review_finish
 from app.models import ReviewRun
 from app.queue import redis_settings
 from app.services.constants import INTERNAL_ERROR, REVIEW_TIMEOUT
+from app.services.container_runner_env import ensure_container_runner_env
 from app.services.digest import run_digest
 from app.services.orchestrator import run_review
 
@@ -38,6 +39,11 @@ def parse_cron(expr: str) -> dict[str, set[int]]:
 async def startup(ctx: dict) -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
+    try:
+        ensure_container_runner_env(runner_backend=get_app_config().codex.runner_backend)
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
     _load_owner_config()
     start_worker_metrics_server(settings.metrics_port)
     engine = create_engine()

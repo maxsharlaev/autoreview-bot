@@ -84,11 +84,11 @@
 <!-- section: review-launcher -->
 ## Review launcher (container backend)
 
-Нужен только при `codex.runner_backend: container`. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)).
+Нужен только при `codex.runner_backend: container`. Подключайте Compose overlay `docker-compose.container-runner.yml` (см. [DEPLOY.md](DEPLOY.md)); обычный `docker compose up` / CI build **не** поднимает launcher. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)). Пустой `LAUNCHER_TOKEN` не ломает интерполяцию compose; процесс launcher и worker отказываются стартовать (fail closed), если выбран container backend без токена (≥ 16 символов).
 
 | Variable | Default | Read by | Purpose |
 | --- | --- | --- | --- |
-| `LAUNCHER_TOKEN` | (required for launcher) | worker, launcher | Общий bearer-токен для `POST /v1/reviews`. Сгенерируйте длинное случайное значение (`openssl rand -hex 32`). |
+| `LAUNCHER_TOKEN` | (required when overlay/container backend is used) | worker, launcher | Общий bearer-токен для `POST /v1/reviews`. Сгенерируйте длинное случайное значение (`openssl rand -hex 32`). |
 | `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL launcher во внутренней сети. |
 | `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Корень общего тома со staged checkout; launcher отвергает path traversal вне этой базы. |
 | `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Тег review-образа из `Dockerfile.review`. |
