@@ -40,12 +40,25 @@ Scheduler
 | `app/adapters/slack.py` | Optional notifications; disabled by default |
 | `app/owners/` | Owner registry, routing, per-owner credentials and config |
 | `app/services/orchestrator.py` | One review run |
-| `app/services/codex_runner.py` | Codex subprocess with a restricted environment, per-run `CODEX_HOME` (key isolation + best-effort execpolicy denylist), sandbox mode gate + preflight fail-closed (`CODEX_SANDBOX`); see [SECURITY.md](../SECURITY.md) |
+| `app/services/review_executor.py` | `ReviewExecutor` protocol and factory (`codex.runner_backend`); `in_process` delegates to `codex_runner` |
+| `app/services/codex_runner.py` | In-process Codex subprocess: restricted environment, per-run `CODEX_HOME` (key isolation + best-effort execpolicy denylist), sandbox mode gate + preflight fail-closed (`CODEX_SANDBOX`); see [SECURITY.md](../SECURITY.md) |
 | `app/services/verifier.py` | JSON Schema, finding paths, count cap |
 | `app/services/publisher.py` | Sticky comment, Jira write, Slack |
 | `app/services/progress_status.py` | Check run / commit status ([PROGRESS_STATUS.md](PROGRESS_STATUS.md)) |
 | `app/workers` | ARQ jobs, digest, status cleanup, worker metrics on `:9100` |
 | `GET /metrics`, `GET /api/v1/ops/status` | Prometheus and a queue/failure snapshot |
+
+<!-- section: review-executor-backends -->
+## Review executor backends
+
+Codex is invoked through a `ReviewExecutor` (`app/services/review_executor.py`). Config key: `codex.runner_backend`.
+
+| Backend | Status | Role |
+| --- | --- | --- |
+| `in_process` | **Current default** | Worker runs `codex exec` in-process (existing sandbox preflight, fail-closed, env allowlist). |
+| `container` | Planned (not implemented) | Ephemeral per-review container with **no worker secrets**. M2: dedicated **launcher** service holds the Docker socket and only starts review containers from a hard-coded spec; the worker sends job id + checkout path only (not a generic ContainerCreate proxy). M3: model-API egress proxy so the review container need not hold the model key; then `container` can become the default. |
+
+See [ROADMAP.md](ROADMAP.md#planned-follow-ups) and [SECURITY.md](../SECURITY.md).
 
 <!-- section: observability -->
 ## Observability
