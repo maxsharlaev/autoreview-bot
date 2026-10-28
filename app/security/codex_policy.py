@@ -1,14 +1,16 @@
 """Codex CODEX_HOME policy: shell env isolation + execpolicy allowlist.
 
-Codex 0.164.0 (and current CLI) supports:
+Codex 0.164.0 (and 0.165.x) supports:
 - ``shell_environment_policy`` in ``config.toml`` / ``-c`` (applies to agent-spawned
   commands, not Codex's own API client).
 - ``prefix_rule`` files under ``$CODEX_HOME/rules/`` (mainly gate commands that
-  escalate *outside* the sandbox).
+  escalate *outside* the sandbox; there is no default-deny for unmatched
+  in-sandbox commands).
 
-The worker prepares a dedicated ``CODEX_HOME`` per run so the review agent cannot
-see the model key in child processes, and so read-only inspection commands are
-allowlisted while interpreters / package managers / network tools are forbidden.
+The worker prepares a dedicated ``CODEX_HOME`` per run so agent-spawned children
+do not inherit the model key, and so a small read-only tool set is allowlisted
+while interpreters, package managers, network tools and known bypass prefixes
+are forbidden. See SECURITY.md for containment limits.
 """
 
 from __future__ import annotations
@@ -38,14 +40,27 @@ _SET_ENV_KEYS = (
 _DEFAULT_EXCLUDE_RE = re.compile(r"(KEY|SECRET|TOKEN)", re.IGNORECASE)
 
 REVIEW_RULES = r"""# autoreview-bot review-agent execpolicy (Codex Starlark).
-# Allow read-only inspection; forbid interpreters, package managers, network,
-# shells used as opaque wrappers when Codex cannot split them, and build/test runners.
-# Rules primarily control escalation outside the sandbox; see SECURITY.md.
+# Allow a small read-only inspection set; forbid interpreters, package managers,
+# network tools, opaque shells, build/test runners, and known allowlist bypass
+# prefixes. Rules mainly gate escalation outside the sandbox (Codex has no
+# default-deny for unmatched in-sandbox commands); see SECURITY.md.
 
 prefix_rule(
     pattern = ["rg"],
     decision = "allow",
     justification = "Read-only search",
+)
+
+prefix_rule(
+    pattern = ["rg", "--pre"],
+    decision = "forbidden",
+    justification = "rg preprocessor hooks are forbidden",
+)
+
+prefix_rule(
+    pattern = ["rg", "--pre-glob"],
+    decision = "forbidden",
+    justification = "rg preprocessor hooks are forbidden",
 )
 
 prefix_rule(
@@ -64,12 +79,6 @@ prefix_rule(
     pattern = ["head"],
     decision = "allow",
     justification = "Read file head",
-)
-
-prefix_rule(
-    pattern = ["sed", "-n"],
-    decision = "allow",
-    justification = "Read-only sed print",
 )
 
 prefix_rule(
@@ -94,6 +103,36 @@ prefix_rule(
     pattern = ["git", "status"],
     decision = "allow",
     justification = "Read-only git status",
+)
+
+prefix_rule(
+    pattern = ["git", "-c"],
+    decision = "forbidden",
+    justification = "git config overrides that can change helpers are forbidden",
+)
+
+prefix_rule(
+    pattern = ["git", "--config"],
+    decision = "forbidden",
+    justification = "git config overrides that can change helpers are forbidden",
+)
+
+prefix_rule(
+    pattern = ["sed", "-e"],
+    decision = "forbidden",
+    justification = "sed expression forms that can invoke helpers are forbidden",
+)
+
+prefix_rule(
+    pattern = ["sed", "--expression"],
+    decision = "forbidden",
+    justification = "sed expression forms that can invoke helpers are forbidden",
+)
+
+prefix_rule(
+    pattern = ["find"],
+    decision = "forbidden",
+    justification = "find can run arbitrary commands via -exec/-ok; forbid the binary",
 )
 
 prefix_rule(

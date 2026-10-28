@@ -35,7 +35,8 @@ def test_prepare_codex_home_writes_shell_environment_policy(tmp_path: Path) -> N
     assert (home / "rules" / RULES_FILENAME).is_file()
     rules = (home / "rules" / RULES_FILENAME).read_text(encoding="utf-8")
     assert 'pattern = ["rg"]' in rules
-    assert 'decision = "allow"' in rules
+    assert 'pattern = ["rg", "--pre"]' in rules
+    assert 'pattern = ["sed", "-n"]' not in rules
     assert 'pattern = ["python3"]' in rules
     assert 'decision = "forbidden"' in rules
 
@@ -94,7 +95,6 @@ def test_planted_program_run_under_policy_cannot_see_model_key(tmp_path: Path, m
     assert secret not in out
     assert "OPENAI_API_KEY=<unset>" in out or "OPENAI_API_KEY=\n" in out.replace("\r", "")
     assert "sk-planted" not in out
-    # PATH from policy.set must still be visible so allowlisted tools can run.
     assert "PATH=" in out
 
 
@@ -128,7 +128,6 @@ def test_execpolicy_allows_readonly_forbids_interpreters(tmp_path: Path) -> None
         ["cat", "README.md"],
         ["ls", "-la"],
         ["head", "-n", "5", "README.md"],
-        ["sed", "-n", "1p", "README.md"],
         ["git", "diff", "HEAD"],
         ["git", "log", "-1"],
         ["git", "show", "HEAD"],
@@ -155,3 +154,31 @@ def test_execpolicy_allows_readonly_forbids_interpreters(tmp_path: Path) -> None
     for command in forbidden:
         payload = _execpolicy_decision(rules, command)
         assert payload.get("decision") == "forbidden", (command, payload)
+
+
+@requires_codex
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["rg", "--pre", "hook", "pattern"],
+        ["rg", "--pre-glob", "*.sh", "pattern"],
+        ["sed", "-e", "s/a/b/"],
+        ["sed", "--expression", "s/a/b/"],
+        ["find", ".", "-exec", "true", ";"],
+        ["find", ".", "-name", "*.py"],
+        ["git", "-c", "alias.x=!true", "x"],
+        ["git", "--config", "alias.x=!true", "x"],
+    ],
+)
+def test_execpolicy_forbids_known_bypass_prefixes(tmp_path: Path, command: list[str]) -> None:
+    home = prepare_codex_home(tmp_path / "codex-home", sandbox_env("sk-unused"))
+    payload = _execpolicy_decision(rules_path(home), command)
+    assert payload.get("decision") == "forbidden", (command, payload)
+
+
+@requires_codex
+def test_execpolicy_sed_is_not_allowlisted(tmp_path: Path) -> None:
+    """sed is not on the allowlist; a plain sed invocation must not decide allow."""
+    home = prepare_codex_home(tmp_path / "codex-home", sandbox_env("sk-unused"))
+    payload = _execpolicy_decision(rules_path(home), ["sed", "-n", "1p", "README.md"])
+    assert payload.get("decision") != "allow"
