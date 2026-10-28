@@ -21,6 +21,8 @@ def test_codex_command_auto_runs_safe_and_rejects_dangerous() -> None:
     assert cmd.index("--ask-for-approval") < cmd.index("exec")
     assert 'approval_policy="never"' in cmd
     assert 'model_reasoning_effort="medium"' in cmd
+    assert 'shell_environment_policy.inherit="none"' in cmd
+    assert "shell_environment_policy.ignore_default_excludes=false" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     assert "--yolo" not in cmd
 

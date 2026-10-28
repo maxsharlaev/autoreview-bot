@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Review-agent execution policy:** each Codex run gets a dedicated `CODEX_HOME`
+  with `shell_environment_policy` (`inherit = "none"`, minimal `PATH`/`HOME`/…
+  `set`, default `KEY`/`SECRET`/`TOKEN` excludes) so agent-spawned processes do
+  not inherit the model key, plus execpolicy prefix rules that allow read-only
+  inspection and forbid interpreters, package managers, network tools and
+  build/test runners. Verified against Codex CLI 0.164.0; the worker image pins
+  `@openai/codex@0.164.0`. See [SECURITY.md](SECURITY.md).
+
 - **Dashboard / alerts:** wrap global gauges (`arq_queue_jobs`, `review_in_flight`,
   `stale_in_flight`, `recent_failures`) in `max(...)` so Grafana stats and alerts
   show one value when the API and every worker export the same series.

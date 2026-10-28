@@ -5,10 +5,12 @@ import contextlib
 import logging
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
 from app.metrics import record_codex_attempt
+from app.security.codex_policy import prepare_codex_home
 from app.security.sandbox import sandbox_env
 from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_TIMEOUT, CODEX_UNAVAILABLE
 
@@ -79,6 +81,8 @@ def build_codex_command(
     """Unattended review: sandbox blocks dangerous ops; `never` rejects prompts instead of hanging."""
     # `--ask-for-approval` is a global flag. `codex exec --ask-for-approval` is rejected
     # by current CLI; it must come before the subcommand. Exec also takes -c.
+    # shell_environment_policy is also written to CODEX_HOME/config.toml; the -c
+    # overrides below reinforce inherit=none even if a layer merges oddly.
     cmd = [
         binary,
         "--ask-for-approval",
@@ -95,6 +99,10 @@ def build_codex_command(
         model,
         "-c",
         f'approval_policy="{approval_policy}"',
+        "-c",
+        'shell_environment_policy.inherit="none"',
+        "-c",
+        "shell_environment_policy.ignore_default_excludes=false",
     ]
     effort = reasoning_effort.strip()
     if effort:
@@ -301,70 +309,77 @@ async def run_codex(
         sandbox=sandbox,
         approval_policy=approval_policy,
     )
-    env = sandbox_env(openai_api_key)
-    logger.info(
-        "codex start model=%s effort=%s sandbox=%s timeout=%ss cwd=%s auth=CODEX_API_KEY",
-        model,
-        reasoning_effort,
-        sandbox,
-        timeout_seconds,
-        checkout,
-    )
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(checkout),
-        env=env,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    assert process.stdin is not None
-    started = time.monotonic()
-
-    async def _heartbeat() -> None:
-        while True:
-            await asyncio.sleep(20)
-            logger.info("codex still running (%ss elapsed)", int(time.monotonic() - started))
-
-    heartbeat = asyncio.create_task(_heartbeat())
-    collected: list[str] = []
-    log_filter = CodexLogFilter()
-    try:
-        process.stdin.write(prompt.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
-        await asyncio.wait_for(
-            asyncio.gather(
-                _pump_stream(process.stdout, log_filter, collected),
-                _pump_stream(process.stderr, log_filter, collected),
-            ),
-            timeout=timeout_seconds,
+    # Per-run CODEX_HOME: shell_environment_policy (no model key for children) +
+    # execpolicy rules. Codex's own process still receives the key via sandbox_env.
+    with tempfile.TemporaryDirectory(prefix="opr-codex-home-") as home_name:
+        seed_env = sandbox_env(openai_api_key)
+        codex_home = prepare_codex_home(Path(home_name), seed_env)
+        env = sandbox_env(openai_api_key, codex_home=codex_home)
+        logger.info(
+            "codex start model=%s effort=%s sandbox=%s timeout=%ss cwd=%s auth=CODEX_API_KEY "
+            "codex_home=%s",
+            model,
+            reasoning_effort,
+            sandbox,
+            timeout_seconds,
+            checkout,
+            codex_home,
         )
-        await asyncio.wait_for(process.wait(), timeout=30)
-    except TimeoutError as exc:
-        process.kill()
-        record_codex_attempt(result=CODEX_TIMEOUT, duration_s=time.monotonic() - started)
-        raise CodexRunnerError(CODEX_TIMEOUT, f"codex timed out after {timeout_seconds}s") from exc
-    except asyncio.CancelledError:
-        process.kill()
-        await process.wait()
-        raise
-    finally:
-        heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(checkout),
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert process.stdin is not None
+        started = time.monotonic()
 
-    elapsed = int(time.monotonic() - started)
-    if process.returncode != 0:
-        blob = "".join(collected)[-8000:]
-        code = classify_codex_error(blob)
-        snippet = _error_snippet(blob)
-        record_codex_attempt(result=code, duration_s=elapsed)
-        raise CodexRunnerError(code, f"codex exit {process.returncode} after {elapsed}s: {snippet}")
+        async def _heartbeat() -> None:
+            while True:
+                await asyncio.sleep(20)
+                logger.info("codex still running (%ss elapsed)", int(time.monotonic() - started))
 
-    if not output_path.is_file():
-        record_codex_attempt(result="AI_OUTPUT_INVALID", duration_s=elapsed)
-        raise CodexRunnerError("AI_OUTPUT_INVALID", "codex did not write output file")
-    record_codex_attempt(result="ok", duration_s=elapsed)
-    logger.info("codex finished in %ss, output %s bytes", elapsed, output_path.stat().st_size)
-    return output_path.read_text(encoding="utf-8")
+        heartbeat = asyncio.create_task(_heartbeat())
+        collected: list[str] = []
+        log_filter = CodexLogFilter()
+        try:
+            process.stdin.write(prompt.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _pump_stream(process.stdout, log_filter, collected),
+                    _pump_stream(process.stderr, log_filter, collected),
+                ),
+                timeout=timeout_seconds,
+            )
+            await asyncio.wait_for(process.wait(), timeout=30)
+        except TimeoutError as exc:
+            process.kill()
+            record_codex_attempt(result=CODEX_TIMEOUT, duration_s=time.monotonic() - started)
+            raise CodexRunnerError(CODEX_TIMEOUT, f"codex timed out after {timeout_seconds}s") from exc
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+
+        elapsed = int(time.monotonic() - started)
+        if process.returncode != 0:
+            blob = "".join(collected)[-8000:]
+            code = classify_codex_error(blob)
+            snippet = _error_snippet(blob)
+            record_codex_attempt(result=code, duration_s=elapsed)
+            raise CodexRunnerError(code, f"codex exit {process.returncode} after {elapsed}s: {snippet}")
+
+        if not output_path.is_file():
+            record_codex_attempt(result="AI_OUTPUT_INVALID", duration_s=elapsed)
+            raise CodexRunnerError("AI_OUTPUT_INVALID", "codex did not write output file")
+        record_codex_attempt(result="ok", duration_s=elapsed)
+        logger.info("codex finished in %ss, output %s bytes", elapsed, output_path.stat().st_size)
+        return output_path.read_text(encoding="utf-8")
