@@ -16,7 +16,11 @@ from app.launcher.spec import (
     checkout_volume_name,
     container_name,
 )
-from app.launcher.timeouts import CONTAINER_WAIT_GRACE_SECONDS
+from app.launcher.timeouts import (
+    CONTAINER_WAIT_GRACE_SECONDS,
+    max_review_timeout_seconds,
+    validate_checkout_orphan_ttl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,16 @@ def run_review_job(
     meta = read_job_meta(job_dir)
     model = str(meta.get("model") or os.environ.get("OPR_DEFAULT_MODEL") or "gpt-5.6-sol")
     timeout_seconds = int(meta.get("timeout_seconds") or 600)
+    max_timeout = max_review_timeout_seconds()
+    if timeout_seconds > max_timeout:
+        raise LauncherJobError(
+            "CODEX_SANDBOX",
+            f"timeout_seconds ({timeout_seconds}) exceeds OPR_MAX_REVIEW_TIMEOUT_SECONDS ({max_timeout})",
+        )
+    try:
+        validate_checkout_orphan_ttl(timeout_seconds=timeout_seconds)
+    except RuntimeError as exc:
+        raise LauncherJobError("CODEX_SANDBOX", str(exc)) from exc
     reasoning_effort = str(meta.get("reasoning_effort") or "medium")
     sandbox = str(meta.get("sandbox") or "read-only")
     approval_policy = str(meta.get("approval_policy") or "never")

@@ -16,6 +16,7 @@ from app.launcher.docker_api import DockerApiError, DockerClient
 from app.launcher.jobs import LauncherJobError, run_review_job
 from app.launcher.paths import CheckoutPathError, validate_job_id
 from app.launcher.reaper import reaper_loop
+from app.launcher.timeouts import ensure_launcher_orphan_ttl_config
 from app.launcher.token import launcher_token_is_configured
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,8 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             "LAUNCHER_TOKEN missing or too short (need >= 16 chars); refusing to start the review launcher"
         )
+    # Orphan checkout TTL must cover max review timeout + launcher overhead.
+    ensure_launcher_orphan_ttl_config()
     # Fail closed if the daemon cannot mount volume Subpaths (ARB-27-001).
     docker = DockerClient()
     try:

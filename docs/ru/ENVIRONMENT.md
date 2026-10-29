@@ -84,7 +84,7 @@
 <!-- section: review-launcher -->
 ## Review launcher (container backend)
 
-Нужен только при `codex.runner_backend: container`. Включайте через `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (или Compose overlay `docker-compose.container-runner.yml`; см. [DEPLOY.md](DEPLOY.md)); обычный `docker compose up` / CI build **не** поднимает launcher. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)). Пустой `LAUNCHER_TOKEN` не ломает интерполяцию compose; процесс launcher и worker отказываются стартовать (fail closed), если выбран container backend без токена (≥ 16 символов). Для `container` сумма `codex.timeout_seconds` и launcher overhead должна быть меньше `WORKER_JOB_TIMEOUT` / `worker_job_timeout` (fail closed при старте).
+Нужен только при `codex.runner_backend: container`. Включайте через `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (или Compose overlay `docker-compose.container-runner.yml`; см. [DEPLOY.md](DEPLOY.md)); обычный `docker compose up` / CI build **не** поднимает launcher. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)). Пустой `LAUNCHER_TOKEN` не ломает интерполяцию compose; процесс launcher и worker отказываются стартовать (fail closed), если выбран container backend без токена (≥ 16 символов). Для `container` сумма `codex.timeout_seconds` и launcher overhead должна быть меньше `WORKER_JOB_TIMEOUT` / `worker_job_timeout`, а `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` — >= того же lifetime review (`OPR_MAX_REVIEW_TIMEOUT_SECONDS` + overhead на launcher; `codex.timeout_seconds` + overhead на worker) — оба fail closed при старте. Default orphan TTL выводится из `OPR_MAX_REVIEW_TIMEOUT_SECONDS` + overhead, если не задан.
 
 | Variable | Default | Read by | Purpose |
 | --- | --- | --- | --- |
@@ -96,7 +96,8 @@
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker-сеть review-контейнеров (не postgres/redis/api). |
 | `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor-профиль review-контейнеров (`apparmor=<value>`). Default `unconfined` (как у worker), чтобы bubblewrap mount работал на Linux с AppArmor; задайте имя dedicated profile, когда он установлен. |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper удаляет labeled review-контейнеры старше этого TTL. |
-| `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` | `720` (600 + launcher overhead) | launcher | Reaper удаляет staged UUID job dirs под `OPR_CHECKOUT_BASE` старше этого TTL без live-контейнера с `opr.job_id`. |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | worker, launcher | Макс. `timeout_seconds` из staged `job.json` (как default `codex.timeout_seconds`). Держите >= `codex.timeout_seconds`. |
+| `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` | derived: max review timeout + launcher overhead (`720` при max `600`) | worker, launcher | Reaper удаляет staged UUID job dirs под `OPR_CHECKOUT_BASE` старше этого TTL без live-контейнера с `opr.job_id`. Должен быть >= max review timeout + launcher overhead (fail closed при старте launcher/worker). |
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | Как часто reaper сканирует orphan review-контейнеры. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |

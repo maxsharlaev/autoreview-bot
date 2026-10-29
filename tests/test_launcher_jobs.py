@@ -120,3 +120,37 @@ def test_run_review_job_rejects_traversal(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
     with pytest.raises(LauncherJobError):
         run_review_job(job_id="abc", checkout_ref="../etc", model_api_key="sk", client=FakeDocker())  # type: ignore[arg-type]
+
+
+def test_run_review_job_rejects_timeout_beyond_orphan_ttl(staged, monkeypatch: pytest.MonkeyPatch) -> None:
+    base, job_id, ref = staged
+    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "200")
+    (base / job_id / "job.json").write_text(
+        json.dumps({"model": "gpt-test", "timeout_seconds": 600}),
+        encoding="utf-8",
+    )
+    with pytest.raises(LauncherJobError, match="OPR_CHECKOUT_ORPHAN_TTL_SECONDS"):
+        run_review_job(
+            job_id=job_id,
+            checkout_ref=ref,
+            model_api_key="sk-test",
+            client=FakeDocker(),
+        )
+
+
+def test_run_review_job_rejects_timeout_above_max(staged, monkeypatch: pytest.MonkeyPatch) -> None:
+    base, job_id, ref = staged
+    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "120")
+    monkeypatch.delenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", raising=False)
+    (base / job_id / "job.json").write_text(
+        json.dumps({"model": "gpt-test", "timeout_seconds": 600}),
+        encoding="utf-8",
+    )
+    with pytest.raises(LauncherJobError, match="OPR_MAX_REVIEW_TIMEOUT_SECONDS"):
+        run_review_job(
+            job_id=job_id,
+            checkout_ref=ref,
+            model_api_key="sk-test",
+            client=FakeDocker(),
+        )

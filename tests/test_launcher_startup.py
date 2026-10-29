@@ -49,3 +49,17 @@ def test_require_volume_subpath_support_ok() -> None:
 
     client = DockerClient(client=httpx.Client(transport=httpx.MockTransport(handler), base_url="http://docker"))
     client.require_volume_subpath_support()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_refuses_short_orphan_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "100")
+    from app.launcher.main import lifespan
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    with pytest.raises(RuntimeError, match="OPR_CHECKOUT_ORPHAN_TTL_SECONDS"):
+        async with lifespan(app):
+            pass

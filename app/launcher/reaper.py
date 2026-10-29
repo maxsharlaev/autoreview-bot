@@ -13,7 +13,7 @@ from pathlib import Path
 
 from app.launcher.docker_api import DockerApiError, DockerClient
 from app.launcher.spec import REVIEW_LABEL, REVIEW_LABEL_VALUE
-from app.launcher.timeouts import launcher_pipeline_overhead_seconds
+from app.launcher.timeouts import checkout_orphan_ttl_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +26,6 @@ _UUID_DIR_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
-
-# Default TTL: CodexYaml default timeout (600) + launcher pipeline overhead.
-_DEFAULT_CHECKOUT_ORPHAN_TTL = 600 + launcher_pipeline_overhead_seconds()
 
 
 def orphan_ttl_seconds() -> int:
@@ -45,17 +42,6 @@ def reaper_interval_seconds() -> int:
         return max(30, int(raw))
     except ValueError:
         return 300
-
-
-def checkout_orphan_ttl_seconds() -> int:
-    """Max age for staged UUID job dirs with no live review container."""
-    raw = os.environ.get("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "").strip()
-    if not raw:
-        return _DEFAULT_CHECKOUT_ORPHAN_TTL
-    try:
-        return max(60, int(raw))
-    except ValueError:
-        return _DEFAULT_CHECKOUT_ORPHAN_TTL
 
 
 def checkout_base_path() -> Path:

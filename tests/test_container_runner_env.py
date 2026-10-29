@@ -45,3 +45,25 @@ def test_container_accepts_timeout_under_arq(monkeypatch: pytest.MonkeyPatch) ->
         timeout_seconds=600,
         worker_job_timeout=900,
     )
+
+
+def test_container_rejects_orphan_ttl_too_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "100")
+    with pytest.raises(RuntimeError, match="OPR_CHECKOUT_ORPHAN_TTL_SECONDS"):
+        ensure_container_runner_env(
+            runner_backend="container",
+            timeout_seconds=600,
+            worker_job_timeout=900,
+        )
+
+
+def test_container_accepts_orphan_ttl_covering_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    monkeypatch.delenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", raising=False)
+    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
+    ensure_container_runner_env(
+        runner_backend="container",
+        timeout_seconds=600,
+        worker_job_timeout=900,
+    )
