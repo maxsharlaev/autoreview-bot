@@ -1,4 +1,4 @@
-"""Launcher reaper: containers + staged checkout UUID dirs."""
+"""Launcher reaper: containers + staged checkout UUID dirs + clone dirs."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from app.launcher.reaper import (
+    is_clone_dirname,
     is_uuid_job_dirname,
     reap_checkout_orphans,
     reap_once,
@@ -22,6 +23,14 @@ def test_is_uuid_job_dirname() -> None:
     assert not is_uuid_job_dirname("ai-review-abc")
     assert not is_uuid_job_dirname("short")
     assert not is_uuid_job_dirname("../etc")
+
+
+def test_is_clone_dirname() -> None:
+    assert is_clone_dirname("ai-review-" + "a" * 32)
+    assert is_clone_dirname("ai-review-" + uuid.uuid4().hex)
+    assert not is_clone_dirname("ai-review-short")
+    assert not is_clone_dirname("ai-review-" + str(uuid.uuid4()))
+    assert not is_uuid_job_dirname("ai-review-" + uuid.uuid4().hex)
 
 
 def test_reap_checkout_removes_old_orphan(tmp_path: Path) -> None:
@@ -56,6 +65,27 @@ def test_reap_checkout_keeps_young_dir(tmp_path: Path) -> None:
     assert d.exists()
 
 
+def test_reap_checkout_removes_old_clone_dir(tmp_path: Path) -> None:
+    name = "ai-review-" + uuid.uuid4().hex
+    d = tmp_path / name
+    d.mkdir()
+    (d / "repo").mkdir()
+    old = time.time() - 10_000
+    os.utime(d, (old, old))
+    removed = reap_checkout_orphans(base_dir=tmp_path, ttl_seconds=60, live_job_ids=set())
+    assert removed == 1
+    assert not d.exists()
+
+
+def test_reap_checkout_keeps_fresh_clone_dir(tmp_path: Path) -> None:
+    name = "ai-review-" + uuid.uuid4().hex
+    d = tmp_path / name
+    d.mkdir()
+    removed = reap_checkout_orphans(base_dir=tmp_path, ttl_seconds=3600, live_job_ids=set())
+    assert removed == 0
+    assert d.exists()
+
+
 def test_reap_checkout_ignores_non_uuid_and_outside_symlink(tmp_path: Path) -> None:
     outside = tmp_path / "outside_secret"
     outside.mkdir()
@@ -63,7 +93,6 @@ def test_reap_checkout_ignores_non_uuid_and_outside_symlink(tmp_path: Path) -> N
     non_uuid = tmp_path / "ai-review-keepme"
     non_uuid.mkdir()
     (non_uuid / "f").write_text("ok\n", encoding="utf-8")
-    # Symlink with non-UUID name pointing outside — must not be followed or removed.
     link = tmp_path / "not-a-uuid-link"
     try:
         os.symlink(outside, link, target_is_directory=True)
@@ -88,15 +117,38 @@ def test_reap_checkout_unlinks_uuid_symlink_without_following(tmp_path: Path) ->
     except OSError:
         pytest.skip("symlinks not available on this host")
     old = time.time() - 10_000
-    # utime on symlink may touch target on some OS; age via lstat used by reaper.
     try:
         os.utime(link, (old, old), follow_symlinks=False)
     except (TypeError, NotImplementedError, OSError):
-        # If we cannot age the symlink, force ttl=0 path by monkeypatching time — skip.
         pytest.skip("cannot set symlink mtime without following")
     removed = reap_checkout_orphans(base_dir=tmp_path, ttl_seconds=60, live_job_ids=set())
     assert removed == 1
     assert not link.exists()
+    assert outside.exists()
+    assert (outside / "secret.txt").read_text(encoding="utf-8") == "SECRET_CANARY\n"
+
+
+def test_reap_checkout_unlinks_clone_symlink_without_following(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_secret"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("SECRET_CANARY\n", encoding="utf-8")
+    keep = tmp_path / "ai-review-notauuid"
+    keep.mkdir()
+    (keep / "f").write_text("ok\n", encoding="utf-8")
+    link = tmp_path / ("ai-review-" + "b" * 32)
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not available on this host")
+    old = time.time() - 10_000
+    try:
+        os.utime(link, (old, old), follow_symlinks=False)
+    except (TypeError, NotImplementedError, OSError):
+        pytest.skip("cannot set symlink mtime without following")
+    removed = reap_checkout_orphans(base_dir=tmp_path, ttl_seconds=60, live_job_ids=set())
+    assert removed == 1
+    assert not link.exists()
+    assert keep.exists()
     assert outside.exists()
     assert (outside / "secret.txt").read_text(encoding="utf-8") == "SECRET_CANARY\n"
 

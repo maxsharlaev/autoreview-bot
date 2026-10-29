@@ -1,0 +1,6 @@
+ARB-27-008/009: API skips LAUNCHER_TOKEN; reap ai-review clone dirs
+
+API startup no longer calls ensure_container_runner_env (worker+launcher
+only). clone_head uses strict ai-review-<uuid4 hex> names; launcher reaper
+reclaims them with the same orphan TTL. TTL bound includes
+OPR_CLONE_TIMEOUT_SECONDS so mtime reaping cannot remove an active clone.

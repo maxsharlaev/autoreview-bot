@@ -1,4 +1,4 @@
-"""Validate container-runner env when codex.runner_backend is container."""
+"""Validate container-runner env on the worker when codex.runner_backend is container."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def ensure_container_runner_env(
 
     Compose keeps `LAUNCHER_TOKEN` optional for interpolation so the default
     `in_process` stack and CI work without the variable; selecting `container`
-    must fail closed before any review runs.
+    must fail closed on the worker before any review runs (the API does not call the launcher).
 
     Also requires `codex.timeout_seconds` plus launcher overhead to stay below
     the ARQ `worker_job_timeout` so the worker is not cancelled mid-launcher call,

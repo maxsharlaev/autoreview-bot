@@ -10,6 +10,9 @@ CONTAINER_WAIT_GRACE_SECONDS = 30
 DOCKER_WAIT_CLIENT_GRACE_SECONDS = 60
 # Staging, create/start/logs/remove, and worker<->launcher network slack.
 LAUNCHER_HTTP_MARGIN_SECONDS = 30
+# Clone may finish before review starts; orphan TTL must cover clone + review.
+# Used for TTL bounds only (git clone itself is not hard-capped here).
+DEFAULT_CLONE_BUDGET_SECONDS = 300
 
 # Matches CodexYaml.timeout_seconds / job.json default when unset.
 DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS = 600
@@ -20,13 +23,24 @@ def launcher_pipeline_overhead_seconds() -> int:
     return CONTAINER_WAIT_GRACE_SECONDS + DOCKER_WAIT_CLIENT_GRACE_SECONDS + LAUNCHER_HTTP_MARGIN_SECONDS
 
 
+def clone_budget_seconds() -> int:
+    """Max expected clone duration covered by orphan TTL (``OPR_CLONE_TIMEOUT_SECONDS``)."""
+    raw = os.environ.get("OPR_CLONE_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_CLONE_BUDGET_SECONDS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_CLONE_BUDGET_SECONDS
+
+
 def launcher_http_timeout_seconds(timeout_seconds: int) -> float:
     """Read timeout for the worker's POST /v1/reviews call."""
     return float(int(timeout_seconds) + launcher_pipeline_overhead_seconds())
 
 
 def max_review_timeout_seconds() -> int:
-    """Max review timeout the launcher accepts (`OPR_MAX_REVIEW_TIMEOUT_SECONDS`)."""
+    """Max review timeout the launcher accepts (``OPR_MAX_REVIEW_TIMEOUT_SECONDS``)."""
     raw = os.environ.get("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "").strip()
     if not raw:
         return DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS
@@ -37,12 +51,16 @@ def max_review_timeout_seconds() -> int:
 
 
 def min_checkout_orphan_ttl_seconds(timeout_seconds: int) -> int:
-    """Shortest safe orphan TTL for a review that may run `timeout_seconds`."""
-    return int(timeout_seconds) + launcher_pipeline_overhead_seconds()
+    """Shortest safe orphan TTL for clone + a review of ``timeout_seconds``.
+
+    Clone dirs are created before the review window and kept until cleanup after
+    the review; mtime-based reaping must not remove them while either phase runs.
+    """
+    return clone_budget_seconds() + int(timeout_seconds) + launcher_pipeline_overhead_seconds()
 
 
 def default_checkout_orphan_ttl_seconds() -> int:
-    """Derived default: max allowed review timeout + launcher pipeline overhead."""
+    """Derived default: clone budget + max review timeout + launcher pipeline overhead."""
     return min_checkout_orphan_ttl_seconds(max_review_timeout_seconds())
 
 
@@ -71,19 +89,21 @@ def validate_codex_timeout_against_arq(*, timeout_seconds: int, worker_job_timeo
 
 
 def validate_checkout_orphan_ttl(*, timeout_seconds: int, orphan_ttl_seconds: int | None = None) -> None:
-    """Fail closed when orphan TTL can expire while a review of `timeout_seconds` still runs."""
+    """Fail closed when orphan TTL can expire during clone or a live review."""
     ttl = checkout_orphan_ttl_seconds() if orphan_ttl_seconds is None else int(orphan_ttl_seconds)
     needed = min_checkout_orphan_ttl_seconds(timeout_seconds)
+    clone_b = clone_budget_seconds()
     overhead = launcher_pipeline_overhead_seconds()
     if ttl < needed:
         raise RuntimeError(
-            f"OPR_CHECKOUT_ORPHAN_TTL_SECONDS ({ttl}s) must be >= review timeout "
-            f"({timeout_seconds}s) + launcher overhead ({overhead}s) = {needed}s; "
-            "raise OPR_CHECKOUT_ORPHAN_TTL_SECONDS (or OPR_MAX_REVIEW_TIMEOUT_SECONDS) "
+            f"OPR_CHECKOUT_ORPHAN_TTL_SECONDS ({ttl}s) must be >= clone budget "
+            f"({clone_b}s) + review timeout ({timeout_seconds}s) + launcher overhead "
+            f"({overhead}s) = {needed}s; raise OPR_CHECKOUT_ORPHAN_TTL_SECONDS "
+            "(or OPR_MAX_REVIEW_TIMEOUT_SECONDS / OPR_CLONE_TIMEOUT_SECONDS) "
             "or lower the review timeout"
         )
 
 
 def ensure_launcher_orphan_ttl_config() -> None:
-    """Launcher startup: orphan TTL must cover the max allowed review timeout."""
+    """Launcher startup: orphan TTL must cover clone budget + max review timeout."""
     validate_checkout_orphan_ttl(timeout_seconds=max_review_timeout_seconds())

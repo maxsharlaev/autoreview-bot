@@ -18,7 +18,6 @@ from app.security.webhook_config import (
     set_multi_owner_webhook_config,
     set_webhook_config,
 )
-from app.services.container_runner_env import ensure_container_runner_env
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +68,6 @@ def _validate_startup_config() -> None:
             )
         else:
             set_webhook_config(enabled=True, secret=settings.github_webhook_secret)
-
-    try:
-        ensure_container_runner_env(
-            runner_backend=app_config.codex.runner_backend,
-            timeout_seconds=app_config.codex.timeout_seconds,
-            worker_job_timeout=settings.worker_job_timeout,
-        )
-    except RuntimeError as exc:
-        logger.error("%s", exc)
-        raise SystemExit(1) from exc
 
     if webhook_secrets and not app_config.github.allowed_repos:
         logger.warning(

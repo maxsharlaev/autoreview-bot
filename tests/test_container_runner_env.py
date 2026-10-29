@@ -67,3 +67,20 @@ def test_container_accepts_orphan_ttl_covering_timeout(monkeypatch: pytest.Monke
         timeout_seconds=600,
         worker_job_timeout=900,
     )
+
+
+def test_api_startup_does_not_require_launcher_token() -> None:
+    """ARB-27-008: API startup must not gate on LAUNCHER_TOKEN (worker+launcher only)."""
+    import inspect
+
+    from app.main import _validate_startup_config
+
+    src = inspect.getsource(_validate_startup_config)
+    assert "ensure_container_runner_env" not in src
+    assert "LAUNCHER_TOKEN" not in src
+
+
+def test_worker_still_requires_launcher_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LAUNCHER_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="LAUNCHER_TOKEN"):
+        ensure_container_runner_env(runner_backend="container")

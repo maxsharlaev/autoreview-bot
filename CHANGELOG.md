@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **ARB-27-008 / ARB-27-009:** API no longer requires `LAUNCHER_TOKEN` at startup (worker + launcher only). Worker clone dirs use strict `ai-review-<uuid4 hex>` names; launcher reaper reclaims them with the same orphan TTL. Orphan TTL bound includes `OPR_CLONE_TIMEOUT_SECONDS` (default 300) so mtime reaping cannot remove an active clone.
 - **Checkout orphan TTL bound:** `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` must be >= max review timeout (`OPR_MAX_REVIEW_TIMEOUT_SECONDS` / `codex.timeout_seconds`) + launcher overhead; default TTL is derived from that bound. Launcher and worker fail closed at startup; launcher also rejects per-job timeouts that exceed the TTL.
 - **ARB-27-006 / ARB-27-007:** container executor HTTP read timeout follows `codex.timeout_seconds` + launcher overhead; startup fails if that exceeds `worker_job_timeout`. Launcher reaper removes orphan UUID dirs under `OPR_CHECKOUT_BASE` (`OPR_CHECKOUT_ORPHAN_TTL_SECONDS`) without following symlinks.
 - **ARB-27-005:** review containers set `apparmor=` from `LAUNCHER_APPARMOR_PROFILE` (default `unconfined`) so bubblewrap works on AppArmor Linux hosts; dedicated profile remains planned.

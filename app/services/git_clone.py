@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import tempfile
+import uuid
 from pathlib import Path
 
 from app.services.checkout_safety import neutralize_escaping_symlinks
@@ -154,12 +155,16 @@ async def clone_head(
     pr_number: int | None = None,
 ) -> Path:
     checkout_root = os.environ.get("OPR_CHECKOUT_BASE", "").strip()
+    # Strict name so the launcher reaper can reclaim orphans: ai-review-<uuid4 hex>.
+    name = f"ai-review-{uuid.uuid4().hex}"
     if checkout_root:
         root = Path(checkout_root)
         root.mkdir(parents=True, exist_ok=True)
-        dest = Path(tempfile.mkdtemp(prefix="ai-review-", dir=str(root)))
+        dest = root / name
+        dest.mkdir(parents=False, exist_ok=False)
     else:
-        dest = Path(tempfile.mkdtemp(prefix="ai-review-"))
+        dest = Path(tempfile.gettempdir()) / name
+        dest.mkdir(parents=False, exist_ok=False)
     origin = public_github_url(owner, repo)
     askpass = dest.parent / f"{dest.name}.askpass"
     askpass.write_text(_ASKPASS, encoding="utf-8")

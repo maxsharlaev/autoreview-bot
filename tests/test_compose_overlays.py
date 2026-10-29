@@ -90,6 +90,16 @@ def test_prometheus_shares_network_with_api_and_worker() -> None:
     assert shared_worker, "prometheus must share a network with worker"
 
 
+def test_overlay_does_not_add_launcher_token_to_api() -> None:
+    """ARB-27-008: LAUNCHER_TOKEN is for worker+launcher only; api never calls launcher."""
+    overlay = _load(CONTAINER)
+    assert "api" not in (overlay.get("services") or {}), "overlay must not redefine api"
+    worker = _service(overlay, "worker")
+    launcher = _service(overlay, "launcher")
+    assert "LAUNCHER_TOKEN" in _env_keys(worker)
+    assert "LAUNCHER_TOKEN" in _env_keys(launcher)
+
+
 def _compose_available() -> bool:
     return shutil.which("docker") is not None
 
@@ -98,7 +108,7 @@ def _compose_available() -> bool:
 def test_rendered_compose_launcher_and_prometheus_networks() -> None:
     """When Docker is present, validate the merged compose config the same way."""
     # Container overlay may require optional vars; use empty LAUNCHER_TOKEN for parse.
-    env = {**os.environ, "LAUNCHER_TOKEN": os.environ.get("LAUNCHER_TOKEN", "")}
+    env = {**os.environ, "LAUNCHER_TOKEN": os.environ.get("LAUNCHER_TOKEN") or "test-launcher-token-32chars-ok"}
     # Base + container-runner
     rendered = subprocess.run(
         [
@@ -125,6 +135,16 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
         if name == "LAUNCHER_TOKEN":
             continue
         assert _SECRETISH.search(name) is None, name
+    # Host env supplies LAUNCHER_TOKEN for interpolation; api must not receive it
+    # as an explicit environment entry from the overlay (only worker+launcher do).
+    api = _service(data, "api")
+    api_env = api.get("environment") or {}
+    if isinstance(api_env, dict):
+        assert "LAUNCHER_TOKEN" not in api_env
+    elif isinstance(api_env, list):
+        assert not any(str(x).startswith("LAUNCHER_TOKEN=") or str(x) == "LAUNCHER_TOKEN" for x in api_env)
+    worker_env_keys = _env_keys(_service(data, "worker"))
+    assert "LAUNCHER_TOKEN" in worker_env_keys
 
     obs_rendered = subprocess.run(
         [

@@ -1,3 +1,10 @@
+"""Git clone helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
 from app.services.git_clone import (
     GIT_FORBIDDEN,
     GIT_REF_NOT_FOUND,
@@ -33,3 +40,30 @@ def test_fetch_specs_prefer_sha_and_pull_ref() -> None:
     assert specs[1] == "pull/110/head"
     assert "fix/seo-audit" in specs
     assert specs.index("abc123") < specs.index("fix/seo-audit")
+
+
+@pytest.mark.asyncio
+async def test_clone_head_uses_strict_ai_review_uuid_dirname(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
+
+    async def fake_run(args, *, cwd, env, token):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr("app.services.git_clone._run", fake_run)
+    monkeypatch.setattr("app.services.git_clone.neutralize_escaping_symlinks", lambda dest: 0)
+
+    from app.services.git_clone import clone_head
+
+    dest = await clone_head(
+        owner="o",
+        repo="r",
+        sha="a" * 40,
+        token="tok",
+        pr_number=1,
+    )
+    assert dest.parent == tmp_path
+    assert dest.name.startswith("ai-review-")
+    suffix = dest.name.removeprefix("ai-review-")
+    assert len(suffix) == 32
+    assert all(c in "0123456789abcdef" for c in suffix)
+    assert dest.is_dir()

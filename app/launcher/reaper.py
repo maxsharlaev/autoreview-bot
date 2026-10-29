@@ -17,7 +17,7 @@ from app.launcher.timeouts import checkout_orphan_ttl_seconds
 
 logger = logging.getLogger(__name__)
 
-# uuid.uuid4().hex (32) or canonical dashed UUID.
+# uuid.uuid4().hex (32) or canonical dashed UUID (staged job dirs).
 _UUID_DIR_RE = re.compile(
     r"^(?:"
     r"[0-9a-f]{32}"
@@ -26,6 +26,8 @@ _UUID_DIR_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
+# Worker clone_head dirs: ai-review-<uuid4 hex> (strict; not mkdtemp random suffix).
+_CLONE_DIR_RE = re.compile(r"^ai-review-[0-9a-f]{32}$", re.IGNORECASE)
 
 
 def orphan_ttl_seconds() -> int:
@@ -51,6 +53,15 @@ def checkout_base_path() -> Path:
 
 def is_uuid_job_dirname(name: str) -> bool:
     return bool(_UUID_DIR_RE.fullmatch(name or ""))
+
+
+def is_clone_dirname(name: str) -> bool:
+    return bool(_CLONE_DIR_RE.fullmatch(name or ""))
+
+
+def is_reapable_checkout_dirname(name: str) -> bool:
+    """Staged job UUID dirs or worker ``ai-review-<uuid>`` clone dirs."""
+    return is_uuid_job_dirname(name) or is_clone_dirname(name)
 
 
 def live_review_job_ids(client: DockerClient) -> set[str]:
@@ -90,9 +101,10 @@ def reap_checkout_orphans(
 ) -> int:
     """Remove orphan UUID job dirs under the checkout root. Returns removals count.
 
-    Only top-level names that are strict UUIDs are considered. Symlinks are never
-    followed (``lstat``); a UUID-named symlink is unlinked as an entry. Removals
-    stay lexically under the resolved checkout root.
+    Only top-level names that are strict UUIDs or ``ai-review-<uuid4 hex>``
+    clone dirs are considered. Symlinks are never followed (``lstat``); a
+    UUID-named symlink is unlinked as an entry. Removals stay lexically under
+    the resolved checkout root.
     """
     base = (base_dir or checkout_base_path()).resolve()
     ttl = checkout_orphan_ttl_seconds() if ttl_seconds is None else int(ttl_seconds)
@@ -123,9 +135,10 @@ def reap_checkout_orphans(
         return 0
 
     for name in names:
-        if not is_uuid_job_dirname(name):
+        if not is_reapable_checkout_dirname(name):
             continue
-        if name.replace("-", "").lower() in live_norm:
+        # Live review containers protect staged UUID job dirs only.
+        if is_uuid_job_dirname(name) and name.replace("-", "").lower() in live_norm:
             continue
 
         path = base / name
