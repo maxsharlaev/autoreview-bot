@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from app.launcher.timeouts import LAUNCHER_CANCEL_WAIT_SECONDS
+from app.launcher.timeouts import launcher_cancel_wait_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,9 @@ class JobLifecycleRegistry:
         self._jobs: dict[str, JobRecord] = {}
         self._cond = threading.Condition(self._lock)
         self._tombstone_ttl = float(tombstone_ttl_seconds)
-        self._cancel_wait = float(LAUNCHER_CANCEL_WAIT_SECONDS if cancel_wait_seconds is None else cancel_wait_seconds)
+        self._cancel_wait = float(
+            launcher_cancel_wait_seconds() if cancel_wait_seconds is None else cancel_wait_seconds
+        )
 
     def _purge_expired_tombstones(self, now: float) -> None:
         expired = [

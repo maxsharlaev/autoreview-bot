@@ -170,3 +170,133 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
     assert prom_nets & api_nets
     assert prom_nets & worker_nets
     assert "internal" in prom_nets or any("internal" in n for n in prom_nets)
+
+
+# Launcher settings documented in docs/ENVIRONMENT.md that must appear in the overlay
+# with host-interpolated defaults (ARB-27-020). Secrets except LAUNCHER_TOKEN are forbidden.
+_DOCUMENTED_LAUNCHER_SETTINGS = (
+    "LAUNCHER_TOKEN",
+    "LAUNCHER_APPARMOR_PROFILE",
+    "LAUNCHER_CANCEL_WAIT_SECONDS",
+    "OPR_CHECKOUT_BASE",
+    "OPR_CHECKOUT_VOLUME",
+    "OPR_REVIEW_IMAGE",
+    "OPR_REVIEW_NETWORK",
+    "OPR_REVIEW_ORPHAN_TTL_SECONDS",
+    "OPR_MAX_REVIEW_TIMEOUT_SECONDS",
+    "OPR_CLONE_TIMEOUT_SECONDS",
+    "OPR_CHECKOUT_ORPHAN_TTL_SECONDS",
+    "OPR_LEASE_HEARTBEAT_SECONDS",
+    "OPR_REVIEW_REAPER_INTERVAL_SECONDS",
+    "DOCKER_HOST",
+)
+
+_WORKER_SHARED_SETTINGS = (
+    "LAUNCHER_TOKEN",
+    "OPR_CHECKOUT_BASE",
+    "OPR_MAX_REVIEW_TIMEOUT_SECONDS",
+    "OPR_CLONE_TIMEOUT_SECONDS",
+    "OPR_CHECKOUT_ORPHAN_TTL_SECONDS",
+    "OPR_LEASE_HEARTBEAT_SECONDS",
+)
+
+
+def _docs_launcher_table_vars() -> set[str]:
+    """Parse variable names from the Review launcher table in docs/ENVIRONMENT.md."""
+    text = (ROOT / "docs" / "ENVIRONMENT.md").read_text(encoding="utf-8")
+    # Section starts at "## Review launcher" and ends at the next "## "
+    start = text.find("## Review launcher")
+    assert start >= 0, "Review launcher section missing from docs/ENVIRONMENT.md"
+    rest = text[start:]
+    end = rest.find("\n## ", 3)
+    section = rest if end < 0 else rest[:end]
+    names: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        # | `NAME` | ...
+        tick = line.find("`", 3)
+        if tick > 3:
+            names.add(line[3:tick])
+    # Header / HTTP header rows are not compose env keys
+    names.discard("Variable")
+    names = {
+        n for n in names if n.isidentifier() or n.startswith("OPR_") or n.startswith("LAUNCHER_") or n == "DOCKER_HOST"
+    }
+    names.discard("X-Model-Api-Key")  # HTTP header, not compose env
+    names.discard("OPR_DEFAULT_MODEL")  # optional fallback, not required in overlay
+    names.discard("OPR_REVIEW_SECCOMP_PROFILE")  # baked path; override for tests only
+    names.discard("LAUNCHER_URL")  # worker-only
+    return names
+
+
+def test_overlay_lists_documented_launcher_settings() -> None:
+    """ARB-27-020: every supported launcher setting has an explicit compose entry."""
+    overlay = _load(CONTAINER)
+    launcher_keys = _env_keys(_service(overlay, "launcher"))
+    worker_keys = _env_keys(_service(overlay, "worker"))
+    for name in _DOCUMENTED_LAUNCHER_SETTINGS:
+        assert name in launcher_keys, f"launcher missing {name}"
+    for name in _WORKER_SHARED_SETTINGS:
+        assert name in worker_keys, f"worker missing shared {name}"
+    # Cross-check docs table vs compose (docs may list a few more; compose must cover the required set)
+    docs_names = _docs_launcher_table_vars()
+    missing_in_compose = docs_names - launcher_keys - {"LAUNCHER_URL"}
+    # LAUNCHER_URL is worker-only; drop it from the launcher requirement
+    missing_in_compose.discard("LAUNCHER_URL")
+    assert not missing_in_compose, f"docs launcher vars missing from compose launcher env: {sorted(missing_in_compose)}"
+
+
+def test_overlay_launcher_settings_use_safe_defaults() -> None:
+    """Host-interpolated values use non-empty safe defaults (except LAUNCHER_TOKEN)."""
+    overlay = _load(CONTAINER)
+    env = _service(overlay, "launcher").get("environment") or {}
+    assert isinstance(env, dict)
+    expected_defaults = {
+        "LAUNCHER_APPARMOR_PROFILE": "unconfined",
+        "LAUNCHER_CANCEL_WAIT_SECONDS": "3",
+        "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
+        "OPR_CLONE_TIMEOUT_SECONDS": "300",
+        "OPR_CHECKOUT_ORPHAN_TTL_SECONDS": "900",
+        "OPR_LEASE_HEARTBEAT_SECONDS": "30",
+        "OPR_REVIEW_ORPHAN_TTL_SECONDS": "7200",
+        "OPR_REVIEW_REAPER_INTERVAL_SECONDS": "300",
+    }
+    for key, default in expected_defaults.items():
+        raw = str(env[key])
+        assert f":-{default}" in raw or raw == default, f"{key} should default to {default}, got {raw}"
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker not available")
+def test_rendered_compose_propagates_host_launcher_settings() -> None:
+    """Host-provided launcher setting values propagate into the rendered config."""
+    env = {
+        **os.environ,
+        "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
+        "OPR_LEASE_HEARTBEAT_SECONDS": "42",
+        "OPR_REVIEW_ORPHAN_TTL_SECONDS": "8000",
+        "LAUNCHER_CANCEL_WAIT_SECONDS": "2.5",
+        "OPR_CHECKOUT_ORPHAN_TTL_SECONDS": "1200",
+    }
+    rendered = subprocess.run(
+        ["docker", "compose", "-f", str(BASE), "-f", str(CONTAINER), "config"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    if rendered.returncode != 0:
+        pytest.skip(f"docker compose config failed: {rendered.stderr[-400:]}")
+    data = yaml.safe_load(rendered.stdout)
+    launcher_env = _service(data, "launcher").get("environment") or {}
+    if isinstance(launcher_env, list):
+        launcher_env = dict(item.split("=", 1) for item in launcher_env if "=" in str(item))
+    assert str(launcher_env.get("OPR_LEASE_HEARTBEAT_SECONDS")) == "42"
+    assert str(launcher_env.get("OPR_REVIEW_ORPHAN_TTL_SECONDS")) == "8000"
+    assert str(launcher_env.get("LAUNCHER_CANCEL_WAIT_SECONDS")) in {"2.5", "2.50"}
+    assert str(launcher_env.get("OPR_CHECKOUT_ORPHAN_TTL_SECONDS")) == "1200"
+    for name in sorted(_env_keys(_service(data, "launcher"))):
+        if name == "LAUNCHER_TOKEN":
+            continue
+        assert _SECRETISH.search(name) is None, name

@@ -7,6 +7,7 @@ import os
 from app.launcher.timeouts import (
     validate_checkout_orphan_ttl,
     validate_codex_timeout_against_arq,
+    validate_codex_timeout_against_max_review,
 )
 
 
@@ -40,4 +41,5 @@ def ensure_container_runner_env(
             worker_job_timeout=worker_job_timeout,
         )
     if timeout_seconds is not None:
+        validate_codex_timeout_against_max_review(timeout_seconds=timeout_seconds)
         validate_checkout_orphan_ttl(timeout_seconds=timeout_seconds)

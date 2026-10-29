@@ -84,3 +84,25 @@ def test_worker_still_requires_launcher_token(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("LAUNCHER_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="LAUNCHER_TOKEN"):
         ensure_container_runner_env(runner_backend="container")
+
+
+def test_container_rejects_timeout_above_max_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB-27-019: codex.timeout_seconds must be <= OPR_MAX_REVIEW_TIMEOUT_SECONDS."""
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
+    with pytest.raises(RuntimeError, match="OPR_MAX_REVIEW_TIMEOUT_SECONDS"):
+        ensure_container_runner_env(
+            runner_backend="container",
+            timeout_seconds=601,
+            worker_job_timeout=900,
+        )
+
+
+def test_container_accepts_timeout_equal_max_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
+    ensure_container_runner_env(
+        runner_backend="container",
+        timeout_seconds=600,
+        worker_job_timeout=900,
+    )

@@ -17,6 +17,11 @@ from app.launcher.timeouts import clone_budget_seconds
 from app.services.checkout_safety import neutralize_escaping_symlinks
 from app.services.constants import GIT_FORBIDDEN, GIT_REF_NOT_FOUND
 from app.services.constants import GITHUB_UNAVAILABLE as GIT_CLONE_FAILED
+from app.services.job_deadline import (
+    MIN_CODEX_CALL_SECONDS,
+    JobDeadline,
+    call_margin_seconds_for_backend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,43 @@ class GitCloneError(RuntimeError):
     def __init__(self, message: str, code: str = GIT_CLONE_FAILED) -> None:
         super().__init__(message)
         self.code = code
+
+
+# Floor for a useful clone attempt; below this we skip description / fail early.
+MIN_CLONE_SECONDS = 5
+# Extra seconds reserved after clone for cleanup before the model call starts.
+CLONE_CLEANUP_OVERHEAD_SECONDS = 5
+
+
+class CloneBudgetExhausted(RuntimeError):
+    """Remaining JobDeadline cannot cover clone + a minimal model call."""
+
+
+def clone_timeout_for_deadline(
+    job_deadline: JobDeadline | None,
+    *,
+    configured: int | None = None,
+    runner_backend: str | None = None,
+    now: float | None = None,
+) -> int | None:
+    """Clamp clone timeout to remaining deadline minus reserved post-clone budget.
+
+    Returns ``None`` when remaining cannot cover ``MIN_CLONE_SECONDS`` plus
+    a minimal Codex call (backend margin + cleanup overhead).
+    """
+    configured = int(configured if configured is not None else clone_budget_seconds())
+    if job_deadline is None:
+        return configured
+    reserve = (
+        float(MIN_CODEX_CALL_SECONDS)
+        + float(call_margin_seconds_for_backend(runner_backend))
+        + float(CLONE_CLEANUP_OVERHEAD_SECONDS)
+    )
+    remaining = float(job_deadline.remaining(now=now))
+    available = remaining - reserve
+    if available < MIN_CLONE_SECONDS:
+        return None
+    return max(MIN_CLONE_SECONDS, min(configured, int(available)))
 
 
 def public_github_url(owner: str, repo: str) -> str:
@@ -199,7 +241,20 @@ async def clone_head(
     token: str,
     head_ref: str | None = None,
     pr_number: int | None = None,
+    job_deadline: JobDeadline | None = None,
+    runner_backend: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> Path:
+    if timeout_seconds is not None:
+        clamped = int(timeout_seconds)
+    else:
+        clamped = clone_timeout_for_deadline(job_deadline, runner_backend=runner_backend)
+        if clamped is None:
+            rem = job_deadline.remaining() if job_deadline is not None else 0.0
+            raise CloneBudgetExhausted(
+                f"remaining={rem:.1f}s cannot cover clone>={MIN_CLONE_SECONDS}s + reserved model call"
+            )
+    clone_timeout = float(clamped)
     checkout_root = os.environ.get("OPR_CHECKOUT_BASE", "").strip()
     # Strict name so the launcher reaper can reclaim orphans: ai-review-<uuid4 hex>.
     name = f"ai-review-{uuid.uuid4().hex}"
@@ -220,7 +275,6 @@ async def clone_head(
     git = ["git", "-c", "credential.helper="]
     specs = _fetch_specs(sha, pr_number=pr_number, head_ref=head_ref)
     logger.info("git fetch %s/%s specs=%s", owner, repo, specs)
-    clone_timeout = float(clone_budget_seconds())
     deadline = time.monotonic() + clone_timeout
 
     async def _run_budgeted(args: list[str]) -> None:
@@ -256,12 +310,12 @@ async def clone_head(
         await _run_budgeted([*git, "remote", "set-url", "origin", origin])
     except BaseException:
         await stop_directory_lease(dest)
-        shutil.rmtree(dest, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, dest, True)
         raise
     finally:
         askpass.unlink(missing_ok=True)
         env.pop("GIT_PASSWORD", None)
-    removed = neutralize_escaping_symlinks(dest)
+    removed = await asyncio.to_thread(neutralize_escaping_symlinks, dest)
     if removed:
         logger.info("neutralized %s escaping symlink(s) in checkout", removed)
     # Refresh mtime so orphan TTL covers the post-clone review window truthfully.
@@ -275,4 +329,4 @@ async def clone_head(
 
 async def cleanup_checkout(path: Path) -> None:
     await stop_directory_lease(path)
-    shutil.rmtree(path, ignore_errors=True)
+    await asyncio.to_thread(shutil.rmtree, path, True)

@@ -11,7 +11,9 @@ DOCKER_WAIT_CLIENT_GRACE_SECONDS = 60
 # Staging, create/start/logs/remove, and worker<->launcher network slack.
 LAUNCHER_HTTP_MARGIN_SECONDS = 30
 # Cancel coordination: launcher wait must stay strictly below worker DELETE read timeout.
-LAUNCHER_CANCEL_WAIT_SECONDS = 3.0
+DEFAULT_LAUNCHER_CANCEL_WAIT_SECONDS = 3.0
+# Back-compat alias (default); prefer launcher_cancel_wait_seconds() at runtime.
+LAUNCHER_CANCEL_WAIT_SECONDS = DEFAULT_LAUNCHER_CANCEL_WAIT_SECONDS
 WORKER_CANCEL_HTTP_READ_SECONDS = 5.0
 WORKER_CANCEL_HTTP_CONNECT_SECONDS = 2.0
 # Container orphan reaper: max review + wait grace (not clone+review coupling).
@@ -38,6 +40,17 @@ def clone_budget_seconds() -> int:
         return max(1, int(raw))
     except ValueError:
         return DEFAULT_CLONE_BUDGET_SECONDS
+
+
+def launcher_cancel_wait_seconds() -> float:
+    """Seconds launcher waits after kill-first cancel (``LAUNCHER_CANCEL_WAIT_SECONDS``)."""
+    raw = os.environ.get("LAUNCHER_CANCEL_WAIT_SECONDS", "").strip()
+    if not raw:
+        return float(DEFAULT_LAUNCHER_CANCEL_WAIT_SECONDS)
+    try:
+        return max(0.5, float(raw))
+    except ValueError:
+        return float(DEFAULT_LAUNCHER_CANCEL_WAIT_SECONDS)
 
 
 def launcher_http_timeout_seconds(timeout_seconds: int) -> float:
@@ -103,6 +116,17 @@ def validate_codex_timeout_against_arq(*, timeout_seconds: int, worker_job_timeo
         )
 
 
+def validate_codex_timeout_against_max_review(*, timeout_seconds: int) -> None:
+    """Fail closed when codex.timeout_seconds exceeds OPR_MAX_REVIEW_TIMEOUT_SECONDS."""
+    limit = int(max_review_timeout_seconds())
+    if int(timeout_seconds) > limit:
+        raise RuntimeError(
+            f"codex.timeout_seconds ({timeout_seconds}) must be <= "
+            f"OPR_MAX_REVIEW_TIMEOUT_SECONDS ({limit}); "
+            "raise OPR_MAX_REVIEW_TIMEOUT_SECONDS or lower codex.timeout_seconds"
+        )
+
+
 def validate_checkout_orphan_ttl(*, timeout_seconds: int, orphan_ttl_seconds: int | None = None) -> None:
     """Legacy no-op for call sites; checkout dirs are lease-protected.
 
@@ -128,9 +152,10 @@ def validate_review_container_orphan_ttl(*, orphan_ttl_seconds: int | None = Non
 
 def validate_cancel_timeouts() -> None:
     """Fail closed when launcher cancel wait can exceed worker DELETE read timeout."""
-    if not (LAUNCHER_CANCEL_WAIT_SECONDS < WORKER_CANCEL_HTTP_READ_SECONDS):
+    wait = launcher_cancel_wait_seconds()
+    if not (wait < WORKER_CANCEL_HTTP_READ_SECONDS):
         raise RuntimeError(
-            f"LAUNCHER_CANCEL_WAIT_SECONDS ({LAUNCHER_CANCEL_WAIT_SECONDS}) must be < "
+            f"LAUNCHER_CANCEL_WAIT_SECONDS ({wait}) must be < "
             f"WORKER_CANCEL_HTTP_READ_SECONDS ({WORKER_CANCEL_HTTP_READ_SECONDS})"
         )
 

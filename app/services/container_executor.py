@@ -86,23 +86,20 @@ class ContainerReviewExecutor:
         try:
             job_dir.mkdir(parents=True, exist_ok=False)
             await start_directory_lease(job_dir)
-            self._stage_checkout(checkout, repo_dir)
-            (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-            shutil.copyfile(schema_path, job_dir / "schema.json")
-            (job_dir / "job.json").write_text(
-                json.dumps(
-                    {
-                        "model": model,
-                        "timeout_seconds": timeout_seconds,
-                        "reasoning_effort": reasoning_effort,
-                        "sandbox": sandbox,
-                        "approval_policy": approval_policy,
-                        "allow_unsandboxed": allow_unsandboxed,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            # Blocking FS work off the event loop so the lease heartbeat can refresh.
+            await asyncio.to_thread(
+                self._stage_job_files,
+                checkout,
+                repo_dir,
+                job_dir,
+                prompt,
+                schema_path,
+                model,
+                timeout_seconds,
+                reasoning_effort,
+                sandbox,
+                approval_policy,
+                allow_unsandboxed,
             )
             checkout_ref = f"{job_id}/repo"
             try:
@@ -138,9 +135,23 @@ class ContainerReviewExecutor:
             await stop_directory_lease(job_dir)
             # Keep checkout for orchestrator cleanup; remove only our staging copy when safe.
             if remove_job_dir and job_dir.exists() and repo_dir.resolve() != checkout.resolve():
-                shutil.rmtree(job_dir, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, job_dir, True)
 
-    def _stage_checkout(self, checkout: Path, repo_dir: Path) -> None:
+    def _stage_job_files(
+        self,
+        checkout: Path,
+        repo_dir: Path,
+        job_dir: Path,
+        prompt: str,
+        schema_path: Path,
+        model: str,
+        timeout_seconds: int,
+        reasoning_effort: str,
+        sandbox: str,
+        approval_policy: str,
+        allow_unsandboxed: bool,
+    ) -> None:
+        """Synchronous staging (safe_copytree + writes); always run via ``to_thread``."""
         src = checkout.resolve()
         try:
             src.relative_to(self._checkout_base.resolve())
@@ -149,6 +160,23 @@ class ContainerReviewExecutor:
         except ValueError:
             pass
         safe_copytree(src, repo_dir)
+        (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        shutil.copyfile(schema_path, job_dir / "schema.json")
+        (job_dir / "job.json").write_text(
+            json.dumps(
+                {
+                    "model": model,
+                    "timeout_seconds": timeout_seconds,
+                    "reasoning_effort": reasoning_effort,
+                    "sandbox": sandbox,
+                    "approval_policy": approval_policy,
+                    "allow_unsandboxed": allow_unsandboxed,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     async def _cancel_job_shielded(self, job_id: str) -> bool:
         """Best-effort cancel that survives surrounding task cancellation."""

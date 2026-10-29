@@ -50,7 +50,13 @@ from app.services.constants import (
     WRITE_PERMISSIONS,
 )
 from app.services.context_builder import PreviousFinding, build_context
-from app.services.git_clone import GitCloneError, cleanup_checkout, clone_head
+from app.services.git_clone import (
+    CloneBudgetExhausted,
+    GitCloneError,
+    cleanup_checkout,
+    clone_head,
+    clone_timeout_for_deadline,
+)
 from app.services.issue_key import extract_issue_key, remove_issue_key
 from app.services.job_deadline import JobDeadline
 from app.services.pr_description import (
@@ -735,7 +741,13 @@ async def _run_review(
                 token=token,
                 head_ref=info.head_ref or None,
                 pr_number=info.number,
+                job_deadline=deadline,
+                runner_backend=runner_backend,
             )
+        except CloneBudgetExhausted as exc:
+            logger.warning("Clone skipped (job budget): %s", exc)
+            progress.event(f"failed: {JOB_BUDGET_EXHAUSTED} (git clone budget)")
+            return await _fail(session, run, started, JOB_BUDGET_EXHAUSTED)
         except GitCloneError as exc:
             code = exc.code
             logger.warning("Clone failed for %s/%s@%s: %s", owner, repo, info.head_sha[:12], exc)
@@ -918,19 +930,18 @@ async def _run_review(
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
     # Decide description budget before publishing so the sticky comment can show the note.
+    # Need both a minimal Codex call *and* a clamped clone window (clone + call + cleanup).
     skip_description = size_decision == "soft"
-    if (
-        not skip_description
-        and config.pr_description.enabled
-        and deadline is not None
-        and deadline.clamp_timeout(config.codex.timeout_seconds, runner_backend=runner_backend) is None
-    ):
-        note = "PR description skipped: insufficient job budget"
-        if note not in budget_notes:
-            budget_notes.append(note)
-        progress.event(note)
-        logger.warning("%s remaining=%.1fs", note, deadline.remaining())
-        skip_description = True
+    if not skip_description and config.pr_description.enabled and deadline is not None:
+        call_ok = deadline.clamp_timeout(config.codex.timeout_seconds, runner_backend=runner_backend) is not None
+        clone_ok = clone_timeout_for_deadline(deadline, runner_backend=runner_backend) is not None
+        if not call_ok or not clone_ok:
+            note = "PR description skipped: insufficient job budget"
+            if note not in budget_notes:
+                budget_notes.append(note)
+            progress.event(note)
+            logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            skip_description = True
 
     progress.event("publish sticky comment")
     sticky_render = await _publish(
@@ -1170,14 +1181,22 @@ async def _run_pr_description_after_review(
             return
         desc_timeout = clamped
     token = await github.installation_token(info.owner, info.repo)
-    checkout = await clone_head(
-        owner=info.owner,
-        repo=info.repo,
-        sha=info.head_sha,
-        token=token,
-        head_ref=info.head_ref or None,
-        pr_number=info.number,
-    )
+    try:
+        checkout = await clone_head(
+            owner=info.owner,
+            repo=info.repo,
+            sha=info.head_sha,
+            token=token,
+            head_ref=info.head_ref or None,
+            pr_number=info.number,
+            job_deadline=deadline,
+            runner_backend=backend,
+        )
+    except CloneBudgetExhausted as exc:
+        note = "PR description skipped: insufficient job budget"
+        await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
+        logger.warning("%s (%s) remaining=%.1fs", note, exc, deadline.remaining() if deadline else -1)
+        return
     try:
         await _publish_pr_description(
             session=session,
