@@ -103,7 +103,7 @@ async def _full_review(session_factory, tmp_path, *, owner_id: str, full_name: s
     async with session_factory() as session:
         with (
             patch.object(orchestrator, "clone_head", fake_clone),
-            patch.object(orchestrator, "cleanup_checkout", lambda _path: None),
+            patch.object(orchestrator, "cleanup_checkout", AsyncMock()),
             patch.object(GitHubAppClient, "upsert_sticky_comment", AsyncMock()) as sticky,
         ):
             run = await orchestrator.run_review(

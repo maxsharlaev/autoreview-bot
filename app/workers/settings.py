@@ -14,7 +14,9 @@ from app.metrics import WORKER_JOBS_IN_PROGRESS, WORKER_UP, record_review_finish
 from app.models import ReviewRun
 from app.queue import redis_settings
 from app.services.constants import INTERNAL_ERROR, REVIEW_TIMEOUT
+from app.services.container_runner_env import ensure_container_runner_env
 from app.services.digest import run_digest
+from app.services.job_deadline import JobDeadline
 from app.services.orchestrator import run_review
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,16 @@ def parse_cron(expr: str) -> dict[str, set[int]]:
 async def startup(ctx: dict) -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
+    try:
+        cfg = get_app_config()
+        ensure_container_runner_env(
+            runner_backend=cfg.codex.runner_backend,
+            timeout_seconds=cfg.codex.timeout_seconds,
+            worker_job_timeout=settings.worker_job_timeout,
+        )
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
     _load_owner_config()
     start_worker_metrics_server(settings.metrics_port)
     engine = create_engine()
@@ -77,7 +89,9 @@ async def review_pull_request(ctx: dict, review_run_id: str) -> str:
     try:
         async with factory() as session:
             try:
-                run = await run_review(session, run_id)
+                # Wall-clock budget for this ARQ job (retry + extras share one deadline).
+                deadline = JobDeadline.from_worker_job_timeout(get_settings().worker_job_timeout)
+                run = await run_review(session, run_id, deadline=deadline)
                 logger.info("job done review_run_id=%s status=%s", review_run_id, run.status)
                 return run.status
             except Exception:

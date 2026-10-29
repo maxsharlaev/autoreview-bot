@@ -1,0 +1,30 @@
+# Ephemeral review runner: Codex CLI only. No app code, no .env, non-root.
+# Pinned Codex version must match the worker image (Dockerfile worker stage).
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        ripgrep \
+        bubblewrap \
+        gnupg \
+    && chmod u+s /usr/bin/bwrap \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @openai/codex@0.164.0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin review
+
+COPY docker/review/policy /opt/opr-policy
+COPY docker/review/entrypoint.sh /usr/local/bin/opr-review-entrypoint
+RUN chmod 755 /usr/local/bin/opr-review-entrypoint \
+    && chown -R review:review /opt/opr-policy
+
+USER review
+WORKDIR /checkout
+ENV HOME=/home/review \
+    PATH=/usr/local/bin:/usr/bin:/bin
+
+ENTRYPOINT ["/usr/local/bin/opr-review-entrypoint"]

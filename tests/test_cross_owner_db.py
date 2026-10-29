@@ -670,7 +670,7 @@ class TestCrossOwnerReviewDB:
         async with self.session_factory() as session:
             with (
                 patch.object(orchestrator, "clone_head", fake_clone),
-                patch.object(orchestrator, "cleanup_checkout", lambda _path: None),
+                patch.object(orchestrator, "cleanup_checkout", AsyncMock()),
             ):
                 run = await run_review(
                     session,

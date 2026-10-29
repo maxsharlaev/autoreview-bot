@@ -8,38 +8,31 @@ Statuses for planned work use: **planned** / **design** / **in progress** / **te
 <!-- section: current-state -->
 ## 1. Current state
 
-What works today on `main` (and what does not).
+What works today on `main`, and the honest limits of each area.
 
-<!-- section: works-today -->
-### Works today
-
-| Area | Status |
-| --- | --- |
-| Review pipeline | GitHub PR -> ARQ worker -> Codex CLI -> JSON schema -> sticky comment; optional progress check run / commit status |
-| Concurrency | Per-PR advisory lock, deterministic job ids, conditional run claim, `HEAD_CHANGED` at pickup; private repos re-check head before publish |
-| Multi-owner | Several GitHub owners in one deployment: routing, per-owner GitHub / webhook / API / Jira / Slack / policies / model key ([MULTI_OWNER.md](MULTI_OWNER.md), #9 done) |
-| Public repos | Redaction of security findings and Jira disclosure controls ([PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md)) |
-| Sandbox / agent isolation | Fail-closed Linux sandbox; `shell_environment_policy` + execpolicy denylist; model key not inherited by agent children; AR-001/AR-002 accepted as platform limits ([SECURITY.md](../SECURITY.md)) |
-| ReviewExecutor | **M1 done** on `main` ([#26](https://github.com/maxsharlaev/autoreview-bot/pull/26)): `codex.runner_backend` with `in_process` default; `container` is rejected at config load until M2 lands. **M2 testing** in [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27) (not merged to `main` yet): opt-in ephemeral review containers via a dedicated launcher |
-| Observability | API/worker Prometheus metrics, alert rules, Grafana dashboard; opt-in Compose overlay for Prometheus, Grafana, Loki, and Alloy ([OBSERVABILITY.md](OBSERVABILITY.md)) |
-| PR description (basic) | Optional post-review title/body assist (`comment` / `fill_empty` / `append`); no low-quality rewrite policy yet |
-| Docs / ops | EN+RU docs mirror; Compose overlays for observability |
-
-<!-- section: honest-limitations -->
-### Honest limitations
-
-- **Default path is still `in_process`.** The container backend is **not on `main`**; M2 is testing in #27. Until M2 merges, only `in_process` runs. After M2, the model key still enters the review process until M3.
-- **Codex platform gaps remain** for public repos: no default-deny inside the read-only sandbox; execpolicy is forbid-only; unmatched in-sandbox tools can still read the checkout.
-- **Empty `github.allowed_repos` allows all reachable repos** (startup warning only) - deny-by-default is not shipped.
-- **Pre-publication head recheck** is solid for private repos; public-repo publish path still needs the same guarantee called out as a gap.
-- **No admin UI**; ops rely on the status API, logs, and Grafana.
-- **Jira writes** (comment / P0-P1 transition) can still be driven by model severity without a human gate.
-- **Single code host and single reviewer CLI** (GitHub + Codex); no second host/runner.
-- **Test gaps:** Redis/ARQ and external contract tests, broader e2e of publish failure / queue recovery; local pre-commit hooks not standardized.
-- **Security reporting contact:** GitHub private advisories only; alternate e-mail still a TODO in `SECURITY.md`.
+| Component | What works | Limitations |
+| --- | --- | --- |
+| Review pipeline | GitHub PR → ARQ worker → Codex CLI → JSON schema → sticky comment; optional progress check run / commit status; optional PR description assist (`comment` / `fill_empty` / `append`) | No low-quality rewrite policy yet ([#20](https://github.com/maxsharlaev/autoreview-bot/issues/20)); stronger model-output verification still planned |
+| Concurrency | Per-PR advisory lock, deterministic job ids, conditional run claim, `HEAD_CHANGED` at pickup; private repos re-check head before publish | Public-repo publish path still needs the same pre-publication head guarantee; Redis/ARQ and publish-failure / queue-recovery e2e gaps |
+| Multi-owner | Several GitHub owners in one deployment: routing, per-owner GitHub / webhook / API / Jira / Slack / policies / model key ([MULTI_OWNER.md](MULTI_OWNER.md), #9 done) | Owners in DB / hot reload / quotas not shipped; no admin UI |
+| Public repos | Redaction of security findings and Jira disclosure controls ([PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md)) | Empty `github.allowed_repos` still allows all reachable repos (startup warning only) |
+| Sandbox / agent isolation | Fail-closed Linux sandbox; `shell_environment_policy` + execpolicy denylist; model key not inherited by agent children; AR-001/AR-002 accepted as platform limits ([SECURITY.md](../SECURITY.md)) | No default-deny inside the read-only sandbox; unmatched in-sandbox tools can still read the checkout |
+| ReviewExecutor / container path | **M1 + M2 done** on `main` ([#26](https://github.com/maxsharlaev/autoreview-bot/pull/26), [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27)): `codex.runner_backend` with `in_process` default; opt-in `container` via dedicated launcher (socket isolation, hard-coded create spec, leases, cancel kill-first) | Default remains `in_process`; model key still enters the review process until M3; launcher cancel under Docker load can outlive the worker DELETE read timeout ([#29](https://github.com/maxsharlaev/autoreview-bot/issues/29)) |
+| Observability | API/worker Prometheus metrics, alert rules (incl. `OpenPrReviewQueueNotDraining`), Grafana dashboard; opt-in Compose overlay for Prometheus, Grafana, Loki, and Alloy ([OBSERVABILITY.md](OBSERVABILITY.md)) | No separate growing-backlog / desired-vs-running alert yet; stage correlation / SLOs / alert exercise still planned |
+| Ops / admin | Status API, logs, Grafana | No admin UI; finding triage (false positive / accepted risk) is manual |
+| Jira | Read + optional comment / P0–P1 transition | Model severity can still drive writes without a human gate |
+| Platform | Single code host and reviewer CLI (GitHub + Codex); EN+RU docs; Compose overlays | No second host/runner; local pre-commit hooks not standardized |
+| Security reporting | GitHub private advisories | Alternate e-mail contact still a TODO in `SECURITY.md` |
 
 <!-- section: planned-work -->
 ## 2. Planned work
+
+<!-- section: near-term -->
+### Near-term (next target)
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| **Admin panel (runs, queue, finding management)** | **planned** | **Nearest target.** Optional (`ADMIN_UI_ENABLED=false`); queue/runs, filters, safe retry, audit log. Finding management: mark false positives and accepted risk so they are **not re-raised** on later pushes; sensitive-comment cleanup (`has_sensitive_content`). Authz separate from the public API |
 
 <!-- section: container-strict-review-path -->
 ### Container / strict review path
@@ -47,7 +40,8 @@ What works today on `main` (and what does not).
 | Item | Status | Notes |
 | --- | --- | --- |
 | **M1 - ReviewExecutor + `in_process`** | **done** | [#26](https://github.com/maxsharlaev/autoreview-bot/pull/26) on `main` |
-| **M2 - Ephemeral review container + launcher** | **testing** | [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27) (not on `main` yet): launcher-only Docker socket, hard-coded create spec, fail closed |
+| **M2 - Ephemeral review container + launcher** | **done** | [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27) on `main`: launcher-only Docker socket, hard-coded create spec, leases, fail closed |
+| **Launcher cancel bounded under worker DELETE timeout** | **planned** | [#29](https://github.com/maxsharlaev/autoreview-bot/issues/29): bound the whole cancel (list/kill/remove), not only the lifecycle wait, so worker DELETE cannot time out under Docker load |
 | **M3 - Model-API egress proxy + strict egress allowlist** | **design** | Remove model key from the review container |
 | **M4 - Container backend as default** | **planned** | After M3: make `runner_backend=container` the default |
 | **Linux-host AppArmor for review containers** | **planned** | Docker Desktop: N/A; Linux hosts: dedicated profile instead of default/unconfined follow-up |
@@ -57,7 +51,6 @@ What works today on `main` (and what does not).
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| **Admin panel (runs, queue, finding management)** | **planned** | Optional (`ADMIN_UI_ENABLED=false`); queue/runs, filters, safe retry, audit log; manage findings / sensitive-comment cleanup (`has_sensitive_content`); authz separate from the public API |
 | **PR description / title policy + rewrite** | **planned** | [#20](https://github.com/maxsharlaev/autoreview-bot/issues/20): `pr_description.policy` / `title_policy`, per-repo overrides, deterministic low-quality checks, rewrite with author text preserved |
 | **Two-pass review (spec then verify)** | **planned** | Part of #20 / spec-driven direction: pass 1 writes a spec; pass 2 fresh session checks code vs spec (and Jira when linked); reports code defects and inconsistencies separately |
 | **Human approval for model-driven Jira actions** | **planned** | Propose P0/P1 transition/comment; confirm via label / reaction / admin panel |
@@ -71,8 +64,8 @@ What works today on `main` (and what does not).
 | **Head recheck before publish (all repos)** | **planned** | Extend private-repo guarantee to public publish path |
 | **Stronger model-output verification** | **planned** | Reject wrong SHA, paths outside the diff, impossible lines, inconsistent previous-finding status; mark incomplete coverage |
 | **`stable_id` stability across code movement** | **planned** | Keep finding identity stable when hunks move / lightly edit so fix-tracking and sticky comments do not churn |
-| **Fix verification on later pushes** | **planned** | Focused re-check of open bot findings -> `resolved` / `still_open` / `needs_human` |
-| **Queue-backlog alert** | **planned** | Complement worker-down scraping: detect growing ARQ backlog / desired-vs-running gap (called out in `observability/alerts.yml`) |
+| **Fix verification on later pushes** | **planned** | Focused re-check of open bot findings → `resolved` / `still_open` / `needs_human` |
+| **Queue-backlog alert** | **planned** | **Separate** from existing `OpenPrReviewQueueNotDraining` (worker-down / scrape gap): detect a growing ARQ backlog or desired-vs-running gap while workers are up (called out in `observability/alerts.yml`) |
 | **SECURITY.md contact channel** | **planned** | Add a security contact e-mail or explicitly document that GitHub private advisories are the only channel |
 | **Webhook delivery deduplication** | **planned** | Remember `X-GitHub-Delivery` before GitHub calls |
 | **Narrower installation tokens** | **planned** | Scope App installation tokens to the reviewed repo / step |
@@ -95,13 +88,13 @@ What works today on `main` (and what does not).
 <!-- section: directions-backlog -->
 ### Directions (backlog, not scheduled)
 
-These stay ideas until pulled into the table above with a status:
+These stay ideas until pulled into the tables above with a status. The admin panel is **not** listed here — it is the near-term target under Planned work.
 
 1. **Team rules in the repository** (`.autoreview/rules.md` from base branch).
 2. **Local check before push** (CLI / pre-push, no-publish mode).
 3. **Repository engineering health report** (mostly non-LLM scheduled audit).
 4. **Spec-driven review** (long-term; two-pass #20 is the first concrete step).
-5. **Feedback on findings** (useful / false-positive reactions -> stats).
+5. **Feedback on findings** (useful / false-positive reactions → stats; admin finding management is the near-term path).
 6. **Strict profile for migrations / infra PRs.**
 7. **Dependency / CVE check when lockfiles change.**
 
