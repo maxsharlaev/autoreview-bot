@@ -11,7 +11,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-LEASE_FILENAME = ".lease"
+# Sidecar next to the directory (not inside the worktree): ``<dirname>.lease``.
+# Clone checkouts are git worktrees; a tracked top-level ``.lease`` must not collide.
+LEASE_SIDECAR_SUFFIX = ".lease"
+# Back-compat alias used by older tests/docs referring to the lease basename suffix.
+LEASE_FILENAME = LEASE_SIDECAR_SUFFIX
 DEFAULT_LEASE_HEARTBEAT_SECONDS = 30
 LEASE_STALE_MULTIPLIER = 3
 # When a dir has no lease (crash before first heartbeat), use this age floor.
@@ -34,7 +38,7 @@ def lease_stale_after_seconds() -> int:
 
 
 def no_lease_max_age_seconds() -> int:
-    """Conservative age bound for dirs that never got a .lease file.
+    """Conservative age bound for dirs that never got a lease sidecar.
 
     Uses OPR_CHECKOUT_ORPHAN_TTL_SECONDS when set; otherwise a fixed default
     (not coupled to clone+review+overhead — leases cover live work).
@@ -49,11 +53,13 @@ def no_lease_max_age_seconds() -> int:
 
 
 def lease_path(directory: Path) -> Path:
-    return Path(directory) / LEASE_FILENAME
+    """Sidecar lease file beside ``directory`` (``<parent>/<name>.lease``)."""
+    d = Path(directory)
+    return d.parent / f"{d.name}{LEASE_SIDECAR_SUFFIX}"
 
 
 def touch_lease(directory: Path) -> None:
-    """Create/update .lease inside directory (no symlink follow)."""
+    """Create/update the sidecar lease file (no symlink follow)."""
     path = lease_path(directory)
     try:
         if path.is_symlink() or path.parent.is_symlink():
@@ -65,8 +71,19 @@ def touch_lease(directory: Path) -> None:
         logger.warning("lease touch failed directory=%s: %s", directory, exc)
 
 
+def remove_directory_lease_file(directory: Path) -> None:
+    """Delete the sidecar lease file if present (idempotent)."""
+    path = lease_path(directory)
+    try:
+        if path.is_symlink():
+            return
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("lease unlink failed directory=%s: %s", directory, exc)
+
+
 def lease_mtime(directory: Path) -> float | None:
-    """Return .lease mtime via lstat, or None if missing/unreadable."""
+    """Return sidecar lease mtime via lstat, or None if missing/unreadable."""
     path = lease_path(directory)
     try:
         st = path.lstat()
@@ -91,7 +108,7 @@ def directory_is_lease_stale(directory: Path, *, now: float | None = None) -> bo
 
 
 class LeaseKeeper:
-    """Background heartbeat that refreshes .lease until stopped."""
+    """Background heartbeat that refreshes the sidecar lease until stopped."""
 
     def __init__(self, directory: Path, *, heartbeat_seconds: float | None = None) -> None:
         self.directory = Path(directory)

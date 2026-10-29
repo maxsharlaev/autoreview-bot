@@ -258,9 +258,12 @@ async def test_container_executor_leaves_job_dir_when_cancel_not_confirmed(
                 openai_api_key="sk-test",
             )
     base = tmp_path / "base"
-    leftovers = list(base.iterdir())
-    assert len(leftovers) == 1
-    assert leftovers[0].name  # uuid hex job dir left for reaper
+    leftovers = sorted(base.iterdir(), key=lambda p: p.name)
+    dirs = [p for p in leftovers if p.is_dir()]
+    leases = [p for p in leftovers if p.suffix == ".lease"]
+    assert len(dirs) == 1
+    assert len(leases) == 1
+    assert leases[0].name == f"{dirs[0].name}.lease"
 
 
 @pytest.mark.asyncio

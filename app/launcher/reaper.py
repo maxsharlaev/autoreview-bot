@@ -13,7 +13,7 @@ from pathlib import Path
 
 from app.launcher.docker_api import DockerApiError, DockerClient
 from app.launcher.job_lifecycle import lifecycle
-from app.launcher.lease import directory_is_lease_stale
+from app.launcher.lease import directory_is_lease_stale, remove_directory_lease_file
 from app.launcher.spec import REVIEW_LABEL, REVIEW_LABEL_VALUE
 from app.launcher.timeouts import review_orphan_ttl_seconds
 
@@ -99,8 +99,9 @@ def reap_checkout_orphans(
 ) -> int:
     """Remove orphan UUID / clone dirs under the checkout root. Returns removals count.
 
-    Lease policy (primary): a directory with a fresh ``.lease`` is kept; stale
-    lease (or no lease past the conservative age bound) may be removed.
+    Lease policy (primary): a directory with a fresh sidecar ``<name>.lease`` is
+    kept; stale lease (or no lease past the conservative age bound) may be removed.
+    Sidecar files are removed together with the directory.
     ``ttl_seconds`` is accepted for back-compat tests as an override of the
     no-lease age bound only (injected via env for the call). Symlinks are never
     followed (``lstat``); removals stay lexically under the resolved root.
@@ -188,11 +189,35 @@ def reap_checkout_orphans(
         if stat.S_ISDIR(st.st_mode):
             logger.warning("reaping orphan checkout dir name=%s", name)
             _safe_rmtree(path)
+            remove_directory_lease_file(path)
             removed += 1
         elif stat.S_ISREG(st.st_mode):
             logger.warning("reaping orphan checkout file name=%s", name)
             _safe_unlink(path)
             removed += 1
+
+    # Orphan sidecar leases whose directory is already gone.
+    for name in names:
+        if not name.endswith(".lease"):
+            continue
+        stem = name[: -len(".lease")]
+        if not is_reapable_checkout_dirname(stem):
+            continue
+        dir_path = base / stem
+        if dir_path.exists():
+            continue
+        sidecar = base / name
+        try:
+            if sidecar.is_symlink():
+                continue
+            st = sidecar.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        logger.warning("reaping orphan checkout lease sidecar name=%s", name)
+        _safe_unlink(sidecar)
+        removed += 1
     return removed
 
 

@@ -12,7 +12,11 @@ from pathlib import Path
 
 import httpx
 
-from app.launcher.lease import start_directory_lease, stop_directory_lease
+from app.launcher.lease import (
+    remove_directory_lease_file,
+    start_directory_lease,
+    stop_directory_lease,
+)
 from app.launcher.timeouts import (
     WORKER_CANCEL_HTTP_CONNECT_SECONDS,
     WORKER_CANCEL_HTTP_READ_SECONDS,
@@ -31,6 +35,12 @@ _CANCEL_HTTP_TIMEOUT = httpx.Timeout(
     write=WORKER_CANCEL_HTTP_READ_SECONDS,
     pool=WORKER_CANCEL_HTTP_CONNECT_SECONDS,
 )
+
+
+def _remove_job_dir(job_dir: Path) -> None:
+    """Remove staged job dir and its sidecar lease."""
+    shutil.rmtree(job_dir, ignore_errors=True)
+    remove_directory_lease_file(job_dir)
 
 
 class ContainerReviewExecutor:
@@ -135,7 +145,7 @@ class ContainerReviewExecutor:
             await stop_directory_lease(job_dir)
             # Keep checkout for orchestrator cleanup; remove only our staging copy when safe.
             if remove_job_dir and job_dir.exists() and repo_dir.resolve() != checkout.resolve():
-                await asyncio.to_thread(shutil.rmtree, job_dir, True)
+                await asyncio.to_thread(_remove_job_dir, job_dir)
 
     def _stage_job_files(
         self,

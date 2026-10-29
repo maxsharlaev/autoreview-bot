@@ -12,7 +12,11 @@ import time
 import uuid
 from pathlib import Path
 
-from app.launcher.lease import start_directory_lease, stop_directory_lease
+from app.launcher.lease import (
+    remove_directory_lease_file,
+    start_directory_lease,
+    stop_directory_lease,
+)
 from app.launcher.timeouts import clone_budget_seconds
 from app.services.checkout_safety import neutralize_escaping_symlinks
 from app.services.constants import GIT_FORBIDDEN, GIT_REF_NOT_FOUND
@@ -267,27 +271,30 @@ async def clone_head(
         dest = Path(tempfile.gettempdir()) / name
         dest.mkdir(parents=False, exist_ok=False)
     await start_directory_lease(dest)
-    origin = public_github_url(owner, repo)
-    askpass = dest.parent / f"{dest.name}.askpass"
-    askpass.write_text(_ASKPASS, encoding="utf-8")
-    askpass.chmod(askpass.stat().st_mode | stat.S_IEXEC)
-    env = _git_env(token, askpass)
-    git = ["git", "-c", "credential.helper="]
-    specs = _fetch_specs(sha, pr_number=pr_number, head_ref=head_ref)
-    logger.info("git fetch %s/%s specs=%s", owner, repo, specs)
-    deadline = time.monotonic() + clone_timeout
-
-    async def _run_budgeted(args: list[str]) -> None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise GitCloneError(
-                f"git clone timed out after {int(clone_timeout)}s",
-                code=GIT_CLONE_FAILED,
-            )
-        await _run(args, cwd=dest, env=env, token=token, timeout_seconds=remaining)
-
-    last_error: GitCloneError | None = None
+    askpass: Path | None = None
+    env: dict[str, str] | None = None
     try:
+        origin = public_github_url(owner, repo)
+        askpass = dest.parent / f"{dest.name}.askpass"
+        askpass.write_text(_ASKPASS, encoding="utf-8")
+        askpass.chmod(askpass.stat().st_mode | stat.S_IEXEC)
+        env = _git_env(token, askpass)
+        git = ["git", "-c", "credential.helper="]
+        specs = _fetch_specs(sha, pr_number=pr_number, head_ref=head_ref)
+        logger.info("git fetch %s/%s specs=%s", owner, repo, specs)
+        deadline = time.monotonic() + clone_timeout
+
+        async def _run_budgeted(args: list[str]) -> None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GitCloneError(
+                    f"git clone timed out after {int(clone_timeout)}s",
+                    code=GIT_CLONE_FAILED,
+                )
+            assert env is not None
+            await _run(args, cwd=dest, env=env, token=token, timeout_seconds=remaining)
+
+        last_error: GitCloneError | None = None
         await _run_budgeted([*git, "init", "-q"])
         await _run_budgeted([*git, "remote", "add", "origin", origin])
         fetched = False
@@ -308,25 +315,33 @@ async def clone_head(
         except GitCloneError:
             await _run_budgeted([*git, "checkout", "-q", "FETCH_HEAD"])
         await _run_budgeted([*git, "remote", "set-url", "origin", origin])
+        removed = await asyncio.to_thread(neutralize_escaping_symlinks, dest)
+        if removed:
+            logger.info("neutralized %s escaping symlink(s) in checkout", removed)
+        # Refresh mtime so orphan TTL covers the post-clone review window truthfully.
+        try:
+            os.utime(dest, None)
+        except OSError:
+            pass
+        logger.info("git checkout ready %s/%s@%s", owner, repo, sha[:12])
+        return dest
     except BaseException:
         await stop_directory_lease(dest)
-        await asyncio.to_thread(shutil.rmtree, dest, True)
+        await asyncio.to_thread(_remove_checkout_tree, dest)
         raise
     finally:
-        askpass.unlink(missing_ok=True)
-        env.pop("GIT_PASSWORD", None)
-    removed = await asyncio.to_thread(neutralize_escaping_symlinks, dest)
-    if removed:
-        logger.info("neutralized %s escaping symlink(s) in checkout", removed)
-    # Refresh mtime so orphan TTL covers the post-clone review window truthfully.
-    try:
-        os.utime(dest, None)
-    except OSError:
-        pass
-    logger.info("git checkout ready %s/%s@%s", owner, repo, sha[:12])
-    return dest
+        if askpass is not None:
+            askpass.unlink(missing_ok=True)
+        if env is not None:
+            env.pop("GIT_PASSWORD", None)
+
+
+def _remove_checkout_tree(path: Path) -> None:
+    """Remove checkout/job dir and its sidecar lease file."""
+    shutil.rmtree(path, ignore_errors=True)
+    remove_directory_lease_file(path)
 
 
 async def cleanup_checkout(path: Path) -> None:
     await stop_directory_lease(path)
-    await asyncio.to_thread(shutil.rmtree, path, True)
+    await asyncio.to_thread(_remove_checkout_tree, path)
