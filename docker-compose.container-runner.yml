@@ -22,8 +22,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.launcher
-    env_file:
-      - .env
+    # No env_file: .env would inject worker/DB/model secrets into the socket holder.
+    # Compose still reads host/.env for ${LAUNCHER_TOKEN:-} interpolation only.
     environment:
       LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
       OPR_CHECKOUT_BASE: /var/opr/checkouts

@@ -18,6 +18,10 @@ services:
       - /prometheus:mode=1777 # Prometheus runs as nobody
     ports:
       - "127.0.0.1:9090:9090"
+    # api/worker are on `internal` only; stay on `default` for Grafana/Alloy.
+    networks:
+      - default
+      - internal
 
   grafana:
     image: grafana/grafana:13.2.5

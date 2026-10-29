@@ -74,7 +74,6 @@ def read_job_meta(job_dir: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-
 def _volume_subpath(base: Path, path: Path) -> str:
     """Return a POSIX-relative subpath of ``path`` under ``base`` for VolumeOptions.Subpath."""
     rel = path.resolve().relative_to(base.resolve())

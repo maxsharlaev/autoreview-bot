@@ -73,7 +73,6 @@ class DockerClient:
         if r.status_code != 200:
             raise DockerApiError("docker ping failed", status_code=r.status_code, body=r.text)
 
-
     def version(self) -> dict[str, Any]:
         r = self._http().get("/version")
         if r.status_code != 200:

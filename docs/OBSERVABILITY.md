@@ -28,7 +28,8 @@ Load [observability/alerts.yml](../observability/alerts.yml) as a rule file (`Op
 <!-- section: dev-prometheus-and-grafana-optional -->
 ## Dev Prometheus, Grafana and Loki (optional)
 
-For local checks only, [docker-compose.observability.yml](../docker-compose.observability.yml) adds `prometheus`, `grafana`, `loki`, `alloy` and `docker-socket-proxy` services on the stack's Docker network. Do not use it in production. There is no Alertmanager, and data lives in `tmpfs`, so it is lost when a container stops.
+For local checks only, [docker-compose.observability.yml](../docker-compose.observability.yml) adds `prometheus`, `grafana`, `loki`, `alloy` and `docker-socket-proxy` services on the stack's Docker network. Do not use it in production. There is no Alertmanager, and data lives in `tmpfs`, so it is lost when a container stops. Prometheus joins both `default` and `internal`, because api/worker are attached to `internal` only.
+
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki

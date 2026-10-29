@@ -28,7 +28,8 @@
 <!-- section: dev-prometheus-and-grafana-optional -->
 ## Prometheus, Grafana и Loki для разработки (необязательно)
 
-Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервисы `prometheus`, `grafana`, `loki`, `alloy` и `docker-socket-proxy` в Docker-сеть стека. Не используйте его в продакшене. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера.
+Только для локальных проверок: [docker-compose.observability.yml](../../docker-compose.observability.yml) добавляет сервисы `prometheus`, `grafana`, `loki`, `alloy` и `docker-socket-proxy` в Docker-сеть стека. Не используйте его в продакшене. Alertmanager нет, данные хранятся в `tmpfs` и пропадают при остановке контейнера. Prometheus подключён и к `default`, и к `internal`, потому что api/worker только в `internal`.
+
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki
