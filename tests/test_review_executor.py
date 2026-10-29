@@ -20,9 +20,10 @@ def test_get_review_executor_in_process() -> None:
     assert isinstance(executor, InProcessReviewExecutor)
 
 
-def test_get_review_executor_rejects_container() -> None:
-    with pytest.raises(ValueError, match="not implemented yet"):
-        get_review_executor(CONTAINER_BACKEND)
+def test_get_review_executor_container() -> None:
+    from app.services.container_executor import ContainerReviewExecutor
+
+    assert isinstance(get_review_executor(CONTAINER_BACKEND), ContainerReviewExecutor)
 
 
 def test_get_review_executor_rejects_unknown() -> None:
@@ -35,9 +36,8 @@ def test_codex_yaml_default_runner_backend() -> None:
     assert cfg.runner_backend == IN_PROCESS_BACKEND
 
 
-def test_codex_yaml_rejects_container() -> None:
-    with pytest.raises(ValidationError, match="not implemented yet"):
-        CodexYaml(runner_backend="container")
+def test_codex_yaml_accepts_container() -> None:
+    assert CodexYaml(runner_backend="container").runner_backend == CONTAINER_BACKEND
 
 
 def test_codex_yaml_rejects_unknown_backend() -> None:
@@ -86,3 +86,39 @@ async def test_in_process_executor_delegates_to_run_codex(tmp_path: Path, monkey
     assert seen["sandbox"] == "read-only"
     assert seen["approval_policy"] == "never"
     assert seen["allow_unsandboxed"] is False
+
+
+@pytest.mark.asyncio
+async def test_in_process_neutralize_runs_via_to_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB-27-023: neutralize_escaping_symlinks must not block the event loop."""
+    import threading
+
+    import app.services.review_executor as re
+
+    main_ident = threading.get_ident()
+    called_off_loop: list[bool] = []
+
+    def fake_neutralize(checkout: Path) -> int:
+        called_off_loop.append(threading.get_ident() != main_ident)
+        return 0
+
+    async def fake_run_codex(**kwargs):
+        return "{}"
+
+    monkeypatch.setattr(re, "neutralize_escaping_symlinks", fake_neutralize)
+    monkeypatch.setattr(re, "run_codex", fake_run_codex)
+
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    schema = tmp_path / "s.json"
+    schema.write_text("{}", encoding="utf-8")
+    await InProcessReviewExecutor().run(
+        checkout=checkout,
+        prompt="p",
+        schema_path=schema,
+        output_path=tmp_path / "o.json",
+        model="m",
+        timeout_seconds=10,
+        openai_api_key="sk",
+    )
+    assert called_off_loop == [True]

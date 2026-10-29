@@ -3,7 +3,7 @@
 
 Secrets and process settings come from the environment. Non-secret behaviour is in `config.yaml` ([CONFIGURATION.md](CONFIGURATION.md)). Start from [`.env.example`](../.env.example).
 
-- Variables are read from the process environment, then from a `.env` file in the working directory. Compose passes `.env` to `migrate`, `api` and `worker` with `env_file`.
+- Variables are read from the process environment, then from a `.env` file in the working directory. Compose passes `.env` to `migrate`, `api` and `worker` with `env_file`. The opt-in **launcher** does **not** use `env_file` — only `LAUNCHER_TOKEN` and explicit non-secret launcher settings (host `.env` is still used for `${LAUNCHER_TOKEN:-}` interpolation).
 - Names are case-insensitive for the settings below; the `OWNER_<ID>_*` names must be upper case.
 - Values are read once at startup. Recreate the containers after a change (`docker compose up -d --force-recreate api worker`); `restart` does not reload `env_file`.
 - Never commit `.env`. Secret values are never printed in startup errors; the error names the variable.
@@ -80,6 +80,32 @@ For each named owner, `<ID>` is the owner id upper-cased with `-` replaced by `_
 | `OWNER_<ID>_OPENAI_API_KEY` | `codex.api_key_env` (then required) | no | api (startup validation), worker | Model key; falls back to `OPENAI_API_KEY`. A variable named in `codex.api_key_env` must also be set for the API, or the API does not start. |
 
 A missing variable marked required, or a missing variable named explicitly in `codex.api_key_env`, stops the API and the worker at startup with an error naming it. Other missing variables only log a startup warning.
+
+<!-- section: review-launcher -->
+## Review launcher (container backend)
+
+Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (or the Compose overlay `docker-compose.container-runner.yml`; see [DEPLOY.md](DEPLOY.md)); the base `docker compose up` / CI build does **not** load the launcher. The **launcher** is the only Compose service that mounts the Docker socket — treat `LAUNCHER_TOKEN` and host socket access as high trust ([SECURITY.md](../SECURITY.md)). An empty `LAUNCHER_TOKEN` does not break compose interpolation; the launcher process and the **worker** refuse to start (fail closed) when the container backend is selected without a token (≥ 16 characters). The **api** service never calls the launcher and does not require `LAUNCHER_TOKEN`. For `container`, `codex.timeout_seconds` plus launcher overhead must stay below `WORKER_JOB_TIMEOUT` / `worker_job_timeout`, Checkout/job dirs under `OPR_CHECKOUT_BASE` are protected by sidecar `.lease` heartbeats (`<dirname>.lease` beside the dir, not inside the worktree) (`OPR_LEASE_HEARTBEAT_SECONDS`); the reaper removes a dir only when its lease is stale (or, if no lease was ever written, after a conservative age bound from `OPR_CHECKOUT_ORPHAN_TTL_SECONDS`). `OPR_REVIEW_ORPHAN_TTL_SECONDS` must be >= max review timeout + container wait grace (fail closed); containers for lifecycle-active jobs are never reaped. Within one ARQ job the worker clamps each Codex call to the remaining `WORKER_JOB_TIMEOUT` budget; for `container` the clamp subtracts the full launcher pipeline overhead so the HTTP read deadline never exceeds the remaining ARQ budget (retry / public alignment / PR description are skipped when too little time remains). Description-budget skips are decided **before** the sticky comment is published so the note appears there. `OPR_CLONE_TIMEOUT_SECONDS` is enforced in `git_clone` (process-group kill on timeout) and further clamped to the remaining ARQ `JobDeadline` (minus a reserved minimal Codex call + overhead); when remaining cannot cover clone + call, PR description is skipped with the budget notice. For `container`, worker startup also requires `codex.timeout_seconds` <= `OPR_MAX_REVIEW_TIMEOUT_SECONDS`. On worker cancel, the executor calls launcher `DELETE /v1/jobs/{job_id}` which marks cancelled, **immediately** kills visible containers, then waits briefly (`LAUNCHER_CANCEL_WAIT_SECONDS` < worker DELETE read timeout) for an in-flight launch, removes again, and returns `confirmed: true` only when idle; staging dirs are deleted only when confirmed. Description-budget skips decided after sticky publish refresh the sticky via the same upsert path.
+
+| Variable | Default | Read by | Purpose |
+| --- | --- | --- | --- |
+| `LAUNCHER_TOKEN` | (required when overlay/container backend is used) | worker, launcher | Shared bearer token for `POST /v1/reviews`. Generate a long random value (`openssl rand -hex 32`). |
+| `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL of the launcher service on the internal network. |
+| `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Shared volume root for staged checkouts; launcher rejects path traversal outside this base. |
+| `OPR_CHECKOUT_VOLUME` | `opr_checkouts` | launcher | Named Docker volume for review `Type=volume` mounts with `VolumeOptions.Subpath` (not launcher-local binds; requires Engine ≥ 26 / API ≥ 1.45). |
+| `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Review image tag built from `Dockerfile.review`. |
+| `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker network attached to review containers (not postgres/redis/api). |
+| `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor profile for review containers (`apparmor=<value>`). Default `unconfined` (same posture as the worker) so bubblewrap mounts work on AppArmor Linux hosts; set a dedicated profile name when one is installed. |
+| `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper removes labeled review containers older than this when the job is **not** lifecycle-active. Must be >= max review timeout + container wait grace (fail closed at launcher startup). |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | worker, launcher | Max `timeout_seconds` accepted from staged `job.json` (matches default `codex.timeout_seconds`). Keep >= `codex.timeout_seconds`. |
+| `OPR_CLONE_TIMEOUT_SECONDS` | `300` | worker, launcher | Hard cap for `git_clone` (kills the git process group on timeout); further clamped to remaining ARQ JobDeadline minus reserved min Codex call + overhead. |
+| `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` | `900` (no-lease fallback) | worker, launcher | Conservative age bound for checkout/job dirs that never got a sidecar `<dirname>.lease` (crash before first heartbeat). Live dirs are protected by sidecar lease heartbeats (`OPR_LEASE_HEARTBEAT_SECONDS`; file beside the dir, not inside the worktree; stale after heartbeat×3). |
+| `OPR_LEASE_HEARTBEAT_SECONDS` | `30` | worker, launcher | How often a live checkout/job dir refreshes its sidecar `<dirname>.lease` (outside the worktree). Reaper treats a lease as stale after heartbeat×3. |
+| `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | How often the reaper scans for orphan review containers and stale checkout dirs. |
+| `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | After kill-first cancel, seconds to wait for an in-flight launch before confirming idle. Must stay strictly below the worker DELETE HTTP read timeout (5s). |
+| `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
+| `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Docker Engine endpoint. Compose sets the unix socket; do not point this at a remote daemon from an untrusted network. |
+| `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | M2 only: per-run model key for the Codex process env. Removed once the M3 model-API proxy lands. |
 
 <!-- section: passed-through-to-subprocesses -->
 ## Passed through to subprocesses

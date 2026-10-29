@@ -3,7 +3,7 @@
 
 Секреты и настройки процессов берутся из окружения. Несекретное поведение — в `config.yaml` ([CONFIGURATION.md](CONFIGURATION.md)). Начните с [`.env.example`](../../.env.example).
 
-- Переменные читаются из окружения процесса, затем из файла `.env` в рабочем каталоге. Compose передаёт `.env` в `migrate`, `api` и `worker` через `env_file`.
+- Переменные читаются из окружения процесса, затем из файла `.env` в рабочем каталоге. Compose передаёт `.env` в `migrate`, `api` и `worker` через `env_file`. Opt-in **launcher** **не** использует `env_file` — только `LAUNCHER_TOKEN` и явные несекретные настройки (host `.env` по-прежнему нужен для интерполяции `${LAUNCHER_TOKEN:-}`).
 - Для настроек ниже имена нечувствительны к регистру; имена `OWNER_<ID>_*` должны быть в верхнем регистре.
 - Значения читаются один раз при старте. После изменения пересоздайте контейнеры (`docker compose up -d --force-recreate api worker`); `restart` не перечитывает `env_file`.
 - Никогда не коммитьте `.env`. Значения секретов не печатаются в ошибках старта; ошибка называет переменную.
@@ -80,6 +80,32 @@
 | `OWNER_<ID>_OPENAI_API_KEY` | `codex.api_key_env` (тогда обязательна) | нет | api (проверка при старте), worker | Ключ модели; иначе используется `OPENAI_API_KEY`. Переменная, названная в `codex.api_key_env`, должна быть задана и для API, иначе API не стартует. |
 
 Отсутствие обязательной переменной или переменной, явно названной в `codex.api_key_env`, останавливает API и worker при старте с ошибкой, называющей её. Отсутствие остальных переменных только пишет предупреждение при старте.
+
+<!-- section: review-launcher -->
+## Review launcher (container backend)
+
+Нужен только при `codex.runner_backend: container`. Включайте через `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (или Compose overlay `docker-compose.container-runner.yml`; см. [DEPLOY.md](DEPLOY.md)); обычный `docker compose up` / CI build **не** поднимает launcher. Сервис **launcher** — единственный в Compose, кто монтирует Docker socket; `LAUNCHER_TOKEN` и доступ к socket — зона высокого доверия ([SECURITY.md](../../SECURITY.md)). Пустой `LAUNCHER_TOKEN` не ломает интерполяцию compose; процесс launcher и **worker** отказываются стартовать (fail closed), если выбран container backend без токена (≥ 16 символов). Сервис **api** не вызывает launcher и не требует `LAUNCHER_TOKEN`. Для `container` сумма `codex.timeout_seconds` и launcher overhead должна быть меньше `WORKER_JOB_TIMEOUT` / `worker_job_timeout`, Checkout/job dirs под `OPR_CHECKOUT_BASE` защищены sidecar `.lease` heartbeats (`<dirname>.lease` рядом с каталогом, не внутри worktree) (`OPR_LEASE_HEARTBEAT_SECONDS`); reaper удаляет dir только при stale lease (или без lease — консервативный age bound из `OPR_CHECKOUT_ORPHAN_TTL_SECONDS`). `OPR_REVIEW_ORPHAN_TTL_SECONDS` должен быть >= max review timeout + container wait grace (fail closed); контейнеры lifecycle-active jobs не reap'ятся. В одном ARQ job worker ограничивает каждый Codex-вызов оставшимся бюджетом `WORKER_JOB_TIMEOUT`; для `container` clamp вычитает полный launcher pipeline overhead, чтобы HTTP read deadline не превышал остаток ARQ-бюджета (retry / public alignment / PR description пропускаются, если времени мало). Пропуск PR description по бюджету решается **до** публикации sticky-комментария, чтобы заметка попала в него. `OPR_CLONE_TIMEOUT_SECONDS` жёстко лимитирует `git_clone` (kill process group по таймауту) и дополнительно clamp'ится к оставшемуся ARQ `JobDeadline` (минус резерв на минимальный Codex-вызов + overhead); если бюджета не хватает на clone + call, PR description пропускается с budget notice. Для `container` worker startup также требует `codex.timeout_seconds` <= `OPR_MAX_REVIEW_TIMEOUT_SECONDS`. При cancel worker вызывает launcher `DELETE /v1/jobs/{job_id}`: помечает cancelled, **сразу** убивает видимые контейнеры, затем коротко ждёт (`LAUNCHER_CANCEL_WAIT_SECONDS` < worker DELETE read timeout) in-flight launch, удаляет снова; `confirmed: true` только когда idle — staging удаляется только тогда. Заметки о бюджете после sticky-публикации обновляют sticky тем же upsert.
+
+| Variable | Default | Read by | Purpose |
+| --- | --- | --- | --- |
+| `LAUNCHER_TOKEN` | (required when overlay/container backend is used) | worker, launcher | Общий bearer-токен для `POST /v1/reviews`. Сгенерируйте длинное случайное значение (`openssl rand -hex 32`). |
+| `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL launcher во внутренней сети. |
+| `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Корень общего тома со staged checkout; launcher отвергает path traversal вне этой базы. |
+| `OPR_CHECKOUT_VOLUME` | `opr_checkouts` | launcher | Имя Docker volume для Mounts `Type=volume` + `VolumeOptions.Subpath` (не launcher-local bind; нужен Engine ≥ 26 / API ≥ 1.45). |
+| `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Тег review-образа из `Dockerfile.review`. |
+| `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker-сеть review-контейнеров (не postgres/redis/api). |
+| `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor-профиль review-контейнеров (`apparmor=<value>`). Default `unconfined` (как у worker), чтобы bubblewrap mount работал на Linux с AppArmor; задайте имя dedicated profile, когда он установлен. |
+| `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper удаляет labeled review-контейнеры старше TTL, если job **не** lifecycle-active. Должен быть >= max review timeout + container wait grace (fail closed при старте launcher). |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | worker, launcher | Макс. `timeout_seconds` из staged `job.json` (как default `codex.timeout_seconds`). Держите >= `codex.timeout_seconds`. |
+| `OPR_CLONE_TIMEOUT_SECONDS` | `300` | worker, launcher | Hard cap for `git_clone` (kills the git process group on timeout); further clamped to remaining ARQ JobDeadline minus reserved min Codex call + overhead. |
+| `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` | `900` (no-lease fallback) | worker, launcher | Консервативный age bound для checkout/job dirs без sidecar `<dirname>.lease` (crash до первого heartbeat). Живые dirs защищены sidecar lease heartbeats (`OPR_LEASE_HEARTBEAT_SECONDS`; файл рядом с каталогом, не внутри worktree; stale после heartbeat×3). |
+| `OPR_LEASE_HEARTBEAT_SECONDS` | `30` | worker, launcher | Как часто live checkout/job-каталог обновляет sidecar `<dirname>.lease` (вне worktree). Reaper считает lease stale после heartbeat×3. |
+| `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | Как часто reaper сканирует orphan review-контейнеры. |
+| `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | После kill-first cancel — секунды ожидания in-flight launch перед confirmed idle. Должно быть строго меньше worker DELETE HTTP read timeout (5s). |
+| `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
+| `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
+| `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | Только M2: ключ модели в env процесса Codex. Уйдёт после model-API proxy в M3. |
 
 <!-- section: passed-through-to-subprocesses -->
 ## Передаётся подпроцессам

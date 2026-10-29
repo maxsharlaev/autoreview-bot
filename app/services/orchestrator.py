@@ -41,6 +41,7 @@ from app.services.constants import (
     AI_OUTPUT_INVALID,
     CODEX_NO_RETRY,
     ISSUE_UNAVAILABLE,
+    JOB_BUDGET_EXHAUSTED,
     POLICY_VERSION,
     SKIP_DRAFT,
     SKIP_FORK,
@@ -49,8 +50,15 @@ from app.services.constants import (
     WRITE_PERMISSIONS,
 )
 from app.services.context_builder import PreviousFinding, build_context
-from app.services.git_clone import GitCloneError, cleanup_checkout, clone_head
+from app.services.git_clone import (
+    CloneBudgetExhausted,
+    GitCloneError,
+    cleanup_checkout,
+    clone_head,
+    clone_timeout_for_deadline,
+)
 from app.services.issue_key import extract_issue_key, remove_issue_key
+from app.services.job_deadline import JobDeadline
 from app.services.pr_description import (
     COMMENT_MARKER,
     build_pr_description_context,
@@ -168,6 +176,7 @@ async def run_review(
     publisher: Publisher | None = None,
     codex_fn=None,
     registry: OwnerRegistry | None = None,
+    deadline: JobDeadline | None = None,
 ) -> ReviewRun:
     """Run one review; the progress status is always finalized, including on errors and timeouts."""
     tracking = _ProgressTracking()
@@ -184,6 +193,7 @@ async def run_review(
             codex_fn=codex_fn,
             registry=registry,
             tracking=tracking,
+            deadline=deadline,
         )
     except BaseException as exc:
         crashed = exc
@@ -354,6 +364,7 @@ async def _run_review(
     codex_fn,
     registry: OwnerRegistry | None,
     tracking: _ProgressTracking,
+    deadline: JobDeadline | None = None,
 ) -> ReviewRun:
     from app.services.constants import SKIP_OWNER_CHANGED, SKIP_OWNER_DISABLED, SKIP_OWNER_NOT_CONFIGURED
 
@@ -461,8 +472,12 @@ async def _run_review(
 
     # Build clients from owner context (unless overridden for testing)
     config = config or ctx.config
+    # Deadline is created at ARQ job start (worker) and passed in. Unit tests that
+    # call run_review without a deadline get no wall-clock clamp.
+    budget_notes: list[str] = []
+    runner_backend = (config.codex.runner_backend or "").strip()
     if codex_fn is None:
-        codex_fn = get_review_executor(config.codex.runner_backend).run
+        codex_fn = get_review_executor(runner_backend).run
     if github is None:
         # M2: Only trust comment authors recorded for this owner
         previous_authors = tuple(
@@ -726,7 +741,13 @@ async def _run_review(
                 token=token,
                 head_ref=info.head_ref or None,
                 pr_number=info.number,
+                job_deadline=deadline,
+                runner_backend=runner_backend,
             )
+        except CloneBudgetExhausted as exc:
+            logger.warning("Clone skipped (job budget): %s", exc)
+            progress.event(f"failed: {JOB_BUDGET_EXHAUSTED} (git clone budget)")
+            return await _fail(session, run, started, JOB_BUDGET_EXHAUSTED)
         except GitCloneError as exc:
             code = exc.code
             logger.warning("Clone failed for %s/%s@%s: %s", owner, repo, info.head_sha[:12], exc)
@@ -738,8 +759,32 @@ async def _run_review(
         shutil.copyfile(data_file("schemas", "review_output.json"), schema_copy)
         await _advance_phase(session, tracking, run, PHASE_ANALYZING)
         for attempt in range(2):
+            if deadline is None:
+                call_timeout = config.codex.timeout_seconds
+            else:
+                call_timeout = deadline.clamp_timeout(config.codex.timeout_seconds, runner_backend=runner_backend)
+                if call_timeout is None:
+                    note = JOB_BUDGET_EXHAUSTED if attempt == 0 else "retry skipped: insufficient job budget"
+                    budget_notes.append(note)
+                    progress.event(f"codex attempt {attempt + 1} skipped: {note}")
+                    logger.warning(
+                        "Codex attempt %s skipped: %s remaining=%.1fs",
+                        attempt + 1,
+                        note,
+                        deadline.remaining(),
+                    )
+                    if attempt == 0:
+                        last_error = JOB_BUDGET_EXHAUSTED
+                        last_detail = "insufficient ARQ job budget to start Codex"
+                    break
+            if attempt > 0 and call_timeout < config.codex.timeout_seconds:
+                progress.event(
+                    f"codex attempt {attempt + 1} clamped timeout={call_timeout}s "
+                    f"(configured={config.codex.timeout_seconds}s)"
+                )
             progress.event(
-                f"codex attempt {attempt + 1}/2 model={config.codex.model} effort={config.codex.reasoning_effort}"
+                f"codex attempt {attempt + 1}/2 model={config.codex.model} "
+                f"effort={config.codex.reasoning_effort} timeout={call_timeout}s"
             )
             try:
                 raw_text = await codex_fn(
@@ -748,7 +793,7 @@ async def _run_review(
                     schema_path=schema_copy,
                     output_path=output_path,
                     model=config.codex.model,
-                    timeout_seconds=config.codex.timeout_seconds,
+                    timeout_seconds=call_timeout,
                     openai_api_key=openai_api_key,
                     reasoning_effort=config.codex.reasoning_effort,
                     sandbox=config.codex.sandbox,
@@ -811,22 +856,35 @@ async def _run_review(
                 visibility=visibility,
                 force_public_redaction=publication == "public_fallback",
                 tracking=tracking,
+                notes=budget_notes,
             )
             return await _fail(session, run, started, error_code)
         public_alignment = "unknown" if visibility == "public" else None
         if visibility == "public" and jira_text:
-            public_alignment = await _check_public_alignment(
-                codex_fn=codex_fn,
-                checkout=checkout,
-                info=info,
-                files=files,
-                jira_text=jira_text,
-                config=config,
-                openai_api_key=openai_api_key,
-            )
+            align_timeout = min(120, config.codex.timeout_seconds)
+            if deadline is None:
+                clamped = align_timeout
+            else:
+                clamped = deadline.clamp_timeout(align_timeout, runner_backend=runner_backend)
+            if clamped is None:
+                note = "public alignment skipped: insufficient job budget"
+                budget_notes.append(note)
+                progress.event(note)
+                logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            else:
+                public_alignment = await _check_public_alignment(
+                    codex_fn=codex_fn,
+                    checkout=checkout,
+                    info=info,
+                    files=files,
+                    jira_text=jira_text,
+                    config=config,
+                    openai_api_key=openai_api_key,
+                    timeout_seconds=clamped,
+                )
     finally:
         if checkout is not None:
-            cleanup_checkout(checkout)
+            await cleanup_checkout(checkout)
 
     verified.coverage["files_total"] = context.files_total
     verified.coverage["files_reviewed"] = context.files_reviewed
@@ -871,8 +929,22 @@ async def _run_review(
     )
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
+    # Decide description budget before publishing so the sticky comment can show the note.
+    # Need both a minimal Codex call *and* a clamped clone window (clone + call + cleanup).
+    skip_description = size_decision == "soft"
+    if not skip_description and config.pr_description.enabled and deadline is not None:
+        call_ok = deadline.clamp_timeout(config.codex.timeout_seconds, runner_backend=runner_backend) is not None
+        clone_ok = clone_timeout_for_deadline(deadline, runner_backend=runner_backend) is not None
+        if not call_ok or not clone_ok:
+            note = "PR description skipped: insufficient job budget"
+            if note not in budget_notes:
+                budget_notes.append(note)
+            progress.event(note)
+            logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            skip_description = True
+
     progress.event("publish sticky comment")
-    await _publish(
+    sticky_render = await _publish(
         publisher,
         owner,
         repo,
@@ -894,7 +966,18 @@ async def _run_review(
         unredacted_transitions=transitions,
         jira_in_context=bool(jira_text) and context_visibility == "private",
         tracking=tracking,
+        notes=budget_notes,
     )
+
+    async def _sticky_budget_refresh(notes: list[str]) -> None:
+        sticky_render.notes = list(notes)
+        await publisher.update_sticky(
+            owner=owner,
+            repo=repo,
+            pr_number=pr.number,
+            render=sticky_render,
+        )
+
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
     return await _complete_then_describe(
@@ -905,7 +988,7 @@ async def _run_review(
         config=config,
         prompt_version=context.prompt_version,
         progress=progress,
-        skip_description=size_decision == "soft",
+        skip_description=skip_description,
         description_step=lambda: _run_pr_description_after_review(
             session=session,
             github=github,
@@ -917,6 +1000,10 @@ async def _run_review(
             openai_api_key=openai_api_key,
             pr=pr,
             visibility=visibility,
+            deadline=deadline,
+            budget_notes=budget_notes,
+            runner_backend=runner_backend,
+            sticky_refresh=_sticky_budget_refresh,
         ),
     )
 
@@ -1024,6 +1111,7 @@ async def _check_public_alignment(
     jira_text: str,
     config: AppConfig,
     openai_api_key: str,
+    timeout_seconds: int | None = None,
 ) -> str:
     schema_path = checkout / ".open-pr-review-public-alignment-schema.json"
     output_path = checkout / ".open-pr-review-public-alignment-out.json"
@@ -1046,7 +1134,9 @@ async def _check_public_alignment(
             schema_path=schema_path,
             output_path=output_path,
             model=config.codex.model,
-            timeout_seconds=min(120, config.codex.timeout_seconds),
+            timeout_seconds=(
+                timeout_seconds if timeout_seconds is not None else min(120, config.codex.timeout_seconds)
+            ),
             openai_api_key=openai_api_key,
             reasoning_effort=config.codex.reasoning_effort,
             sandbox="read-only",
@@ -1074,16 +1164,39 @@ async def _run_pr_description_after_review(
     openai_api_key: str,
     pr: PullRequest,
     visibility: Visibility,
+    deadline: JobDeadline | None = None,
+    budget_notes: list[str] | None = None,
+    runner_backend: str | None = None,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
 ) -> None:
+    notes = budget_notes if budget_notes is not None else []
+    backend = runner_backend if runner_backend is not None else (config.codex.runner_backend or "")
+    desc_timeout = config.codex.timeout_seconds
+    if deadline is not None:
+        clamped = deadline.clamp_timeout(desc_timeout, runner_backend=backend)
+        if clamped is None:
+            note = "PR description skipped: insufficient job budget"
+            await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
+            logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            return
+        desc_timeout = clamped
     token = await github.installation_token(info.owner, info.repo)
-    checkout = await clone_head(
-        owner=info.owner,
-        repo=info.repo,
-        sha=info.head_sha,
-        token=token,
-        head_ref=info.head_ref or None,
-        pr_number=info.number,
-    )
+    try:
+        checkout = await clone_head(
+            owner=info.owner,
+            repo=info.repo,
+            sha=info.head_sha,
+            token=token,
+            head_ref=info.head_ref or None,
+            pr_number=info.number,
+            job_deadline=deadline,
+            runner_backend=backend,
+        )
+    except CloneBudgetExhausted as exc:
+        note = "PR description skipped: insufficient job budget"
+        await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
+        logger.warning("%s (%s) remaining=%.1fs", note, exc, deadline.remaining() if deadline else -1)
+        return
     try:
         await _publish_pr_description(
             session=session,
@@ -1097,9 +1210,13 @@ async def _run_pr_description_after_review(
             openai_api_key=openai_api_key,
             pr=pr,
             visibility=visibility,
+            timeout_seconds=desc_timeout,
+            deadline=deadline,
+            budget_notes=notes,
+            sticky_refresh=sticky_refresh,
         )
     finally:
-        cleanup_checkout(checkout)
+        await cleanup_checkout(checkout)
 
 
 async def _publish_pr_description(
@@ -1115,6 +1232,10 @@ async def _publish_pr_description(
     openai_api_key: str,
     pr: PullRequest | None = None,
     visibility: Visibility = "public",
+    timeout_seconds: int | None = None,
+    deadline: JobDeadline | None = None,
+    budget_notes: list[str] | None = None,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
 ) -> None:
     current = await github.get_pull_request(info.owner, info.repo, info.number)
     if current.head_sha != info.head_sha or current.state != "open" or current.draft or current.is_fork:
@@ -1152,15 +1273,27 @@ async def _publish_pr_description(
     language_output_path = checkout / ".open-pr-review-pr-language-out.json"
     if language not in {"en", "ru"}:
         shutil.copyfile(data_file("schemas", "pr_text_language_check.json"), language_schema_path)
+    notes = budget_notes if budget_notes is not None else []
+    call_timeout = timeout_seconds if timeout_seconds is not None else config.codex.timeout_seconds
     payload = None
     for attempt in range(2):
+        if deadline is not None:
+            clamped = deadline.clamp_timeout(call_timeout, runner_backend=(config.codex.runner_backend or ""))
+            if clamped is None:
+                note = "PR description skipped: insufficient job budget"
+                await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
+                logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+                return
+            effective = clamped
+        else:
+            effective = call_timeout
         raw = await codex_fn(
             checkout=checkout,
             prompt=prompt,
             schema_path=schema_path,
             output_path=output_path,
             model=config.codex.model,
-            timeout_seconds=config.codex.timeout_seconds,
+            timeout_seconds=effective,
             openai_api_key=openai_api_key,
             reasoning_effort=config.codex.reasoning_effort,
             sandbox="read-only",
@@ -1178,7 +1311,14 @@ async def _publish_pr_description(
                 output_path=language_output_path,
                 config=config,
                 openai_api_key=openai_api_key,
+                deadline=deadline,
+                budget_notes=notes,
+                sticky_refresh=sticky_refresh,
             )
+            if not matches and any("language check unverified" in n for n in notes):
+                # Budget exhausted mid-verify: do not publish and do not retry.
+                payload = None
+                break
         if matches:
             payload = candidate
             break
@@ -1331,6 +1471,9 @@ async def _verify_generated_language(
     output_path,
     config: AppConfig,
     openai_api_key: str,
+    deadline: JobDeadline | None = None,
+    budget_notes: list[str] | None = None,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
 ) -> bool:
     prose = {name: payload[name] for name in ("summary", "changes", "testing", "notes_risks", "suggested_title")}
     data = strip_boundary_tags(json.dumps(prose, ensure_ascii=False))
@@ -1341,13 +1484,24 @@ async def _verify_generated_language(
         "Set matches=false if the language is different or uncertain.\n\n"
         f"<untrusted_generated_pr_text>\n{data}\n</untrusted_generated_pr_text>"
     )
+    notes = budget_notes if budget_notes is not None else []
+    call_timeout = config.codex.timeout_seconds
+    if deadline is not None:
+        clamped = deadline.clamp_timeout(call_timeout, runner_backend=(config.codex.runner_backend or ""))
+        if clamped is None:
+            # Unverified: do not treat as a language match (would publish unchecked text).
+            note = "PR description skipped: language check unverified (insufficient job budget)"
+            await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
+            logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            return False
+        call_timeout = clamped
     raw = await codex_fn(
         checkout=checkout,
         prompt=prompt,
         schema_path=schema_path,
         output_path=output_path,
         model=config.codex.model,
-        timeout_seconds=config.codex.timeout_seconds,
+        timeout_seconds=call_timeout,
         openai_api_key=openai_api_key,
         reasoning_effort=config.codex.reasoning_effort,
         sandbox="read-only",
@@ -1610,6 +1764,19 @@ async def _persist_snapshot(
     await session.flush()
 
 
+async def _append_post_publish_budget_note(
+    notes: list[str],
+    note: str,
+    *,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
+) -> None:
+    """Append a budget notice and refresh the sticky when it was already published."""
+    if note not in notes:
+        notes.append(note)
+    if sticky_refresh is not None:
+        await sticky_refresh(list(notes))
+
+
 async def _publish(
     publisher: Publisher,
     owner: str,
@@ -1633,7 +1800,8 @@ async def _publish(
     unredacted_transitions: list[FindingTransitionView] | None = None,
     jira_in_context: bool = False,
     tracking: _ProgressTracking | None = None,
-) -> None:
+    notes: list[str] | None = None,
+) -> RenderInput:
     # Every publication path goes through here, so the progress status always shows this phase.
     if tracking is not None and session is not None:
         await _advance_phase(session, tracking, run, PHASE_PUBLISHING)
@@ -1671,6 +1839,7 @@ async def _publish(
         ),
         public_alignment=public_alignment,
         redacted_prior_ids=redacted_prior_ids or set(),
+        notes=list(notes or []),
     )
     has_blockers = any(item.severity in {"P0", "P1"} for item in verified.findings)
     result = await publisher.publish(
@@ -1685,14 +1854,14 @@ async def _publish(
     url = getattr(publisher, "last_comment_url", None)
     run.comment_url = url if isinstance(url, str) else None
     run.has_sensitive_content = sensitive
-    if session is None:
-        return
-    snapshot = (
-        await session.execute(select(TaskSnapshot).where(TaskSnapshot.review_run_id == run.id))
-    ).scalar_one_or_none()
-    if snapshot is not None:
-        snapshot.comment_posted = result.get("jira_comment", False)
-        snapshot.transition_done = result.get("jira_transition", False)
+    if session is not None:
+        snapshot = (
+            await session.execute(select(TaskSnapshot).where(TaskSnapshot.review_run_id == run.id))
+        ).scalar_one_or_none()
+        if snapshot is not None:
+            snapshot.comment_posted = result.get("jira_comment", False)
+            snapshot.transition_done = result.get("jira_transition", False)
+    return render
 
 
 async def _complete(

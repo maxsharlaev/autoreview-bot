@@ -1,15 +1,17 @@
-"""Review execution backends: in-process Codex today, container later."""
+"""Review execution backends: in-process Codex or ephemeral container via launcher."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from app.services.checkout_safety import neutralize_escaping_symlinks
 from app.services.codex_runner import run_codex
 
 IN_PROCESS_BACKEND = "in_process"
 CONTAINER_BACKEND = "container"
-SUPPORTED_RUNNER_BACKENDS = frozenset({IN_PROCESS_BACKEND})
+SUPPORTED_RUNNER_BACKENDS = frozenset({IN_PROCESS_BACKEND, CONTAINER_BACKEND})
 
 
 @runtime_checkable
@@ -51,6 +53,9 @@ class InProcessReviewExecutor:
         approval_policy: str = "never",
         allow_unsandboxed: bool = False,
     ) -> str:
+        # Defense in depth: drop escaping symlinks before in-process Codex sees the tree.
+        # Off the event loop so lease heartbeats / other async work are not starved.
+        await asyncio.to_thread(neutralize_escaping_symlinks, checkout)
         return await run_codex(
             checkout=checkout,
             prompt=prompt,
@@ -72,7 +77,7 @@ def get_review_executor(backend: str) -> ReviewExecutor:
     if name == IN_PROCESS_BACKEND:
         return InProcessReviewExecutor()
     if name == CONTAINER_BACKEND:
-        raise ValueError(
-            "codex.runner_backend='container' is not implemented yet (planned: dedicated launcher service in M2+)"
-        )
-    raise ValueError(f"unknown codex.runner_backend={name!r}; only {IN_PROCESS_BACKEND!r} is supported")
+        from app.services.container_executor import ContainerReviewExecutor
+
+        return ContainerReviewExecutor()
+    raise ValueError(f"unknown codex.runner_backend={name!r}; supported: {IN_PROCESS_BACKEND!r}, {CONTAINER_BACKEND!r}")

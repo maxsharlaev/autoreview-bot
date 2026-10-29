@@ -21,3 +21,10 @@ htmlcov/
 tmp/
 .idea/
 .vscode/
+.e2e-stub/
+
+.tmp-pytest/
+
+
+_lease_b64.txt
+

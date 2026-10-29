@@ -1,0 +1,66 @@
+# Opt-in overlay for codex.runner_backend: container (not loaded by default CI/`docker compose`).
+# Usage:
+#   docker build -f Dockerfile.review -t opr-review:local .
+#   # set LAUNCHER_TOKEN in .env (openssl rand -hex 32), then:
+#   docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build
+# LAUNCHER_TOKEN uses non-required interpolation (${LAUNCHER_TOKEN:-}) so this file can be
+# parsed without the var; the launcher process and ContainerExecutor fail closed if it is empty.
+services:
+  worker:
+    environment:
+      LAUNCHER_URL: http://launcher:8080
+      LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
+      OPR_CHECKOUT_BASE: /var/opr/checkouts
+      OPR_CHECKOUT_VOLUME: opr_checkouts
+      OPR_MAX_REVIEW_TIMEOUT_SECONDS: "${OPR_MAX_REVIEW_TIMEOUT_SECONDS:-600}"
+      OPR_CLONE_TIMEOUT_SECONDS: "${OPR_CLONE_TIMEOUT_SECONDS:-300}"
+      OPR_CHECKOUT_ORPHAN_TTL_SECONDS: "${OPR_CHECKOUT_ORPHAN_TTL_SECONDS:-900}"
+      OPR_LEASE_HEARTBEAT_SECONDS: "${OPR_LEASE_HEARTBEAT_SECONDS:-30}"
+    volumes:
+      - opr_checkouts:/var/opr/checkouts
+    depends_on:
+      launcher:
+        condition: service_started
+
+  launcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.launcher
+    # No env_file: .env would inject worker/DB/model secrets into the socket holder.
+    # Compose still reads host/.env for ${LAUNCHER_TOKEN:-} interpolation only.
+    environment:
+      LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
+      OPR_CHECKOUT_BASE: /var/opr/checkouts
+      OPR_CHECKOUT_VOLUME: opr_checkouts
+      OPR_REVIEW_IMAGE: opr-review:local
+      OPR_REVIEW_NETWORK: autoreview_review_egress
+      LAUNCHER_APPARMOR_PROFILE: "${LAUNCHER_APPARMOR_PROFILE:-unconfined}"
+      LAUNCHER_CANCEL_WAIT_SECONDS: "${LAUNCHER_CANCEL_WAIT_SECONDS:-3}"
+      OPR_MAX_REVIEW_TIMEOUT_SECONDS: "${OPR_MAX_REVIEW_TIMEOUT_SECONDS:-600}"
+      OPR_CLONE_TIMEOUT_SECONDS: "${OPR_CLONE_TIMEOUT_SECONDS:-300}"
+      OPR_CHECKOUT_ORPHAN_TTL_SECONDS: "${OPR_CHECKOUT_ORPHAN_TTL_SECONDS:-900}"
+      OPR_LEASE_HEARTBEAT_SECONDS: "${OPR_LEASE_HEARTBEAT_SECONDS:-30}"
+      OPR_REVIEW_ORPHAN_TTL_SECONDS: "${OPR_REVIEW_ORPHAN_TTL_SECONDS:-7200}"
+      OPR_REVIEW_REAPER_INTERVAL_SECONDS: "${OPR_REVIEW_REAPER_INTERVAL_SECONDS:-300}"
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      # High trust: this is the only service that mounts the Docker socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - opr_checkouts:/var/opr/checkouts
+    expose:
+      - "8080"
+    networks:
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  opr_checkouts:
+    name: opr_checkouts
+
+networks:
+  review_egress:
+    name: autoreview_review_egress
+    # MVP: internet-capable for the model API; not attached to postgres/redis/api.
+    # Strict egress allowlist arrives with the M3 model-API proxy.

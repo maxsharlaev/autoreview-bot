@@ -12,6 +12,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - internal
 
   redis:
     image: redis:7-alpine
@@ -20,6 +22,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - internal
 
   migrate:
     build:
@@ -36,6 +40,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - internal
 
   api:
     build:
@@ -58,6 +64,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks:
+      - internal
 
   worker:
     build:
@@ -89,6 +97,14 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks:
+      - internal
 
 volumes:
   postgres_data:
+
+networks:
+  default:
+    name: autoreview_default
+  internal:
+    name: autoreview_internal
