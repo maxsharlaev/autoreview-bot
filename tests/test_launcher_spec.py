@@ -12,6 +12,7 @@ from app.launcher.spec import (
     build_host_config,
     load_review_seccomp_profile,
     review_security_opt,
+    validate_apparmor_profile,
 )
 
 REPO_SECCOMP = Path(__file__).resolve().parents[1] / "docker" / "review" / "seccomp" / "review-bwrap.json"
@@ -44,6 +45,7 @@ def test_host_config_drops_caps_ro_checkout_no_socket(tmp_path: Path) -> None:
     assert checkout["ReadOnly"] is True
     assert checkout["VolumeOptions"]["Subpath"] == "job1/repo"
     assert not any("docker.sock" in str(m).lower() for m in mounts)
+    assert any(s.startswith("apparmor=") for s in host["SecurityOpt"])
     assert_safe_host_config(host)
 
 
@@ -57,7 +59,7 @@ def test_security_opt_uses_embedded_seccomp_never_unconfined(tmp_path: Path) -> 
     )
     joined = " ".join(host["SecurityOpt"]).lower()
     assert "seccomp=unconfined" not in joined
-    assert "apparmor=unconfined" not in joined
+    assert "apparmor=unconfined" in joined
     seccomp = next(s for s in host["SecurityOpt"] if s.startswith("seccomp="))
     body = json.loads(seccomp.removeprefix("seccomp="))
     assert "syscalls" in body
@@ -182,3 +184,39 @@ def test_container_config_labels_and_env(tmp_path: Path) -> None:
     assert cfg["Labels"]["opr.job_id"] == "abc"
     assert "CODEX_API_KEY=sk-test" in cfg["Env"]
     assert cfg["User"] == "1000:1000"
+
+
+def test_validate_apparmor_profile_accepts_unconfined_and_names() -> None:
+    assert validate_apparmor_profile("unconfined") == "unconfined"
+    assert validate_apparmor_profile("docker-default") == "docker-default"
+    assert validate_apparmor_profile("opr-review") == "opr-review"
+
+
+def test_validate_apparmor_profile_rejects_unsafe() -> None:
+    import pytest
+
+    for bad in ["", "../etc", "/etc/apparmor.d/usr.bin.foo", "has space", "weird;rm", "a/b"]:
+        with pytest.raises(RuntimeError, match="LAUNCHER_APPARMOR_PROFILE"):
+            validate_apparmor_profile(bad)
+
+
+def test_security_opt_honors_launcher_apparmor_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_APPARMOR_PROFILE", "opr-review-bwrap")
+    opts = review_security_opt()
+    assert "apparmor=opr-review-bwrap" in opts
+    assert any(s.startswith("seccomp={") for s in opts)
+
+
+def test_assert_safe_requires_apparmor_opt() -> None:
+    host = {
+        "Mounts": _ok_mounts(),
+        "CapDrop": ["ALL"],
+        "Privileged": False,
+        "SecurityOpt": ["no-new-privileges:true", "seccomp={}"],
+    }
+    # Missing apparmor=
+    # Need valid seccomp body for earlier checks - use review_security_opt without apparmor by crafting
+    opts = [s for s in review_security_opt() if not s.startswith("apparmor=")]
+    host["SecurityOpt"] = opts
+    with pytest.raises(RuntimeError, match="apparmor="):
+        assert_safe_host_config(host)

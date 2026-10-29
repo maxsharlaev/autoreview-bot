@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **ARB-27-005:** review containers set `apparmor=` from `LAUNCHER_APPARMOR_PROFILE` (default `unconfined`) so bubblewrap works on AppArmor Linux hosts; dedicated profile remains planned.
 - **ARB-27-004 / ARB-27-003:** launcher no longer loads `env_file: .env` (only `LAUNCHER_TOKEN` + explicit non-secret config); Prometheus joins `internal` as well as `default` so it can scrape api/worker.
 - **ARB-27-002 / ARB-27-001:** checkout staging never dereferences escaping symlinks (`safe_copytree` / neutralize); launcher mounts `opr_checkouts` via volume Subpath (Engine ≥ 26, fail-closed at startup) instead of launcher-local binds.
 - Narrow seccomp profile for review containers (`docker/review/seccomp/review-bwrap.json`) instead of `seccomp=unconfined`; `scripts/stack.ps1` / `scripts/stack.sh` for compose overlays.

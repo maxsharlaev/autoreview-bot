@@ -94,6 +94,7 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `OPR_CHECKOUT_VOLUME` | `opr_checkouts` | launcher | Named Docker volume for review `Type=volume` mounts with `VolumeOptions.Subpath` (not launcher-local binds; requires Engine ≥ 26 / API ≥ 1.45). |
 | `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Review image tag built from `Dockerfile.review`. |
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker network attached to review containers (not postgres/redis/api). |
+| `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor profile for review containers (`apparmor=<value>`). Default `unconfined` (same posture as the worker) so bubblewrap mounts work on AppArmor Linux hosts; set a dedicated profile name when one is installed. |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper removes labeled review containers older than this. |
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | How often the reaper scans for orphan review containers. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |

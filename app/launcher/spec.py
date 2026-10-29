@@ -7,6 +7,7 @@ Any change to this module is a security-sensitive review.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,14 +46,49 @@ def load_review_seccomp_profile(path: Path | None = None) -> str:
     return __import__("json").dumps(data, separators=(",", ":"))
 
 
-def review_security_opt(*, seccomp_json: str | None = None) -> list[str]:
-    """Hard-coded security options for review containers (never unconfined)."""
+DEFAULT_APPARMOR_PROFILE = "unconfined"
+# Docker AppArmor profile name: "unconfined" or a profile name (not a host path).
+_APPARMOR_PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,126}$")
+
+
+def validate_apparmor_profile(value: str) -> str:
+    """Return a safe AppArmor profile name or raise (fail closed)."""
+    name = (value or "").strip()
+    if not name:
+        raise RuntimeError("LAUNCHER_APPARMOR_PROFILE must not be empty")
+    if name == "unconfined":
+        return name
+    if "/" in name or chr(92) in name or ".." in name or name.startswith("."):
+        raise RuntimeError(f"invalid LAUNCHER_APPARMOR_PROFILE: {value!r}")
+    if not _APPARMOR_PROFILE_RE.fullmatch(name):
+        raise RuntimeError(f"invalid LAUNCHER_APPARMOR_PROFILE: {value!r}")
+    return name
+
+
+def review_apparmor_profile() -> str:
+    """Operator-trusted AppArmor profile for review containers (never from the HTTP request)."""
+    raw = os.environ.get("LAUNCHER_APPARMOR_PROFILE", DEFAULT_APPARMOR_PROFILE)
+    return validate_apparmor_profile(raw if raw is not None else DEFAULT_APPARMOR_PROFILE)
+
+
+def review_security_opt(*, seccomp_json: str | None = None, apparmor_profile: str | None = None) -> list[str]:
+    """Hard-coded security options for review containers.
+
+    Seccomp must never be unconfined (narrow baked profile). AppArmor defaults to
+    ``unconfined`` so bubblewrap can mount on Linux hosts that enforce Docker's
+    default AppArmor profile; operators may set ``LAUNCHER_APPARMOR_PROFILE`` to a
+    dedicated profile name when one exists.
+    """
     profile = seccomp_json if seccomp_json is not None else load_review_seccomp_profile()
     if "unconfined" in profile.lower():
         raise RuntimeError("review seccomp profile must not be unconfined")
+    apparmor = (
+        validate_apparmor_profile(apparmor_profile) if apparmor_profile is not None else review_apparmor_profile()
+    )
     return [
         "no-new-privileges:true",
         f"seccomp={profile}",
+        f"apparmor={apparmor}",
     ]
 
 
@@ -230,8 +266,6 @@ def assert_safe_host_config(host_config: dict[str, Any]) -> None:
         raise RuntimeError("no-new-privileges required")
     if any("seccomp=unconfined" in s.lower() for s in security):
         raise RuntimeError("seccomp=unconfined is forbidden for review containers")
-    if any("apparmor=unconfined" in s.lower() for s in security):
-        raise RuntimeError("apparmor=unconfined is forbidden for review containers")
     seccomp_opts = [s for s in security if s.startswith("seccomp=")]
     if len(seccomp_opts) != 1:
         raise RuntimeError("exactly one seccomp= SecurityOpt required")
@@ -240,6 +274,10 @@ def assert_safe_host_config(host_config: dict[str, Any]) -> None:
         raise RuntimeError("seccomp SecurityOpt must embed the profile JSON body")
     if '"syscalls"' not in body and "'syscalls'" not in body:
         raise RuntimeError("seccomp profile JSON missing syscalls")
+    apparmor_opts = [s for s in security if s.startswith("apparmor=")]
+    if len(apparmor_opts) != 1:
+        raise RuntimeError("exactly one apparmor= SecurityOpt required")
+    validate_apparmor_profile(apparmor_opts[0].removeprefix("apparmor="))
 
 
 def _parse_memory_bytes(value: str) -> int:
