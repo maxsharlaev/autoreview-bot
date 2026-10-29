@@ -22,3 +22,6 @@ tmp/
 .idea/
 .vscode/
 .e2e-stub/
+
+.tmp-pytest/
+

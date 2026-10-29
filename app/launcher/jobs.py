@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from app.launcher.docker_api import DockerApiError, DockerClient
+from app.launcher.job_lifecycle import lifecycle
 from app.launcher.paths import CheckoutPathError, job_work_dir, resolve_checkout, validate_job_id
 from app.launcher.spec import (
     assert_safe_host_config,
@@ -99,66 +100,74 @@ def run_review_job(
     if not (model_api_key or "").strip():
         raise LauncherJobError("CODEX_SANDBOX", "model api key missing")
     try:
-        checkout, prompt, schema, work, out_file = stage_paths(job_id, checkout_ref)
-    except CheckoutPathError as exc:
-        raise LauncherJobError("CODEX_SANDBOX", str(exc)) from exc
-
-    job_dir = prompt.parent
-    meta = read_job_meta(job_dir)
-    model = str(meta.get("model") or os.environ.get("OPR_DEFAULT_MODEL") or "gpt-5.6-sol")
-    timeout_seconds = int(meta.get("timeout_seconds") or 600)
-    max_timeout = max_review_timeout_seconds()
-    if timeout_seconds > max_timeout:
-        raise LauncherJobError(
-            "CODEX_SANDBOX",
-            f"timeout_seconds ({timeout_seconds}) exceeds OPR_MAX_REVIEW_TIMEOUT_SECONDS ({max_timeout})",
-        )
-    try:
-        validate_checkout_orphan_ttl(timeout_seconds=timeout_seconds)
+        lifecycle.accept(job_id)
     except RuntimeError as exc:
         raise LauncherJobError("CODEX_SANDBOX", str(exc)) from exc
-    reasoning_effort = str(meta.get("reasoning_effort") or "medium")
-    sandbox = str(meta.get("sandbox") or "read-only")
-    approval_policy = str(meta.get("approval_policy") or "never")
-    allow_unsandboxed = bool(meta.get("allow_unsandboxed") or False)
 
-    base = checkout_base()
-    host_config = build_host_config(
-        volume_name=checkout_volume_name(),
-        checkout_subpath=_volume_subpath(base, checkout),
-        work_subpath=_volume_subpath(base, work),
-        prompt_subpath=_volume_subpath(base, prompt),
-        schema_subpath=_volume_subpath(base, schema),
-    )
-    assert_safe_host_config(host_config)
-    config = build_container_config(
-        job_id=job_id,
-        host_config=host_config,
-        model=model,
-        timeout_seconds=timeout_seconds,
-        reasoning_effort=reasoning_effort,
-        sandbox=sandbox,
-        approval_policy=approval_policy,
-        allow_unsandboxed=allow_unsandboxed,
-        model_api_key=model_api_key.strip(),
-    )
-    # Defense in depth: never put docker.sock into Env or Binds after build.
-    assert_safe_host_config(config["HostConfig"])
-
-    name = container_name(job_id)
+    cancelled = False
+    container_id = ""
     owns = client is None
     docker = client or DockerClient()
-    container_id = ""
     started = time.monotonic()
     try:
         try:
+            checkout, prompt, schema, work, out_file = stage_paths(job_id, checkout_ref)
+        except CheckoutPathError as exc:
+            raise LauncherJobError("CODEX_SANDBOX", str(exc)) from exc
+
+        job_dir = prompt.parent
+        meta = read_job_meta(job_dir)
+        model = str(meta.get("model") or os.environ.get("OPR_DEFAULT_MODEL") or "gpt-5.6-sol")
+        timeout_seconds = int(meta.get("timeout_seconds") or 600)
+        max_timeout = max_review_timeout_seconds()
+        if timeout_seconds > max_timeout:
+            raise LauncherJobError(
+                "CODEX_SANDBOX",
+                f"timeout_seconds ({timeout_seconds}) exceeds OPR_MAX_REVIEW_TIMEOUT_SECONDS ({max_timeout})",
+            )
+        try:
+            validate_checkout_orphan_ttl(timeout_seconds=timeout_seconds)
+        except RuntimeError as exc:
+            raise LauncherJobError("CODEX_SANDBOX", str(exc)) from exc
+        reasoning_effort = str(meta.get("reasoning_effort") or "medium")
+        sandbox = str(meta.get("sandbox") or "read-only")
+        approval_policy = str(meta.get("approval_policy") or "never")
+        allow_unsandboxed = bool(meta.get("allow_unsandboxed") or False)
+
+        base = checkout_base()
+        host_config = build_host_config(
+            volume_name=checkout_volume_name(),
+            checkout_subpath=_volume_subpath(base, checkout),
+            work_subpath=_volume_subpath(base, work),
+            prompt_subpath=_volume_subpath(base, prompt),
+            schema_subpath=_volume_subpath(base, schema),
+        )
+        assert_safe_host_config(host_config)
+        config = build_container_config(
+            job_id=job_id,
+            host_config=host_config,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            reasoning_effort=reasoning_effort,
+            sandbox=sandbox,
+            approval_policy=approval_policy,
+            allow_unsandboxed=allow_unsandboxed,
+            model_api_key=model_api_key.strip(),
+        )
+        assert_safe_host_config(config["HostConfig"])
+
+        name = container_name(job_id)
+        try:
+            lifecycle.check_not_cancelled(job_id)
+            lifecycle.mark_creating(job_id)
             container_id = docker.create_container(name, config)
+            lifecycle.check_not_cancelled(job_id)
             docker.start_container(container_id)
+            lifecycle.mark_running(job_id, container_id)
             status_code = docker.wait_container(
                 container_id, timeout_seconds=timeout_seconds + CONTAINER_WAIT_GRACE_SECONDS
             )
         except DockerApiError as exc:
-            # Cancel endpoint may force-remove the container while we wait.
             body = (getattr(exc, "body", None) or str(exc)).lower()
             code = getattr(exc, "status_code", None)
             if code == 404 or "no such container" in body or "not found" in body:
@@ -167,6 +176,12 @@ def run_review_job(
                     "review container removed during wait (cancelled or reaped)",
                 ) from exc
             raise LauncherJobError("CODEX_SANDBOX", f"docker error: {exc}") from exc
+        except RuntimeError as exc:
+            # Lifecycle cancel signals (DockerApiError is also a RuntimeError — handled above).
+            cancelled = "cancelled" in str(exc).lower()
+            if cancelled:
+                raise LauncherJobError("CODEX_SANDBOX", f"review cancelled: {exc}") from exc
+            raise LauncherJobError("CODEX_SANDBOX", str(exc)) from exc
 
         logs = ""
         try:
@@ -176,7 +191,6 @@ def run_review_job(
 
         if status_code != 0:
             snippet = logs.strip().splitlines()[-1] if logs.strip() else f"exit {status_code}"
-            # Sandbox probe failures use entrypoint exit 43.
             if status_code == 43:
                 raise LauncherJobError(
                     "CODEX_SANDBOX",
@@ -202,19 +216,24 @@ def run_review_job(
                 docker.remove_container(container_id, force=True)
             except DockerApiError as exc:
                 logger.warning("failed to remove review container %s: %s", container_id[:12], exc)
+        lifecycle.mark_finished(job_id, cancelled=cancelled or lifecycle.is_cancelled(job_id))
         if owns:
             docker.close()
 
 
 def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dict:
-    """Force-remove review containers labeled with ``job_id``. Idempotent.
+    """Force-remove review containers for ``job_id`` and coordinate with in-flight launches.
 
-    Returns ``{"job_id", "removed"}`` where ``removed`` is the number of
-    containers successfully deleted (0 if none were present).
+    Marks the job cancelled (tombstone if unknown). Waits briefly for an in-flight
+    launch to finish, then force-removes any remaining containers. ``confirmed`` is
+    True only when no container remains and no launch is active.
     """
     from app.launcher.paths import validate_uuid_job_id
 
     jid = validate_uuid_job_id(job_id)
+    lifecycle.request_cancel(jid)
+    lifecycle.wait_until_launch_idle(jid)
+
     owns = client is None
     docker = client or DockerClient()
     removed = 0
@@ -236,7 +255,14 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
                 removed += 1
             except DockerApiError as exc:
                 logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
-        return {"job_id": jid, "removed": removed}
+
+        # Re-check after removals.
+        try:
+            leftover = docker.list_containers_for_job(jid)
+        except DockerApiError:
+            leftover = ["?"]
+        confirmed = (not leftover) and (not lifecycle.launch_active(jid))
+        return {"job_id": jid, "removed": removed, "confirmed": confirmed}
     finally:
         if owns:
             docker.close()

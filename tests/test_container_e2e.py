@@ -181,6 +181,7 @@ async def test_e2e_cancel_job_endpoint(e2e_stack) -> None:
         r = await client.delete(f"{e2e_stack['url']}/v1/jobs/{job_id}", headers=headers)
         assert r.status_code == 200
         assert r.json()["removed"] == 0
+        assert r.json().get("confirmed") is True
         # Auth required
         r401 = await client.delete(f"{e2e_stack['url']}/v1/jobs/{job_id}")
         assert r401.status_code == 401

@@ -11,7 +11,7 @@ DOCKER_WAIT_CLIENT_GRACE_SECONDS = 60
 # Staging, create/start/logs/remove, and worker<->launcher network slack.
 LAUNCHER_HTTP_MARGIN_SECONDS = 30
 # Clone may finish before review starts; orphan TTL must cover clone + review.
-# Used for TTL bounds only (git clone itself is not hard-capped here).
+# Also the hard cap enforced by git_clone.clone_head (OPR_CLONE_TIMEOUT_SECONDS).
 DEFAULT_CLONE_BUDGET_SECONDS = 300
 
 # Matches CodexYaml.timeout_seconds / job.json default when unset.

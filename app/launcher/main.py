@@ -81,6 +81,7 @@ def healthz() -> dict[str, str]:
 class CancelJobResponse(BaseModel):
     job_id: str
     removed: int
+    confirmed: bool
 
 
 @app.delete("/v1/jobs/{job_id}", response_model=CancelJobResponse, dependencies=[Depends(require_launcher_auth)])
@@ -101,7 +102,11 @@ def cancel_job(job_id: str) -> CancelJobResponse:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
-    return CancelJobResponse(job_id=result["job_id"], removed=int(result["removed"]))
+    return CancelJobResponse(
+        job_id=result["job_id"],
+        removed=int(result["removed"]),
+        confirmed=bool(result.get("confirmed", False)),
+    )
 
 
 @app.post("/v1/reviews", response_model=RunReviewResponse, dependencies=[Depends(require_launcher_auth)])

@@ -159,18 +159,23 @@ class ContainerReviewExecutor:
         finally:
             if owns:
                 await client.aclose()
-        # 200/204 = removed or already absent; 404 on bad path should not happen with UUID.
-        if response.status_code in (200, 204):
-            return True
         if response.status_code == 404:
-            return True
-        logger.warning(
-            "launcher cancel HTTP %s for job_id=%s body=%s",
-            response.status_code,
-            job_id,
-            response.text[:200],
-        )
-        return False
+            # Unknown to HTTP layer but UUID path should not 404; treat as unconfirmed.
+            return False
+        if response.status_code not in (200, 204):
+            logger.warning(
+                "launcher cancel HTTP %s for job_id=%s body=%s",
+                response.status_code,
+                job_id,
+                response.text[:200],
+            )
+            return False
+        try:
+            data = response.json()
+        except ValueError:
+            return False
+        # Staging may be removed only when the launcher confirms nothing remains.
+        return bool(isinstance(data, dict) and data.get("confirmed") is True)
 
     async def _call_launcher(self, *, job_id: str, checkout_ref: str, model_api_key: str, timeout_seconds: int) -> str:
         headers = {

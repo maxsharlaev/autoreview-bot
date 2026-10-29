@@ -29,28 +29,33 @@ def test_cancel_review_job_idempotent_when_empty() -> None:
             return None
 
     result = cancel_review_job(job_id="b" * 32, client=FakeDocker())  # type: ignore[arg-type]
-    assert result == {"job_id": "b" * 32, "removed": 0}
+    assert result["job_id"] == "b" * 32
+    assert result["removed"] == 0
+    assert result["confirmed"] is True
 
 
 def test_cancel_review_job_kills_and_removes() -> None:
     killed: list[str] = []
     removed: list[str] = []
+    alive = [{"Id": "cidabcdef1234", "Labels": {"opr.job_id": "c" * 32}}]
 
     class FakeDocker:
         def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
-            return [{"Id": "cidabcdef1234", "Labels": {"opr.job_id": job_id}}]
+            return list(alive)
 
         def kill_container(self, cid: str) -> None:
             killed.append(cid)
 
         def remove_container(self, cid: str, *, force: bool = True) -> None:
             removed.append(cid)
+            alive.clear()
 
         def close(self) -> None:
             return None
 
     result = cancel_review_job(job_id="c" * 32, client=FakeDocker())  # type: ignore[arg-type]
     assert result["removed"] == 1
+    assert result["confirmed"] is True
     assert killed == ["cidabcdef1234"]
     assert removed == ["cidabcdef1234"]
 
@@ -89,27 +94,20 @@ def test_cancel_endpoint_rejects_non_uuid(cancel_client) -> None:
 
 def test_cancel_endpoint_idempotent(cancel_client, monkeypatch: pytest.MonkeyPatch) -> None:
     client, token = cancel_client
-    from app.launcher import main as launcher_main
-
     monkeypatch.setattr(
-        launcher_main,
-        "cancel_review_job",
-        lambda **kwargs: {"job_id": kwargs["job_id"], "removed": 0},
-    )
-    # cancel_job imports cancel_review_job at call time from jobs - patch jobs module
-    monkeypatch.setattr(
-        "app.launcher.jobs.cancel_review_job",
-        lambda **kwargs: {"job_id": kwargs["job_id"], "removed": 0},
+        "app.launcher.main.cancel_review_job",
+        lambda **kwargs: {"job_id": kwargs["job_id"], "removed": 0, "confirmed": True},
     )
     r = client.delete(
         f"/v1/jobs/{'e' * 32}",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert r.status_code == 200
-    assert r.json() == {"job_id": "e" * 32, "removed": 0}
+    assert r.json() == {"job_id": "e" * 32, "removed": 0, "confirmed": True}
     r2 = client.delete(
         f"/v1/jobs/{'e' * 32}",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert r2.status_code == 200
     assert r2.json()["removed"] == 0
+    assert r2.json()["confirmed"] is True

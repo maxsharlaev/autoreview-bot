@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
+import signal
 import stat
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
+from app.launcher.timeouts import clone_budget_seconds
 from app.services.checkout_safety import neutralize_escaping_symlinks
 from app.services.constants import GIT_FORBIDDEN, GIT_REF_NOT_FOUND
 from app.services.constants import GITHUB_UNAVAILABLE as GIT_CLONE_FAILED
@@ -114,19 +118,60 @@ def _git_env(token: str, askpass: Path) -> dict[str, str]:
     return env
 
 
-async def _run(args: list[str], *, cwd: Path, env: dict[str, str], token: str) -> None:
-    process = await asyncio.create_subprocess_exec(
-        *args,
-        cwd=str(cwd),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+def _kill_git_process(process: asyncio.subprocess.Process) -> None:
+    """Kill the git subprocess and its process group when possible."""
     try:
-        _stdout, stderr = await process.communicate()
-    except asyncio.CancelledError:
+        if process.returncode is not None:
+            return
+        if hasattr(os, "killpg") and process.pid:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         process.kill()
-        await process.wait()
+    except ProcessLookupError:
+        return
+
+
+async def _run(
+    args: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    token: str,
+    timeout_seconds: float | None = None,
+) -> None:
+    # start_new_session so we can kill the whole process group on timeout (POSIX).
+    kwargs: dict = {
+        "cwd": str(cwd),
+        "env": env,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    process = await asyncio.create_subprocess_exec(*args, **kwargs)
+    try:
+        if timeout_seconds is None:
+            _stdout, stderr = await process.communicate()
+        else:
+            try:
+                _stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=max(0.1, float(timeout_seconds))
+                )
+            except TimeoutError as exc:
+                _kill_git_process(process)
+                with contextlib.suppress(Exception):
+                    await process.wait()
+                raise GitCloneError(
+                    f"git timed out after {int(timeout_seconds)}s: {' '.join(args[:4])}",
+                    code=GIT_CLONE_FAILED,
+                ) from exc
+    except asyncio.CancelledError:
+        _kill_git_process(process)
+        with contextlib.suppress(Exception):
+            await process.wait()
         raise
     if process.returncode != 0:
         raw = stderr.decode("utf-8", errors="replace")[:500]
@@ -173,15 +218,27 @@ async def clone_head(
     git = ["git", "-c", "credential.helper="]
     specs = _fetch_specs(sha, pr_number=pr_number, head_ref=head_ref)
     logger.info("git fetch %s/%s specs=%s", owner, repo, specs)
+    clone_timeout = float(clone_budget_seconds())
+    deadline = time.monotonic() + clone_timeout
+
+    async def _run_budgeted(args: list[str]) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GitCloneError(
+                f"git clone timed out after {int(clone_timeout)}s",
+                code=GIT_CLONE_FAILED,
+            )
+        await _run(args, cwd=dest, env=env, token=token, timeout_seconds=remaining)
+
     last_error: GitCloneError | None = None
     try:
-        await _run([*git, "init", "-q"], cwd=dest, env=env, token=token)
-        await _run([*git, "remote", "add", "origin", origin], cwd=dest, env=env, token=token)
+        await _run_budgeted([*git, "init", "-q"])
+        await _run_budgeted([*git, "remote", "add", "origin", origin])
         fetched = False
         for spec in specs:
             try:
                 logger.info("git fetch origin %s", spec)
-                await _run([*git, "fetch", "--depth", "1", "origin", spec], cwd=dest, env=env, token=token)
+                await _run_budgeted([*git, "fetch", "--depth", "1", "origin", spec])
                 fetched = True
                 break
             except GitCloneError as exc:
@@ -191,10 +248,10 @@ async def clone_head(
             assert last_error is not None
             raise last_error
         try:
-            await _run([*git, "checkout", "-q", sha], cwd=dest, env=env, token=token)
+            await _run_budgeted([*git, "checkout", "-q", sha])
         except GitCloneError:
-            await _run([*git, "checkout", "-q", "FETCH_HEAD"], cwd=dest, env=env, token=token)
-        await _run([*git, "remote", "set-url", "origin", origin], cwd=dest, env=env, token=token)
+            await _run_budgeted([*git, "checkout", "-q", "FETCH_HEAD"])
+        await _run_budgeted([*git, "remote", "set-url", "origin", origin])
     except BaseException:
         shutil.rmtree(dest, ignore_errors=True)
         raise
@@ -204,6 +261,11 @@ async def clone_head(
     removed = neutralize_escaping_symlinks(dest)
     if removed:
         logger.info("neutralized %s escaping symlink(s) in checkout", removed)
+    # Refresh mtime so orphan TTL covers the post-clone review window truthfully.
+    try:
+        os.utime(dest, None)
+    except OSError:
+        pass
     logger.info("git checkout ready %s/%s@%s", owner, repo, sha[:12])
     return dest
 

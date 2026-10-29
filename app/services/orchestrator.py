@@ -469,8 +469,9 @@ async def _run_review(
     # Deadline is created at ARQ job start (worker) and passed in. Unit tests that
     # call run_review without a deadline get no wall-clock clamp.
     budget_notes: list[str] = []
+    runner_backend = (config.codex.runner_backend or "").strip()
     if codex_fn is None:
-        codex_fn = get_review_executor(config.codex.runner_backend).run
+        codex_fn = get_review_executor(runner_backend).run
     if github is None:
         # M2: Only trust comment authors recorded for this owner
         previous_authors = tuple(
@@ -749,7 +750,7 @@ async def _run_review(
             if deadline is None:
                 call_timeout = config.codex.timeout_seconds
             else:
-                call_timeout = deadline.clamp_timeout(config.codex.timeout_seconds)
+                call_timeout = deadline.clamp_timeout(config.codex.timeout_seconds, runner_backend=runner_backend)
                 if call_timeout is None:
                     note = JOB_BUDGET_EXHAUSTED if attempt == 0 else "retry skipped: insufficient job budget"
                     budget_notes.append(note)
@@ -852,7 +853,7 @@ async def _run_review(
             if deadline is None:
                 clamped = align_timeout
             else:
-                clamped = deadline.clamp_timeout(align_timeout)
+                clamped = deadline.clamp_timeout(align_timeout, runner_backend=runner_backend)
             if clamped is None:
                 note = "public alignment skipped: insufficient job budget"
                 budget_notes.append(note)
@@ -916,6 +917,21 @@ async def _run_review(
     )
     progress.event(f"store findings={len(verified.findings)} transitions={len(transitions)}")
     await _persist_snapshot(session, run, issue_key, jira_status, jira_warning)
+    # Decide description budget before publishing so the sticky comment can show the note.
+    skip_description = size_decision == "soft"
+    if (
+        not skip_description
+        and config.pr_description.enabled
+        and deadline is not None
+        and deadline.clamp_timeout(config.codex.timeout_seconds, runner_backend=runner_backend) is None
+    ):
+        note = "PR description skipped: insufficient job budget"
+        if note not in budget_notes:
+            budget_notes.append(note)
+        progress.event(note)
+        logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+        skip_description = True
+
     progress.event("publish sticky comment")
     await _publish(
         publisher,
@@ -951,7 +967,7 @@ async def _run_review(
         config=config,
         prompt_version=context.prompt_version,
         progress=progress,
-        skip_description=size_decision == "soft",
+        skip_description=skip_description,
         description_step=lambda: _run_pr_description_after_review(
             session=session,
             github=github,
@@ -965,6 +981,7 @@ async def _run_review(
             visibility=visibility,
             deadline=deadline,
             budget_notes=budget_notes,
+            runner_backend=runner_backend,
         ),
     )
 
@@ -1127,11 +1144,13 @@ async def _run_pr_description_after_review(
     visibility: Visibility,
     deadline: JobDeadline | None = None,
     budget_notes: list[str] | None = None,
+    runner_backend: str | None = None,
 ) -> None:
     notes = budget_notes if budget_notes is not None else []
+    backend = runner_backend if runner_backend is not None else (config.codex.runner_backend or "")
     desc_timeout = config.codex.timeout_seconds
     if deadline is not None:
-        clamped = deadline.clamp_timeout(desc_timeout)
+        clamped = deadline.clamp_timeout(desc_timeout, runner_backend=backend)
         if clamped is None:
             note = "PR description skipped: insufficient job budget"
             notes.append(note)
@@ -1226,7 +1245,7 @@ async def _publish_pr_description(
     payload = None
     for attempt in range(2):
         if deadline is not None:
-            clamped = deadline.clamp_timeout(call_timeout)
+            clamped = deadline.clamp_timeout(call_timeout, runner_backend=(config.codex.runner_backend or ""))
             if clamped is None:
                 note = "PR description skipped: insufficient job budget"
                 notes.append(note)
@@ -1429,7 +1448,7 @@ async def _verify_generated_language(
     notes = budget_notes if budget_notes is not None else []
     call_timeout = config.codex.timeout_seconds
     if deadline is not None:
-        clamped = deadline.clamp_timeout(call_timeout)
+        clamped = deadline.clamp_timeout(call_timeout, runner_backend=(config.codex.runner_backend or ""))
         if clamped is None:
             note = "PR language check skipped: insufficient job budget"
             notes.append(note)

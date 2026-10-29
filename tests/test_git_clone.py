@@ -46,7 +46,7 @@ def test_fetch_specs_prefer_sha_and_pull_ref() -> None:
 async def test_clone_head_uses_strict_ai_review_uuid_dirname(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
 
-    async def fake_run(args, *, cwd, env, token):  # noqa: ANN001
+    async def fake_run(args, *, cwd, env, token, timeout_seconds=None):  # noqa: ANN001
         return None
 
     monkeypatch.setattr("app.services.git_clone._run", fake_run)
@@ -67,3 +67,74 @@ async def test_clone_head_uses_strict_ai_review_uuid_dirname(tmp_path: Path, mon
     assert len(suffix) == 32
     assert all(c in "0123456789abcdef" for c in suffix)
     assert dest.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_run_kills_stalled_git_on_timeout(tmp_path: Path) -> None:
+    """ARB-27-013: _run kills the process (group) when timeout_seconds elapses."""
+    import sys
+    import time
+
+    from app.services.git_clone import GIT_CLONE_FAILED, GitCloneError, _run
+
+    started = time.monotonic()
+    with pytest.raises(GitCloneError) as excinfo:
+        await _run(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=tmp_path,
+            env={},
+            token="tok",
+            timeout_seconds=0.5,
+        )
+    elapsed = time.monotonic() - started
+    assert excinfo.value.code == GIT_CLONE_FAILED
+    assert "timed out" in str(excinfo.value).lower()
+    assert elapsed < 15
+
+
+@pytest.mark.asyncio
+async def test_clone_head_enforces_overall_clone_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from app.services.git_clone import GIT_CLONE_FAILED, GitCloneError, clone_head
+
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
+    monkeypatch.setenv("OPR_CLONE_TIMEOUT_SECONDS", "1")
+
+    async def slow_run(args, *, cwd, env, token, timeout_seconds=None):  # noqa: ANN001
+        # Simulate _run's timeout path after the step budget elapses.
+        delay = 0.05 if timeout_seconds is None else min(0.2, float(timeout_seconds))
+        await asyncio.sleep(delay)
+        raise GitCloneError(
+            f"git timed out after {int(timeout_seconds or 1)}s: {' '.join(args[:4])}",
+            code=GIT_CLONE_FAILED,
+        )
+
+    monkeypatch.setattr("app.services.git_clone._run", slow_run)
+    monkeypatch.setattr("app.services.git_clone.neutralize_escaping_symlinks", lambda dest: 0)
+
+    with pytest.raises(GitCloneError) as excinfo:
+        await clone_head(owner="o", repo="r", sha="a" * 40, token="tok", pr_number=1)
+    assert excinfo.value.code == GIT_CLONE_FAILED
+    assert "timed out" in str(excinfo.value).lower()
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith("ai-review-")]
+    assert leftovers == []
+
+
+@pytest.mark.asyncio
+async def test_clone_head_refreshes_mtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
+
+    async def fake_run(args, *, cwd, env, token, timeout_seconds=None):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr("app.services.git_clone._run", fake_run)
+    monkeypatch.setattr("app.services.git_clone.neutralize_escaping_symlinks", lambda dest: 0)
+
+    import time
+
+    from app.services.git_clone import clone_head
+
+    before = time.time()
+    dest = await clone_head(owner="o", repo="r", sha="b" * 40, token="tok", pr_number=1)
+    assert dest.stat().st_mtime >= before - 1
