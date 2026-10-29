@@ -61,7 +61,7 @@ Codex is invoked through a `ReviewExecutor` (`app/services/review_executor.py`).
 
 When `runner_backend: container`, enable the Compose overlay `docker-compose.container-runner.yml` so a `launcher` service runs on the internal network with the Docker socket and the shared `opr_checkouts` volume. The launcher mounts per-job **volume Subpaths** (Engine ≥ 26; fail-closed at startup) into the review container — never launcher-local bind paths. Staging never dereferences escaping checkout symlinks. Review containers use a **narrow seccomp profile** (`docker/review/seccomp/review-bwrap.json`, Docker default plus bubblewrap namespace/mount syscalls — never `seccomp=unconfined`). AppArmor defaults to `unconfined` (`LAUNCHER_APPARMOR_PROFILE`, like the worker) so bubblewrap works on AppArmor Linux hosts; containment is `cap_drop ALL` + narrow seccomp + RO checkout + no worker secrets. A dedicated Linux AppArmor profile remains planned. Review containers join only `review_egress` (internet for the model API in MVP; **not** attached to postgres/redis/api). Strict egress allowlisting waits for the M3 proxy. The review image (`Dockerfile.review`) contains pinned Codex `0.164.0`, git, ripgrep, ca-certificates and bubblewrap — no app code and no `.env`.
 
-See [ROADMAP.md](ROADMAP.md#planned-follow-ups) and [SECURITY.md](../SECURITY.md).
+See [ROADMAP.md](ROADMAP.md#2-planned-work) and [SECURITY.md](../SECURITY.md).
 
 <!-- section: observability -->
 ## Observability
