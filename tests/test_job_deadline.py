@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from app.services.job_deadline import (
     CODEX_CALL_BUDGET_MARGIN_SECONDS,
     JOB_DEADLINE_SAFETY_MARGIN_SECONDS,
@@ -13,7 +11,7 @@ from app.services.job_deadline import (
 
 
 def test_clamp_timeout_uses_min_of_configured_and_remaining() -> None:
-    now = time.monotonic()
+    now = 1_000.0
     deadline = JobDeadline.from_worker_job_timeout(
         200,
         now=now,
@@ -26,7 +24,7 @@ def test_clamp_timeout_uses_min_of_configured_and_remaining() -> None:
 
 
 def test_clamp_timeout_none_when_budget_insufficient() -> None:
-    now = time.monotonic()
+    now = 1_000.0
     deadline = JobDeadline(
         deadline_monotonic=now + 10,
         call_margin_seconds=30,

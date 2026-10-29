@@ -16,6 +16,7 @@ from app.queue import redis_settings
 from app.services.constants import INTERNAL_ERROR, REVIEW_TIMEOUT
 from app.services.container_runner_env import ensure_container_runner_env
 from app.services.digest import run_digest
+from app.services.job_deadline import JobDeadline
 from app.services.orchestrator import run_review
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,9 @@ async def review_pull_request(ctx: dict, review_run_id: str) -> str:
     try:
         async with factory() as session:
             try:
-                run = await run_review(session, run_id)
+                # Wall-clock budget for this ARQ job (retry + extras share one deadline).
+                deadline = JobDeadline.from_worker_job_timeout(get_settings().worker_job_timeout)
+                run = await run_review(session, run_id, deadline=deadline)
                 logger.info("job done review_run_id=%s status=%s", review_run_id, run.status)
                 return run.status
             except Exception:

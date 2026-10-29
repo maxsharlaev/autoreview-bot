@@ -170,6 +170,7 @@ async def run_review(
     publisher: Publisher | None = None,
     codex_fn=None,
     registry: OwnerRegistry | None = None,
+    deadline: JobDeadline | None = None,
 ) -> ReviewRun:
     """Run one review; the progress status is always finalized, including on errors and timeouts."""
     tracking = _ProgressTracking()
@@ -186,6 +187,7 @@ async def run_review(
             codex_fn=codex_fn,
             registry=registry,
             tracking=tracking,
+            deadline=deadline,
         )
     except BaseException as exc:
         crashed = exc
@@ -356,6 +358,7 @@ async def _run_review(
     codex_fn,
     registry: OwnerRegistry | None,
     tracking: _ProgressTracking,
+    deadline: JobDeadline | None = None,
 ) -> ReviewRun:
     from app.services.constants import SKIP_OWNER_CHANGED, SKIP_OWNER_DISABLED, SKIP_OWNER_NOT_CONFIGURED
 
@@ -463,9 +466,8 @@ async def _run_review(
 
     # Build clients from owner context (unless overridden for testing)
     config = config or ctx.config
-    # One ARQ job may run retry + alignment + PR description; clamp each Codex call
-    # to the remaining wall-clock budget (startup still validates a single call fits).
-    deadline = JobDeadline.from_worker_job_timeout(settings.worker_job_timeout)
+    # Deadline is created at ARQ job start (worker) and passed in. Unit tests that
+    # call run_review without a deadline get no wall-clock clamp.
     budget_notes: list[str] = []
     if codex_fn is None:
         codex_fn = get_review_executor(config.codex.runner_backend).run
@@ -744,16 +746,24 @@ async def _run_review(
         shutil.copyfile(data_file("schemas", "review_output.json"), schema_copy)
         await _advance_phase(session, tracking, run, PHASE_ANALYZING)
         for attempt in range(2):
-            call_timeout = deadline.clamp_timeout(config.codex.timeout_seconds)
-            if call_timeout is None:
-                note = JOB_BUDGET_EXHAUSTED if attempt == 0 else "retry skipped: insufficient job budget"
-                budget_notes.append(note)
-                progress.event(f"codex attempt {attempt + 1} skipped: {note}")
-                logger.warning("Codex attempt %s skipped: %s remaining=%.1fs", attempt + 1, note, deadline.remaining())
-                if attempt == 0:
-                    last_error = JOB_BUDGET_EXHAUSTED
-                    last_detail = "insufficient ARQ job budget to start Codex"
-                break
+            if deadline is None:
+                call_timeout = config.codex.timeout_seconds
+            else:
+                call_timeout = deadline.clamp_timeout(config.codex.timeout_seconds)
+                if call_timeout is None:
+                    note = JOB_BUDGET_EXHAUSTED if attempt == 0 else "retry skipped: insufficient job budget"
+                    budget_notes.append(note)
+                    progress.event(f"codex attempt {attempt + 1} skipped: {note}")
+                    logger.warning(
+                        "Codex attempt %s skipped: %s remaining=%.1fs",
+                        attempt + 1,
+                        note,
+                        deadline.remaining(),
+                    )
+                    if attempt == 0:
+                        last_error = JOB_BUDGET_EXHAUSTED
+                        last_detail = "insufficient ARQ job budget to start Codex"
+                    break
             if attempt > 0 and call_timeout < config.codex.timeout_seconds:
                 progress.event(
                     f"codex attempt {attempt + 1} clamped timeout={call_timeout}s "
@@ -839,7 +849,10 @@ async def _run_review(
         public_alignment = "unknown" if visibility == "public" else None
         if visibility == "public" and jira_text:
             align_timeout = min(120, config.codex.timeout_seconds)
-            clamped = deadline.clamp_timeout(align_timeout)
+            if deadline is None:
+                clamped = align_timeout
+            else:
+                clamped = deadline.clamp_timeout(align_timeout)
             if clamped is None:
                 note = "public alignment skipped: insufficient job budget"
                 budget_notes.append(note)
