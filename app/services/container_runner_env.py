@@ -23,8 +23,8 @@ def ensure_container_runner_env(
     must fail closed on the worker before any review runs (the API does not call the launcher).
 
     Also requires `codex.timeout_seconds` plus launcher overhead to stay below
-    the ARQ `worker_job_timeout` so the worker is not cancelled mid-launcher call,
-    and `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` to cover that same review lifetime.
+    the ARQ `worker_job_timeout` so the worker is not cancelled mid-launcher call.
+    Checkout dirs are protected by ``.lease`` heartbeats (not a clone+review TTL couple).
     """
     if (runner_backend or "").strip() != "container":
         return

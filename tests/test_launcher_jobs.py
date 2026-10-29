@@ -122,21 +122,31 @@ def test_run_review_job_rejects_traversal(tmp_path: Path, monkeypatch: pytest.Mo
         run_review_job(job_id="abc", checkout_ref="../etc", model_api_key="sk", client=FakeDocker())  # type: ignore[arg-type]
 
 
-def test_run_review_job_rejects_timeout_beyond_orphan_ttl(staged, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_review_job_allows_short_checkout_ttl_with_leases(staged, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-job checkout TTL couple removed; leases cover live dirs."""
     base, job_id, ref = staged
     monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
     monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "200")
     (base / job_id / "job.json").write_text(
-        json.dumps({"model": "gpt-test", "timeout_seconds": 600}),
+        json.dumps({"model": "gpt-test", "timeout_seconds": 30}),
         encoding="utf-8",
     )
-    with pytest.raises(LauncherJobError, match="OPR_CHECKOUT_ORPHAN_TTL_SECONDS"):
-        run_review_job(
-            job_id=job_id,
-            checkout_ref=ref,
-            model_api_key="sk-test",
-            client=FakeDocker(),
-        )
+    fake = FakeDocker()
+
+    def write_out(*args, **kwargs):
+        out = base / job_id / ".opr-work" / "out.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text('{"findings":[]}', encoding="utf-8")
+        return 0
+
+    fake.wait_container = lambda container_id, timeout_seconds=0: write_out()  # type: ignore[method-assign]
+    result = run_review_job(
+        job_id=job_id,
+        checkout_ref=ref,
+        model_api_key="sk-test",
+        client=fake,  # type: ignore[arg-type]
+    )
+    assert result["status"] == "ok"
 
 
 def test_run_review_job_rejects_timeout_above_max(staged, monkeypatch: pytest.MonkeyPatch) -> None:

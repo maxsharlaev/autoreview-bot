@@ -47,15 +47,15 @@ def test_container_accepts_timeout_under_arq(monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
-def test_container_rejects_orphan_ttl_too_short(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_container_allows_short_checkout_ttl_with_leases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Checkout dirs are lease-protected; short OPR_CHECKOUT_ORPHAN_TTL is only a no-lease fallback."""
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
     monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "100")
-    with pytest.raises(RuntimeError, match="OPR_CHECKOUT_ORPHAN_TTL_SECONDS"):
-        ensure_container_runner_env(
-            runner_backend="container",
-            timeout_seconds=600,
-            worker_job_timeout=900,
-        )
+    ensure_container_runner_env(
+        runner_backend="container",
+        timeout_seconds=600,
+        worker_job_timeout=900,
+    )
 
 
 def test_container_accepts_orphan_ttl_covering_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

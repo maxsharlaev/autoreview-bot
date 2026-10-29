@@ -12,7 +12,12 @@ from pathlib import Path
 
 import httpx
 
-from app.launcher.timeouts import launcher_http_timeout_seconds
+from app.launcher.lease import start_directory_lease, stop_directory_lease
+from app.launcher.timeouts import (
+    WORKER_CANCEL_HTTP_CONNECT_SECONDS,
+    WORKER_CANCEL_HTTP_READ_SECONDS,
+    launcher_http_timeout_seconds,
+)
 from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
 from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
@@ -20,7 +25,12 @@ from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
 logger = logging.getLogger(__name__)
 
 # Short timeout for cancel DELETE so it can run under asyncio.shield.
-_CANCEL_HTTP_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
+_CANCEL_HTTP_TIMEOUT = httpx.Timeout(
+    connect=WORKER_CANCEL_HTTP_CONNECT_SECONDS,
+    read=WORKER_CANCEL_HTTP_READ_SECONDS,
+    write=WORKER_CANCEL_HTTP_READ_SECONDS,
+    pool=WORKER_CANCEL_HTTP_CONNECT_SECONDS,
+)
 
 
 class ContainerReviewExecutor:
@@ -75,6 +85,7 @@ class ContainerReviewExecutor:
         remove_job_dir = True
         try:
             job_dir.mkdir(parents=True, exist_ok=False)
+            await start_directory_lease(job_dir)
             self._stage_checkout(checkout, repo_dir)
             (job_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
             shutil.copyfile(schema_path, job_dir / "schema.json")
@@ -124,6 +135,7 @@ class ContainerReviewExecutor:
         except Exception as exc:  # noqa: BLE001 - map unexpected staging/HTTP errors to fail-closed
             raise CodexRunnerError(CODEX_SANDBOX, f"container executor failed: {exc}") from exc
         finally:
+            await stop_directory_lease(job_dir)
             # Keep checkout for orchestrator cleanup; remove only our staging copy when safe.
             if remove_job_dir and job_dir.exists() and repo_dir.resolve() != checkout.resolve():
                 shutil.rmtree(job_dir, ignore_errors=True)

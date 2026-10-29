@@ -10,6 +10,12 @@ CONTAINER_WAIT_GRACE_SECONDS = 30
 DOCKER_WAIT_CLIENT_GRACE_SECONDS = 60
 # Staging, create/start/logs/remove, and worker<->launcher network slack.
 LAUNCHER_HTTP_MARGIN_SECONDS = 30
+# Cancel coordination: launcher wait must stay strictly below worker DELETE read timeout.
+LAUNCHER_CANCEL_WAIT_SECONDS = 3.0
+WORKER_CANCEL_HTTP_READ_SECONDS = 5.0
+WORKER_CANCEL_HTTP_CONNECT_SECONDS = 2.0
+# Container orphan reaper: max review + wait grace (not clone+review coupling).
+REVIEW_CONTAINER_ORPHAN_GRACE_SECONDS = CONTAINER_WAIT_GRACE_SECONDS + DOCKER_WAIT_CLIENT_GRACE_SECONDS
 # Clone may finish before review starts; orphan TTL must cover clone + review.
 # Also the hard cap enforced by git_clone.clone_head (OPR_CLONE_TIMEOUT_SECONDS).
 DEFAULT_CLONE_BUDGET_SECONDS = 300
@@ -50,29 +56,38 @@ def max_review_timeout_seconds() -> int:
         return DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS
 
 
-def min_checkout_orphan_ttl_seconds(timeout_seconds: int) -> int:
-    """Shortest safe orphan TTL for clone + a review of ``timeout_seconds``.
+def min_review_container_orphan_ttl_seconds() -> int:
+    """Shortest safe TTL for labeled review containers (max review + wait grace)."""
+    return int(max_review_timeout_seconds()) + int(REVIEW_CONTAINER_ORPHAN_GRACE_SECONDS)
 
-    Clone dirs are created before the review window and kept until cleanup after
-    the review; mtime-based reaping must not remove them while either phase runs.
-    """
+
+def review_orphan_ttl_seconds() -> int:
+    """``OPR_REVIEW_ORPHAN_TTL_SECONDS`` (container reaper), default 7200."""
+    raw = os.environ.get("OPR_REVIEW_ORPHAN_TTL_SECONDS", "7200").strip()
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return 7200
+
+
+# Back-compat aliases used by older call sites / tests (no-lease checkout age bound).
+def min_checkout_orphan_ttl_seconds(timeout_seconds: int) -> int:
+    """Deprecated coupling bound; kept for tests. Prefer lease + no_lease_max_age."""
     return clone_budget_seconds() + int(timeout_seconds) + launcher_pipeline_overhead_seconds()
 
 
 def default_checkout_orphan_ttl_seconds() -> int:
-    """Derived default: clone budget + max review timeout + launcher pipeline overhead."""
-    return min_checkout_orphan_ttl_seconds(max_review_timeout_seconds())
+    """No-lease checkout age default when ``OPR_CHECKOUT_ORPHAN_TTL_SECONDS`` unset."""
+    from app.launcher.lease import no_lease_max_age_seconds
+
+    return int(no_lease_max_age_seconds())
 
 
 def checkout_orphan_ttl_seconds() -> int:
-    """Configured orphan TTL, or the derived default when unset/invalid."""
-    raw = os.environ.get("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "").strip()
-    if not raw:
-        return default_checkout_orphan_ttl_seconds()
-    try:
-        return max(60, int(raw))
-    except ValueError:
-        return default_checkout_orphan_ttl_seconds()
+    """No-lease checkout age bound (``OPR_CHECKOUT_ORPHAN_TTL_SECONDS`` or default)."""
+    from app.launcher.lease import no_lease_max_age_seconds
+
+    return int(no_lease_max_age_seconds())
 
 
 def validate_codex_timeout_against_arq(*, timeout_seconds: int, worker_job_timeout: int) -> None:
@@ -89,21 +104,38 @@ def validate_codex_timeout_against_arq(*, timeout_seconds: int, worker_job_timeo
 
 
 def validate_checkout_orphan_ttl(*, timeout_seconds: int, orphan_ttl_seconds: int | None = None) -> None:
-    """Fail closed when orphan TTL can expire during clone or a live review."""
-    ttl = checkout_orphan_ttl_seconds() if orphan_ttl_seconds is None else int(orphan_ttl_seconds)
-    needed = min_checkout_orphan_ttl_seconds(timeout_seconds)
-    clone_b = clone_budget_seconds()
-    overhead = launcher_pipeline_overhead_seconds()
+    """Legacy no-op for call sites; checkout dirs are lease-protected.
+
+    Kept so older workers/tests that still call this do not break. Live checkouts
+    are covered by ``.lease`` heartbeats; ``OPR_CHECKOUT_ORPHAN_TTL_SECONDS`` is
+    only the no-lease crash fallback (see ``no_lease_max_age_seconds``).
+    """
+    _ = (timeout_seconds, orphan_ttl_seconds)
+
+
+def validate_review_container_orphan_ttl(*, orphan_ttl_seconds: int | None = None) -> None:
+    """Fail closed when container orphan TTL can expire during a max-length review."""
+    ttl = review_orphan_ttl_seconds() if orphan_ttl_seconds is None else int(orphan_ttl_seconds)
+    needed = min_review_container_orphan_ttl_seconds()
     if ttl < needed:
         raise RuntimeError(
-            f"OPR_CHECKOUT_ORPHAN_TTL_SECONDS ({ttl}s) must be >= clone budget "
-            f"({clone_b}s) + review timeout ({timeout_seconds}s) + launcher overhead "
-            f"({overhead}s) = {needed}s; raise OPR_CHECKOUT_ORPHAN_TTL_SECONDS "
-            "(or OPR_MAX_REVIEW_TIMEOUT_SECONDS / OPR_CLONE_TIMEOUT_SECONDS) "
-            "or lower the review timeout"
+            f"OPR_REVIEW_ORPHAN_TTL_SECONDS ({ttl}s) must be >= max review timeout "
+            f"({max_review_timeout_seconds()}s) + container wait grace "
+            f"({REVIEW_CONTAINER_ORPHAN_GRACE_SECONDS}s) = {needed}s; "
+            "raise OPR_REVIEW_ORPHAN_TTL_SECONDS or lower OPR_MAX_REVIEW_TIMEOUT_SECONDS"
+        )
+
+
+def validate_cancel_timeouts() -> None:
+    """Fail closed when launcher cancel wait can exceed worker DELETE read timeout."""
+    if not (LAUNCHER_CANCEL_WAIT_SECONDS < WORKER_CANCEL_HTTP_READ_SECONDS):
+        raise RuntimeError(
+            f"LAUNCHER_CANCEL_WAIT_SECONDS ({LAUNCHER_CANCEL_WAIT_SECONDS}) must be < "
+            f"WORKER_CANCEL_HTTP_READ_SECONDS ({WORKER_CANCEL_HTTP_READ_SECONDS})"
         )
 
 
 def ensure_launcher_orphan_ttl_config() -> None:
-    """Launcher startup: orphan TTL must cover clone budget + max review timeout."""
-    validate_checkout_orphan_ttl(timeout_seconds=max_review_timeout_seconds())
+    """Launcher startup: container orphan TTL + cancel timeout ordering."""
+    validate_review_container_orphan_ttl()
+    validate_cancel_timeouts()

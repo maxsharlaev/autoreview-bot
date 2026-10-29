@@ -12,6 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
+from app.launcher.lease import start_directory_lease, stop_directory_lease
 from app.launcher.timeouts import clone_budget_seconds
 from app.services.checkout_safety import neutralize_escaping_symlinks
 from app.services.constants import GIT_FORBIDDEN, GIT_REF_NOT_FOUND
@@ -210,6 +211,7 @@ async def clone_head(
     else:
         dest = Path(tempfile.gettempdir()) / name
         dest.mkdir(parents=False, exist_ok=False)
+    await start_directory_lease(dest)
     origin = public_github_url(owner, repo)
     askpass = dest.parent / f"{dest.name}.askpass"
     askpass.write_text(_ASKPASS, encoding="utf-8")
@@ -253,6 +255,7 @@ async def clone_head(
             await _run_budgeted([*git, "checkout", "-q", "FETCH_HEAD"])
         await _run_budgeted([*git, "remote", "set-url", "origin", origin])
     except BaseException:
+        await stop_directory_lease(dest)
         shutil.rmtree(dest, ignore_errors=True)
         raise
     finally:
@@ -270,5 +273,6 @@ async def clone_head(
     return dest
 
 
-def cleanup_checkout(path: Path) -> None:
+async def cleanup_checkout(path: Path) -> None:
+    await stop_directory_lease(path)
     shutil.rmtree(path, ignore_errors=True)

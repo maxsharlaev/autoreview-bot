@@ -228,7 +228,7 @@ class Harness:
         target = verified or _verified([])
         monkeypatch.setattr(orchestrator, "build_context", lambda **_kw: context)
         monkeypatch.setattr(orchestrator, "clone_head", AsyncMock(return_value=tmp_path))
-        monkeypatch.setattr(orchestrator, "cleanup_checkout", lambda _path: None)
+        monkeypatch.setattr(orchestrator, "cleanup_checkout", AsyncMock())
         monkeypatch.setattr(orchestrator, "parse_json_payload", lambda _raw: {})
         monkeypatch.setattr(orchestrator, "verify_review", lambda *_a, **_kw: target)
         monkeypatch.setattr(orchestrator, "_previous_head", AsyncMock(return_value=None))

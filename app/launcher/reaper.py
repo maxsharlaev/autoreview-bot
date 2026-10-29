@@ -1,4 +1,4 @@
-"""Remove orphaned review containers and staged checkout job dirs."""
+"""Remove orphaned review containers and staged checkout job dirs (lease-aware)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ import time
 from pathlib import Path
 
 from app.launcher.docker_api import DockerApiError, DockerClient
+from app.launcher.job_lifecycle import lifecycle
+from app.launcher.lease import directory_is_lease_stale
 from app.launcher.spec import REVIEW_LABEL, REVIEW_LABEL_VALUE
-from app.launcher.timeouts import checkout_orphan_ttl_seconds
+from app.launcher.timeouts import review_orphan_ttl_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +33,8 @@ _CLONE_DIR_RE = re.compile(r"^ai-review-[0-9a-f]{32}$", re.IGNORECASE)
 
 
 def orphan_ttl_seconds() -> int:
-    raw = os.environ.get("OPR_REVIEW_ORPHAN_TTL_SECONDS", "7200").strip()
-    try:
-        return max(60, int(raw))
-    except ValueError:
-        return 7200
+    """Container orphan TTL (``OPR_REVIEW_ORPHAN_TTL_SECONDS``)."""
+    return review_orphan_ttl_seconds()
 
 
 def reaper_interval_seconds() -> int:
@@ -87,8 +86,6 @@ def _safe_unlink(path: Path) -> None:
 
 
 def _safe_rmtree(path: Path) -> None:
-    # Do not follow symlinks: rmtree follows dir symlinks on some platforms when
-    # the top entry is a real dir; we only call this after confirming not a symlink.
     shutil.rmtree(path, ignore_errors=True)
 
 
@@ -98,16 +95,17 @@ def reap_checkout_orphans(
     ttl_seconds: int | None = None,
     live_job_ids: set[str] | None = None,
     client: DockerClient | None = None,
+    now: float | None = None,
 ) -> int:
-    """Remove orphan UUID job dirs under the checkout root. Returns removals count.
+    """Remove orphan UUID / clone dirs under the checkout root. Returns removals count.
 
-    Only top-level names that are strict UUIDs or ``ai-review-<uuid4 hex>``
-    clone dirs are considered. Symlinks are never followed (``lstat``); a
-    UUID-named symlink is unlinked as an entry. Removals stay lexically under
-    the resolved checkout root.
+    Lease policy (primary): a directory with a fresh ``.lease`` is kept; stale
+    lease (or no lease past the conservative age bound) may be removed.
+    ``ttl_seconds`` is accepted for back-compat tests as an override of the
+    no-lease age bound only (injected via env for the call). Symlinks are never
+    followed (``lstat``); removals stay lexically under the resolved root.
     """
     base = (base_dir or checkout_base_path()).resolve()
-    ttl = checkout_orphan_ttl_seconds() if ttl_seconds is None else int(ttl_seconds)
     owns = False
     docker = client
     if live_job_ids is None:
@@ -126,8 +124,11 @@ def reap_checkout_orphans(
     if not base.is_dir():
         return 0
 
+    # Optional override of no-lease age for unit tests that pass ttl_seconds=.
+    ttl_override = None if ttl_seconds is None else int(ttl_seconds)
+
     removed = 0
-    now = time.time()
+    clock = time.time() if now is None else float(now)
     try:
         names = os.listdir(base)
     except OSError as exc:
@@ -137,7 +138,7 @@ def reap_checkout_orphans(
     for name in names:
         if not is_reapable_checkout_dirname(name):
             continue
-        # Live review containers protect staged UUID job dirs only.
+        # Live review containers still protect staged UUID job dirs.
         if is_uuid_job_dirname(name) and name.replace("-", "").lower() in live_norm:
             continue
 
@@ -146,14 +147,15 @@ def reap_checkout_orphans(
             st = path.lstat()
         except OSError:
             continue
-        age = now - st.st_mtime
-        if age < ttl:
-            continue
 
         # Must stay inside root (lexical for symlinks: only remove the entry).
         try:
             if path.is_symlink():
-                # Entry only — never follow.
+                # Lease does not apply to symlink entries; age via lstat.
+                age = clock - float(st.st_mtime)
+                bound = ttl_override if ttl_override is not None else 60
+                if age < bound:
+                    continue
                 logger.warning(
                     "reaping orphan checkout symlink name=%s age_s=%s",
                     name,
@@ -162,26 +164,40 @@ def reap_checkout_orphans(
                 _safe_unlink(path)
                 removed += 1
                 continue
-            # Real path must remain under base after resolve without escaping.
             resolved = path.resolve(strict=False)
             resolved.relative_to(base)
         except (OSError, ValueError):
             logger.warning("skipping checkout entry outside root name=%s", name)
             continue
 
+        if ttl_override is not None:
+            # Test override: treat like legacy mtime TTL when no lease file,
+            # but still honour a fresh lease as keep.
+            from app.launcher.lease import lease_mtime, lease_stale_after_seconds
+
+            mtime = lease_mtime(path)
+            if mtime is not None:
+                if (clock - mtime) <= float(lease_stale_after_seconds()):
+                    continue
+            else:
+                if (clock - float(st.st_mtime)) < ttl_override:
+                    continue
+        elif not directory_is_lease_stale(path, now=clock):
+            continue
+
         if stat.S_ISDIR(st.st_mode):
-            logger.warning("reaping orphan checkout dir name=%s age_s=%s", name, int(age))
+            logger.warning("reaping orphan checkout dir name=%s", name)
             _safe_rmtree(path)
             removed += 1
         elif stat.S_ISREG(st.st_mode):
-            logger.warning("reaping orphan checkout file name=%s age_s=%s", name, int(age))
+            logger.warning("reaping orphan checkout file name=%s", name)
             _safe_unlink(path)
             removed += 1
     return removed
 
 
 def reap_once(client: DockerClient | None = None) -> int:
-    """Force-remove review containers older than TTL; then stale checkout dirs."""
+    """Force-remove stale review containers; then stale checkout dirs."""
     ttl = orphan_ttl_seconds()
     owns = client is None
     docker = client or DockerClient()
@@ -201,6 +217,9 @@ def reap_once(client: DockerClient | None = None) -> int:
             job_id = str(labels.get("opr.job_id") or "").strip()
             if job_id:
                 live_ids.add(job_id)
+            # Never reap containers whose launch is still active in this process.
+            if job_id and lifecycle.launch_active(job_id):
+                continue
             created = item.get("Created") or 0
             try:
                 age = now - float(created)

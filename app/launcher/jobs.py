@@ -221,42 +221,52 @@ def run_review_job(
             docker.close()
 
 
+def _force_remove_job_containers(docker: DockerClient, jid: str) -> int:
+    """Kill + force-remove all containers labeled for ``jid``. Returns removals count."""
+    removed = 0
+    try:
+        containers = docker.list_containers_for_job(jid)
+    except DockerApiError as exc:
+        raise LauncherJobError("CODEX_SANDBOX", f"docker list failed: {exc}") from exc
+    for item in containers:
+        cid = str(item.get("Id") or "")
+        if not cid:
+            continue
+        try:
+            docker.kill_container(cid)
+        except DockerApiError:
+            pass
+        try:
+            docker.remove_container(cid, force=True)
+            removed += 1
+        except DockerApiError as exc:
+            logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
+    return removed
+
+
 def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dict:
     """Force-remove review containers for ``job_id`` and coordinate with in-flight launches.
 
-    Marks the job cancelled (tombstone if unknown). Waits briefly for an in-flight
-    launch to finish, then force-removes any remaining containers. ``confirmed`` is
-    True only when no container remains and no launch is active.
+    Marks the job cancelled (tombstone if unknown), **immediately** kills any visible
+    containers, then waits briefly for an in-flight launch to reach a terminal state,
+    and removes again. ``confirmed`` is True only when no container remains and no
+    launch is active. Wait bound is ``LAUNCHER_CANCEL_WAIT_SECONDS`` (< worker DELETE
+    read timeout).
     """
     from app.launcher.paths import validate_uuid_job_id
 
     jid = validate_uuid_job_id(job_id)
     lifecycle.request_cancel(jid)
-    lifecycle.wait_until_launch_idle(jid)
 
     owns = client is None
     docker = client or DockerClient()
     removed = 0
     try:
-        try:
-            containers = docker.list_containers_for_job(jid)
-        except DockerApiError as exc:
-            raise LauncherJobError("CODEX_SANDBOX", f"docker list failed: {exc}") from exc
-        for item in containers:
-            cid = str(item.get("Id") or "")
-            if not cid:
-                continue
-            try:
-                docker.kill_container(cid)
-            except DockerApiError:
-                pass
-            try:
-                docker.remove_container(cid, force=True)
-                removed += 1
-            except DockerApiError as exc:
-                logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
+        # Kill first so a blocked wait_container can finish and mark_finished promptly.
+        removed += _force_remove_job_containers(docker, jid)
+        lifecycle.wait_until_launch_idle(jid)
+        removed += _force_remove_job_containers(docker, jid)
 
-        # Re-check after removals.
         try:
             leftover = docker.list_containers_for_job(jid)
         except DockerApiError:

@@ -872,7 +872,7 @@ async def _run_review(
                 )
     finally:
         if checkout is not None:
-            cleanup_checkout(checkout)
+            await cleanup_checkout(checkout)
 
     verified.coverage["files_total"] = context.files_total
     verified.coverage["files_reviewed"] = context.files_reviewed
@@ -933,7 +933,7 @@ async def _run_review(
         skip_description = True
 
     progress.event("publish sticky comment")
-    await _publish(
+    sticky_render = await _publish(
         publisher,
         owner,
         repo,
@@ -957,6 +957,16 @@ async def _run_review(
         tracking=tracking,
         notes=budget_notes,
     )
+
+    async def _sticky_budget_refresh(notes: list[str]) -> None:
+        sticky_render.notes = list(notes)
+        await publisher.update_sticky(
+            owner=owner,
+            repo=repo,
+            pr_number=pr.number,
+            render=sticky_render,
+        )
+
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
     return await _complete_then_describe(
@@ -982,6 +992,7 @@ async def _run_review(
             deadline=deadline,
             budget_notes=budget_notes,
             runner_backend=runner_backend,
+            sticky_refresh=_sticky_budget_refresh,
         ),
     )
 
@@ -1145,6 +1156,7 @@ async def _run_pr_description_after_review(
     deadline: JobDeadline | None = None,
     budget_notes: list[str] | None = None,
     runner_backend: str | None = None,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
 ) -> None:
     notes = budget_notes if budget_notes is not None else []
     backend = runner_backend if runner_backend is not None else (config.codex.runner_backend or "")
@@ -1153,7 +1165,7 @@ async def _run_pr_description_after_review(
         clamped = deadline.clamp_timeout(desc_timeout, runner_backend=backend)
         if clamped is None:
             note = "PR description skipped: insufficient job budget"
-            notes.append(note)
+            await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
             logger.warning("%s remaining=%.1fs", note, deadline.remaining())
             return
         desc_timeout = clamped
@@ -1182,9 +1194,10 @@ async def _run_pr_description_after_review(
             timeout_seconds=desc_timeout,
             deadline=deadline,
             budget_notes=notes,
+            sticky_refresh=sticky_refresh,
         )
     finally:
-        cleanup_checkout(checkout)
+        await cleanup_checkout(checkout)
 
 
 async def _publish_pr_description(
@@ -1203,6 +1216,7 @@ async def _publish_pr_description(
     timeout_seconds: int | None = None,
     deadline: JobDeadline | None = None,
     budget_notes: list[str] | None = None,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
 ) -> None:
     current = await github.get_pull_request(info.owner, info.repo, info.number)
     if current.head_sha != info.head_sha or current.state != "open" or current.draft or current.is_fork:
@@ -1248,7 +1262,7 @@ async def _publish_pr_description(
             clamped = deadline.clamp_timeout(call_timeout, runner_backend=(config.codex.runner_backend or ""))
             if clamped is None:
                 note = "PR description skipped: insufficient job budget"
-                notes.append(note)
+                await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
                 logger.warning("%s remaining=%.1fs", note, deadline.remaining())
                 return
             effective = clamped
@@ -1280,6 +1294,7 @@ async def _publish_pr_description(
                 openai_api_key=openai_api_key,
                 deadline=deadline,
                 budget_notes=notes,
+                sticky_refresh=sticky_refresh,
             )
         if matches:
             payload = candidate
@@ -1435,6 +1450,7 @@ async def _verify_generated_language(
     openai_api_key: str,
     deadline: JobDeadline | None = None,
     budget_notes: list[str] | None = None,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
 ) -> bool:
     prose = {name: payload[name] for name in ("summary", "changes", "testing", "notes_risks", "suggested_title")}
     data = strip_boundary_tags(json.dumps(prose, ensure_ascii=False))
@@ -1451,7 +1467,7 @@ async def _verify_generated_language(
         clamped = deadline.clamp_timeout(call_timeout, runner_backend=(config.codex.runner_backend or ""))
         if clamped is None:
             note = "PR language check skipped: insufficient job budget"
-            notes.append(note)
+            await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
             logger.warning("%s remaining=%.1fs", note, deadline.remaining())
             return True
         call_timeout = clamped
@@ -1724,6 +1740,19 @@ async def _persist_snapshot(
     await session.flush()
 
 
+async def _append_post_publish_budget_note(
+    notes: list[str],
+    note: str,
+    *,
+    sticky_refresh: Callable[[list[str]], Awaitable[None]] | None = None,
+) -> None:
+    """Append a budget notice and refresh the sticky when it was already published."""
+    if note not in notes:
+        notes.append(note)
+    if sticky_refresh is not None:
+        await sticky_refresh(list(notes))
+
+
 async def _publish(
     publisher: Publisher,
     owner: str,
@@ -1748,7 +1777,7 @@ async def _publish(
     jira_in_context: bool = False,
     tracking: _ProgressTracking | None = None,
     notes: list[str] | None = None,
-) -> None:
+) -> RenderInput:
     # Every publication path goes through here, so the progress status always shows this phase.
     if tracking is not None and session is not None:
         await _advance_phase(session, tracking, run, PHASE_PUBLISHING)
@@ -1801,14 +1830,14 @@ async def _publish(
     url = getattr(publisher, "last_comment_url", None)
     run.comment_url = url if isinstance(url, str) else None
     run.has_sensitive_content = sensitive
-    if session is None:
-        return
-    snapshot = (
-        await session.execute(select(TaskSnapshot).where(TaskSnapshot.review_run_id == run.id))
-    ).scalar_one_or_none()
-    if snapshot is not None:
-        snapshot.comment_posted = result.get("jira_comment", False)
-        snapshot.transition_done = result.get("jira_transition", False)
+    if session is not None:
+        snapshot = (
+            await session.execute(select(TaskSnapshot).where(TaskSnapshot.review_run_id == run.id))
+        ).scalar_one_or_none()
+        if snapshot is not None:
+            snapshot.comment_posted = result.get("jira_comment", False)
+            snapshot.transition_done = result.get("jira_transition", False)
+    return render
 
 
 async def _complete(

@@ -119,6 +119,25 @@ class Publisher:
                 logger.exception("Slack notification failed")
         return result
 
+    async def update_sticky(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        render: RenderInput,
+    ) -> str | None:
+        """Re-upsert the review sticky comment only (no Jira/Slack side effects).
+
+        Used when post-publication budget notices must appear on an already-published
+        sticky. Idempotent via the same upsert path; callers must pass a fully redacted
+        ``RenderInput`` (same visibility/public_repos as the original publish).
+        """
+        body = render_sticky_comment(render)
+        comment_url = await self.github.upsert_sticky_comment(owner, repo, pr_number, body)
+        self.last_comment_url = comment_url if isinstance(comment_url, str) else self.last_comment_url
+        return self.last_comment_url
+
 
 def empty_verified(*, files_total: int, files_reviewed: int, skipped: list[str], truncated: bool) -> VerifiedReview:
     return VerifiedReview(

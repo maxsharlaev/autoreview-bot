@@ -55,11 +55,11 @@ def test_require_volume_subpath_support_ok() -> None:
 async def test_lifespan_refuses_short_orphan_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
     monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
-    monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "100")
+    monkeypatch.setenv("OPR_REVIEW_ORPHAN_TTL_SECONDS", "60")
     from app.launcher.main import lifespan
     from fastapi import FastAPI
 
     app = FastAPI()
-    with pytest.raises(RuntimeError, match="OPR_CHECKOUT_ORPHAN_TTL_SECONDS"):
+    with pytest.raises(RuntimeError, match="OPR_REVIEW_ORPHAN_TTL_SECONDS"):
         async with lifespan(app):
             pass
