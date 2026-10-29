@@ -58,7 +58,7 @@ Codex is invoked through a `ReviewExecutor` (`app/services/review_executor.py`).
 | `in_process` | **Current default** | Worker runs `codex exec` in-process (existing sandbox preflight, fail-closed, env allowlist). |
 | `container` | Planned (not implemented) | Ephemeral per-review container with **no worker secrets**. M2: dedicated **launcher** service holds the Docker socket and only starts review containers from a hard-coded spec; the worker sends job id + checkout path only (not a generic ContainerCreate proxy). M3: model-API egress proxy so the review container need not hold the model key; then `container` can become the default. |
 
-See [ROADMAP.md](ROADMAP.md#planned-follow-ups) and [SECURITY.md](../SECURITY.md).
+See [ROADMAP.md](ROADMAP.md#2-planned-work) and [SECURITY.md](../SECURITY.md).
 
 <!-- section: observability -->
 ## Observability

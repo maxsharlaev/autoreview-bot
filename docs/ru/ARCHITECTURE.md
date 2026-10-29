@@ -58,7 +58,7 @@ Codex вызывается через `ReviewExecutor` (`app/services/review_exe
 | `in_process` | **Текущий default** | Worker запускает `codex exec` in-process (текущий sandbox preflight, fail-closed, env allowlist). |
 | `container` | Запланирован (не реализован) | Эфемерный контейнер на каждый review **без секретов worker**. M2: отдельный сервис-**launcher** держит Docker socket и поднимает только review-контейнеры по hard-coded spec; worker передаёт только job id и путь checkout (не generic ContainerCreate proxy). M3: model-API egress proxy, чтобы review-контейнер не держал ключ модели; после этого `container` может стать default. |
 
-См. [ROADMAP.md](ROADMAP.md#запланированные-доработки) и [SECURITY.md](../../SECURITY.md).
+См. [ROADMAP.md](ROADMAP.md#2-запланированные-задачи) и [SECURITY.md](../../SECURITY.md).
 
 <!-- section: observability -->
 ## Наблюдаемость
