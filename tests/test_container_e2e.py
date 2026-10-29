@@ -48,7 +48,7 @@ def e2e_stack():
         "COPY entrypoint.sh /entrypoint.sh\n"
         "RUN chmod 755 /entrypoint.sh\n"
         "USER 1000:1000\n"
-        "ENTRYPOINT [\"/entrypoint.sh\"]\n",
+        'ENTRYPOINT ["/entrypoint.sh"]\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -67,9 +67,7 @@ def e2e_stack():
     built = _run([docker, "build", "-t", STUB_IMAGE, str(stub_dir)])
     assert built.returncode == 0, built.stderr[-800:]
 
-    launcher_build = _run(
-        [docker, "build", "-f", str(ROOT / "Dockerfile.launcher"), "-t", LAUNCHER_IMAGE, str(ROOT)]
-    )
+    launcher_build = _run([docker, "build", "-f", str(ROOT / "Dockerfile.launcher"), "-t", LAUNCHER_IMAGE, str(ROOT)])
     assert launcher_build.returncode == 0, launcher_build.stderr[-800:]
 
     name = f"opr-launcher-e2e-{uuid.uuid4().hex[:8]}"
@@ -145,7 +143,7 @@ async def test_e2e_volume_subpath_staging_to_output(e2e_stack) -> None:
                 f"echo 'print(1)' > /var/opr/checkouts/{job_id}/repo/ok.py && "
                 f"echo prompt > /var/opr/checkouts/{job_id}/prompt.txt && "
                 f"echo '{{}}' > /var/opr/checkouts/{job_id}/schema.json && "
-                f"echo '{{\"model\":\"stub\",\"timeout_seconds\":30}}' > /var/opr/checkouts/{job_id}/job.json"
+                f'echo \'{{"model":"stub","timeout_seconds":30}}\' > /var/opr/checkouts/{job_id}/job.json'
             ),
         ]
     )
