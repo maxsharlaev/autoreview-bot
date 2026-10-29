@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -53,7 +54,8 @@ class InProcessReviewExecutor:
         allow_unsandboxed: bool = False,
     ) -> str:
         # Defense in depth: drop escaping symlinks before in-process Codex sees the tree.
-        neutralize_escaping_symlinks(checkout)
+        # Off the event loop so lease heartbeats / other async work are not starved.
+        await asyncio.to_thread(neutralize_escaping_symlinks, checkout)
         return await run_codex(
             checkout=checkout,
             prompt=prompt,

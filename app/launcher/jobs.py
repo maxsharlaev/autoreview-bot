@@ -196,6 +196,12 @@ def run_review_job(
                     "CODEX_SANDBOX",
                     f"linux sandbox unavailable inside review container: {snippet[:240]}",
                 )
+            if status_code == 44:
+                # entrypoint.sh: timeout --signal=KILL -> exit 44
+                raise LauncherJobError(
+                    "CODEX_TIMEOUT",
+                    f"review container timed out: {snippet[:240]}",
+                )
             raise LauncherJobError(
                 "CODEX_SANDBOX",
                 f"review container exit {status_code}: {snippet[:240]}",

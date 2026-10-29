@@ -245,8 +245,9 @@ class ContainerReviewExecutor:
             detail = _safe_detail(response)
             code = detail.get("code") if isinstance(detail, dict) else None
             message = detail.get("message") if isinstance(detail, dict) else None
+            allowed = {CODEX_SANDBOX, CODEX_TIMEOUT}
             raise CodexRunnerError(
-                code if code == CODEX_SANDBOX else CODEX_SANDBOX,
+                code if code in allowed else CODEX_SANDBOX,
                 message or f"launcher error HTTP {response.status_code}",
             )
         try:

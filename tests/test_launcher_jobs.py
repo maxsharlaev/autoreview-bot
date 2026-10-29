@@ -164,3 +164,15 @@ def test_run_review_job_rejects_timeout_above_max(staged, monkeypatch: pytest.Mo
             model_api_key="sk-test",
             client=FakeDocker(),
         )
+
+
+def test_run_review_job_maps_exit_44_to_codex_timeout(staged) -> None:
+    """ARB-27-022: entrypoint timeout exit 44 -> CODEX_TIMEOUT (not CODEX_SANDBOX)."""
+    _, job_id, ref = staged
+    fake = FakeDocker()
+    fake.wait_code = 44
+    fake.logs = lambda container_id, tail=200: "opr-review: timed out after 30s"  # type: ignore[method-assign]
+
+    with pytest.raises(LauncherJobError, match="timed out") as excinfo:
+        run_review_job(job_id=job_id, checkout_ref=ref, model_api_key="sk", client=fake)  # type: ignore[arg-type]
+    assert excinfo.value.code == "CODEX_TIMEOUT"

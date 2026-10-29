@@ -1315,6 +1315,10 @@ async def _publish_pr_description(
                 budget_notes=notes,
                 sticky_refresh=sticky_refresh,
             )
+            if not matches and any("language check unverified" in n for n in notes):
+                # Budget exhausted mid-verify: do not publish and do not retry.
+                payload = None
+                break
         if matches:
             payload = candidate
             break
@@ -1485,10 +1489,11 @@ async def _verify_generated_language(
     if deadline is not None:
         clamped = deadline.clamp_timeout(call_timeout, runner_backend=(config.codex.runner_backend or ""))
         if clamped is None:
-            note = "PR language check skipped: insufficient job budget"
+            # Unverified: do not treat as a language match (would publish unchecked text).
+            note = "PR description skipped: language check unverified (insufficient job budget)"
             await _append_post_publish_budget_note(notes, note, sticky_refresh=sticky_refresh)
             logger.warning("%s remaining=%.1fs", note, deadline.remaining())
-            return True
+            return False
         call_timeout = clamped
     raw = await codex_fn(
         checkout=checkout,

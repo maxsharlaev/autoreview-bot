@@ -698,3 +698,60 @@ async def test_other_language_uses_independent_check_and_retries(tmp_path) -> No
     assert "language code fr" in codex.await_args_list[0].kwargs["prompt"]
     assert "predominantly in language code fr" in codex.await_args_list[1].kwargs["prompt"]
     assert "Vérifier les données" in github.upsert_sticky_comment.await_args.args[-1]
+
+
+@pytest.mark.asyncio
+async def test_language_verify_budget_exhausted_does_not_publish(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB-27-021: exhausted JobDeadline during language verify must not publish PR text."""
+    from app.services.job_deadline import JobDeadline
+
+    info = _info()
+    french = PAYLOAD | {
+        "summary": "Verifier les donnees saisies",
+        "changes": "Ajouter une validation",
+        "testing": "Les tests ne sont pas executes",
+        "notes_risks": "Aucun risque",
+        "suggested_title": "feat(form): verifier les donnees",
+        "title_reason": "Le titre est vague",
+        "output_language": "fr",
+    }
+    github = SimpleNamespace(
+        get_pull_request=AsyncMock(side_effect=[info, info]),
+        list_pull_commit_messages=AsyncMock(return_value=["feat: validate form inputs"]),
+        upsert_sticky_comment=AsyncMock(),
+        update_pull_request_body=AsyncMock(),
+        update_pull_request_title=AsyncMock(),
+    )
+    codex = AsyncMock(return_value=json.dumps(french))
+    # Allow the description generation clamp, refuse the language-verify clamp.
+    clamp_calls = {"n": 0}
+    original = JobDeadline.clamp_timeout
+
+    def fake_clamp(self, timeout_seconds, **kwargs):  # noqa: ANN001
+        clamp_calls["n"] += 1
+        if clamp_calls["n"] == 1:
+            return min(30, int(timeout_seconds))
+        return None
+
+    monkeypatch.setattr(JobDeadline, "clamp_timeout", fake_clamp)
+    deadline = JobDeadline(deadline_monotonic=__import__("time").monotonic() + 600)
+    notes: list[str] = []
+    await _publish_pr_description(
+        github=github,
+        codex_fn=codex,
+        checkout=tmp_path,
+        info=info,
+        files=[],
+        jira_issue=None,
+        config=AppConfig(pr_text=PrTextYaml(language="fr"), pr_description=PrDescriptionYaml(enabled=True)),
+        openai_api_key="test",
+        deadline=deadline,
+        budget_notes=notes,
+    )
+    assert github.update_pull_request_body.await_count == 0
+    assert github.update_pull_request_title.await_count == 0
+    assert github.upsert_sticky_comment.await_count == 0
+    assert any("language check unverified" in n for n in notes)
+    assert codex.await_count == 1
+    assert clamp_calls["n"] >= 2
+    _ = original

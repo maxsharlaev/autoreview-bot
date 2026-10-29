@@ -300,3 +300,44 @@ async def test_container_executor_timeout_triggers_cancel(tmp_path: Path, monkey
             )
     assert ei.value.code == CODEX_TIMEOUT
     assert cancels
+
+
+@pytest.mark.asyncio
+async def test_container_executor_propagates_codex_timeout_from_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ARB-27-022: launcher detail code CODEX_TIMEOUT must surface (not remapped to SANDBOX)."""
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
+    schema = _touch(tmp_path / "s.json", "{}")
+    out = tmp_path / "o.json"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"job_id": "x", "removed": 1, "confirmed": True})
+        return httpx.Response(
+            500,
+            json={"detail": {"code": "CODEX_TIMEOUT", "message": "review container timed out"}},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://launcher") as client:
+        ex = ContainerReviewExecutor(
+            launcher_url="http://launcher",
+            launcher_token="test-launcher-token-32chars-ok",
+            checkout_base=tmp_path / "base",
+            http_client=client,
+        )
+        with pytest.raises(CodexRunnerError) as excinfo:
+            await ex.run(
+                checkout=checkout,
+                prompt="p",
+                schema_path=schema,
+                output_path=out,
+                model="m",
+                timeout_seconds=10,
+                openai_api_key="sk",
+            )
+    assert excinfo.value.code == CODEX_TIMEOUT
