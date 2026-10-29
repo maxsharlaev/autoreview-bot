@@ -1,9 +1,9 @@
 <!-- section: roadmap-autoreview-bot -->
-# Roadmap: autoreview-bot
+# Дорожная карта: autoreview-bot
 
-Живой план self-hosted бота ревью PR. Канонична [английская версия](../ROADMAP.md); этот файл — зеркало.
+Живой план самостоятельно размещаемого бота ревью PR. Канонична [английская версия](../ROADMAP.md); этот файл — зеркало.
 
-Статусы planned work: **planned** / **design** / **in progress** / **testing** / **done**.
+Статусы запланированной работы: **planned** / **design** / **in progress** / **testing** / **done**.
 
 <!-- section: current-state -->
 ## 1. Текущее состояние
@@ -12,114 +12,114 @@
 
 | Компонент | Что работает | Ограничения |
 | --- | --- | --- |
-| Конвейер ревью | GitHub PR → ARQ worker → Codex CLI → JSON schema → sticky comment; опциональный progress check run / commit status; опциональный assist для описания PR (`comment` / `fill_empty` / `append`) | Ещё нет политики rewrite низкого качества ([#20](https://github.com/maxsharlaev/autoreview-bot/issues/20)); усиленная верификация model output — в плане |
-| Параллелизм | Per-PR advisory lock, deterministic job ids, conditional run claim, `HEAD_CHANGED` на pickup; private repos перепроверяют head перед publish | Public-repo publish path ещё без той же pre-publication head-гарантии; e2e-тесты Redis/ARQ queue-recovery и publish-failure всё ещё в плане |
-| Multi-owner | Несколько GitHub owners в одном деплое: routing, per-owner GitHub / webhook / API / Jira / Slack / policies / model key ([MULTI_OWNER.md](MULTI_OWNER.md), #9 done) | Owners в БД / hot reload / quotas не сделаны; нет admin UI |
-| Public repos | Редактура security findings и контроль Jira disclosure ([PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md)) | Пустой `github.allowed_repos` по-прежнему пускает все reachable repos (только startup warning) |
-| Sandbox / изоляция агента | Fail-closed Linux sandbox; `shell_environment_policy` + execpolicy denylist; model key не наследуется agent children; AR-001/AR-002 приняты как platform limits ([SECURITY.md](../../SECURITY.md)) | Нет default-deny внутри read-only sandbox; unmatched in-sandbox tools всё ещё могут читать checkout |
-| ReviewExecutor / container path | **M1 + M2 done** на `main` ([#26](https://github.com/maxsharlaev/autoreview-bot/pull/26), [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27)): `codex.runner_backend` с default `in_process`; opt-in `container` через dedicated launcher (изоляция сокета, hard-coded create spec, leases, cancel kill-first) | Default остаётся `in_process`; model key всё ещё попадает в review process до M3; launcher cancel под нагрузкой Docker может пережить worker DELETE read timeout ([#29](https://github.com/maxsharlaev/autoreview-bot/issues/29)) |
-| Observability | API/worker Prometheus metrics, alert rules (в т.ч. `OpenPrReviewQueueNotDraining`), Grafana dashboard; opt-in Compose overlay для Prometheus, Grafana, Loki и Alloy ([OBSERVABILITY.md](OBSERVABILITY.md)) | Отдельного алерта на растущий backlog / desired-vs-running ещё нет; stage correlation / SLOs / alert exercise — в плане |
-| Ops / admin | Status API, logs, Grafana; unit-тесты и Postgres migration/isolation в CI; lint/format/image build; docs coverage test | Нет admin UI; triage findings (false positive / accepted risk) вручную; local pre-commit hooks, drill'ы load/backup/upgrade/rotation и clean-install validation всё ещё в плане |
-| Jira | Read + опциональный comment / P0–P1 transition | Model severity всё ещё может двигать writes без human gate |
-| Платформа | Один code host и reviewer CLI (GitHub + Codex); EN+RU docs; Compose overlays | Нет второго host/runner; примеры hardening деплоя (закрытые порты, TLS, protected metrics) всё ещё в плане |
-| Security reporting | GitHub private advisories | Альтернативный e-mail contact всё ещё TODO в `SECURITY.md` |
+| Конвейер ревью | GitHub PR → воркер ARQ → Codex CLI → JSON-схема → закреплённый комментарий; опциональный progress check run / commit status; опциональная помощь с описанием PR (`comment` / `fill_empty` / `append`) | Ещё нет политики переписывания низкого качества ([#20](https://github.com/maxsharlaev/autoreview-bot/issues/20)); усиленная верификация вывода модели — в плане |
+| Параллелизм | Advisory lock на PR, детерминированные id заданий, условный захват прогона, `HEAD_CHANGED` при взятии в работу; для частных репозиториев head перепроверяется перед публикацией | Путь публикации для публичных репозиториев ещё без той же гарантии head до публикации; e2e-тесты восстановления очереди Redis/ARQ и сбоев публикации всё ещё в плане |
+| Несколько владельцев | Несколько владельцев GitHub в одном деплое: маршрутизация, GitHub / webhook / API / Jira / Slack / политики / ключ модели на владельца ([MULTI_OWNER.md](MULTI_OWNER.md), #9 done) | Владельцы в БД / горячая перезагрузка / квоты не сделаны; нет панели администратора |
+| Публичные репозитории | Редактура security findings и контроль раскрытия в Jira ([PUBLIC_DISCLOSURE.md](PUBLIC_DISCLOSURE.md)) | Пустой `github.allowed_repos` по-прежнему пускает все доступные репозитории (только предупреждение при старте) |
+| Песочница / изоляция агента | Fail-closed Linux-песочница; `shell_environment_policy` + denylist execpolicy; ключ модели не наследуется дочерними процессами агента; AR-001/AR-002 приняты как ограничения платформы ([SECURITY.md](../../SECURITY.md)) | Нет запрета по умолчанию внутри read-only песочницы; несовпавшие инструменты внутри песочницы всё ещё могут читать checkout |
+| ReviewExecutor / путь через контейнер | **M1 + M2 done** на `main` ([#26](https://github.com/maxsharlaev/autoreview-bot/pull/26), [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27)): `codex.runner_backend` с default `in_process`; opt-in `container` через отдельный launcher (изоляция сокета, жёстко заданный create spec, leases, отмена с приоритетом kill) | Default остаётся `in_process`; ключ модели всё ещё попадает в процесс ревью до M3; отмена launcher под нагрузкой Docker может пережить read timeout у worker DELETE ([#29](https://github.com/maxsharlaev/autoreview-bot/issues/29)) |
+| Наблюдаемость | Метрики Prometheus для API/воркера, правила алертов (в т.ч. `OpenPrReviewQueueNotDraining`), дашборд Grafana; opt-in Compose overlay для Prometheus, Grafana, Loki и Alloy ([OBSERVABILITY.md](OBSERVABILITY.md)) | Отдельного алерта на растущий backlog / desired-vs-running ещё нет; корреляция стадий / SLO / прогон алертов — в плане |
+| Эксплуатация / админка | Status API, логи, Grafana; unit-тесты и тесты миграций/изоляции Postgres в CI; lint/format/сборка образа; тест покрытия документации | Нет панели администратора; разбор findings (ложное срабатывание / принятый риск) вручную; локальные pre-commit hooks, учения по нагрузке/резервному копированию/обновлению/ротации и проверка чистой установки всё ещё в плане |
+| Jira | Чтение + опциональный комментарий / переход P0–P1 | Severity от модели всё ещё может запускать записи без человеческого подтверждения |
+| Платформа | Один code host и reviewer CLI (GitHub + Codex); документация EN+RU; Compose overlays | Нет второго host/runner; примеры усиления защиты деплоя (закрытые порты, TLS, защищённые метрики) всё ещё в плане |
+| Сообщения о безопасности | Приватные advisories GitHub | Альтернативный e-mail контакт всё ещё TODO в `SECURITY.md` |
 
 <!-- section: planned-work -->
 ## 2. Запланированная работа
 
 <!-- section: near-term -->
-### Ближайший таргет
+### Ближайшая цель
 
-| Пункт | Status | Заметки |
+| Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **Admin panel (runs, queue, finding management)** | **planned** | **Ближайший таргет.** Optional (`ADMIN_UI_ENABLED=false`); queue/runs, filters, safe retry, audit log. Finding management: помечать false positives и accepted risk так, чтобы они **не поднимались снова** на следующих push; cleanup sensitive comments (`has_sensitive_content`). Authz отдельно от public API |
+| **Панель администратора (прогоны, очередь, управление findings)** | **planned** | **Ближайшая цель.** Опционально (`ADMIN_UI_ENABLED=false`); очередь/прогоны, фильтры, безопасный повтор, журнал аудита. Управление findings: помечать ложные срабатывания и принятый риск так, чтобы они **не поднимались снова** на следующих push; очистка чувствительных комментариев (`has_sensitive_content`). Авторизация отдельно от публичного API |
 
 <!-- section: container-strict-review-path -->
-### Container / строгий путь ревью
+### Контейнер / строгий путь ревью
 
-| Пункт | Status | Заметки |
+| Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **M1 - ReviewExecutor + `in_process`** | **done** | [#26](https://github.com/maxsharlaev/autoreview-bot/pull/26) на `main` |
-| **M2 - Ephemeral review container + launcher** | **done** | [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27) на `main`: launcher-only Docker socket, hard-coded create spec, leases, fail closed |
-| **Launcher cancel bounded under worker DELETE timeout** | **planned** | [#29](https://github.com/maxsharlaev/autoreview-bot/issues/29): ограничить весь cancel (list/kill/remove), не только lifecycle wait, чтобы worker DELETE не таймаутился под нагрузкой Docker |
-| **M3 - Model-API egress proxy + strict egress allowlist** | **design** | Убрать model key из review container |
-| **M4 - Container backend as default** | **planned** | После M3: сделать `runner_backend=container` default |
-| **Linux-host AppArmor for review containers** | **planned** | Docker Desktop: N/A; Linux hosts: dedicated profile вместо default/unconfined follow-up |
+| **M1 — ReviewExecutor + `in_process`** | **done** | [#26](https://github.com/maxsharlaev/autoreview-bot/pull/26) на `main` |
+| **M2 — Эфемерный контейнер ревью + launcher** | **done** | [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27) на `main`: сокет Docker только у launcher, жёстко заданный create spec, leases, fail-closed |
+| **Ограниченная отмена launcher при таймауте worker DELETE** | **planned** | [#29](https://github.com/maxsharlaev/autoreview-bot/issues/29): ограничить всю отмену (list/kill/remove), не только ожидание lifecycle, чтобы worker DELETE не таймаутился под нагрузкой Docker |
+| **M3 — Прокси исходящего трафика к API модели + строгий список разрешённых** | **design** | Убрать ключ модели из контейнера ревью |
+| **M4 — Контейнерный backend по умолчанию** | **planned** | После M3: сделать `runner_backend=container` значением по умолчанию |
+| **AppArmor на Linux-хосте для контейнеров ревью** | **planned** | Docker Desktop: N/A; Linux-хосты: отдельный профиль вместо follow-up с default/unconfined |
 
 <!-- section: product-ux -->
 ### Продукт / UX
 
-| Пункт | Status | Заметки |
+| Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **PR description / title policy + rewrite** | **planned** | [#20](https://github.com/maxsharlaev/autoreview-bot/issues/20): `pr_description.policy` / `title_policy`, per-repo overrides, deterministic low-quality checks, rewrite с сохранением author text |
-| **Two-pass review (spec then verify)** | **planned** | Часть #20 / spec-driven direction: pass 1 пишет spec; pass 2 в fresh session сверяет code vs spec (и Jira при связи); отдельно репортит code defects и inconsistencies |
-| **Human approval for model-driven Jira actions** | **planned** | Propose P0/P1 transition/comment; confirm через label / reaction / admin panel |
+| **Политика описания / заголовка PR + переписывание** | **planned** | [#20](https://github.com/maxsharlaev/autoreview-bot/issues/20): `pr_description.policy` / `title_policy`, переопределения на репозиторий, детерминированные проверки низкого качества, переписывание с сохранением текста автора |
+| **Двухпроходное ревью (сначала спецификация, затем проверка)** | **planned** | Часть #20 / направления на ревью по спецификации: проход 1 пишет спецификацию; проход 2 в новой сессии сверяет код со спецификацией (и Jira при связи); отдельно сообщает дефекты кода и несоответствия |
+| **Человеческое подтверждение действий Jira от модели** | **planned** | Предложить переход/комментарий P0/P1; подтвердить через label / reaction / панель администратора |
 
 <!-- section: reliability-security-observability -->
-### Надёжность / security / observability
+### Надёжность / безопасность / наблюдаемость
 
-| Пункт | Status | Заметки |
+| Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **Deny-by-default empty allowlist** | **planned** | Reject empty `github.allowed_repos` (или equivalent) вместо warn-and-allow |
-| **Head recheck before publish (all repos)** | **planned** | Распространить private-repo гарантию на public publish path |
-| **Stronger model-output verification** | **planned** | Reject wrong SHA, paths outside the diff, impossible lines, inconsistent previous-finding status; mark incomplete coverage |
-| **`stable_id` stability across code movement** | **planned** | Держать finding identity стабильным при сдвиге/лёгкой правке hunks, чтобы fix-tracking и sticky comments не «прыгали» |
-| **Fix verification on later pushes** | **planned** | Focused re-check open bot findings → `resolved` / `still_open` / `needs_human` |
-| **Queue-backlog alert** | **planned** | **Отдельно** от существующего `OpenPrReviewQueueNotDraining` (worker-down / scrape gap): детект растущего ARQ backlog или desired-vs-running при живых workers (заметка в `observability/alerts.yml`) |
-| **SECURITY.md contact channel** | **planned** | Добавить security contact e-mail или явно зафиксировать, что единственный канал — GitHub private advisories |
-| **Webhook delivery deduplication** | **planned** | Запоминать `X-GitHub-Delivery` до GitHub calls |
-| **Narrower installation tokens** | **planned** | Scope App installation tokens на reviewed repo / step |
-| **Secret scanning of model output** | **planned** | Last line of defense перед store/publish |
-| **Grafana per-owner dimension** | **planned** | Dashboards/alerts с разрезом по `owner` |
-| **Observability hardening** | **planned** | Stage correlation (`review_run_id`), SLOs, alert exercise, подтвердить что logs/dashboards не светят tokens / PR code / issue text |
+| **Запрет по умолчанию при пустом списке разрешённых** | **planned** | Отклонять пустой `github.allowed_repos` (или эквивалент) вместо предупреждения с допуском |
+| **Перепроверка head перед публикацией (все репозитории)** | **planned** | Распространить гарантию частных репозиториев на путь публикации публичных |
+| **Усиленная верификация вывода модели** | **planned** | Отклонять неверный SHA, пути вне diff, невозможные строки, несогласованный статус предыдущего finding; помечать неполное покрытие |
+| **Стабильность `stable_id` при сдвиге кода** | **planned** | Держать идентификатор finding стабильным при сдвиге/лёгкой правке hunks, чтобы отслеживание исправлений и закреплённые комментарии не «прыгали» |
+| **Проверка исправлений на следующих push** | **planned** | Сфокусированная повторная проверка открытых findings бота → `resolved` / `still_open` / `needs_human` |
+| **Алерт на накопление очереди** | **planned** | **Отдельно** от существующего `OpenPrReviewQueueNotDraining` (воркер недоступен / пробел скрейпа): детект растущего backlog ARQ или desired-vs-running при живых воркерах (заметка в `observability/alerts.yml`) |
+| **Канал контакта в SECURITY.md** | **planned** | Добавить e-mail для security-контакта или явно зафиксировать, что единственный канал — приватные advisories GitHub |
+| **Дедупликация доставки webhook** | **planned** | Запоминать `X-GitHub-Delivery` до вызовов GitHub |
+| **Более узкие токены установки** | **planned** | Сужать App installation tokens до ревьюируемого репозитория / шага |
+| **Сканирование секретов в выводе модели** | **planned** | Последняя линия защиты перед сохранением/публикацией |
+| **Измерение Grafana по владельцу** | **planned** | Дашборды/алерты с разрезом по `owner` |
+| **Укрепление наблюдаемости** | **planned** | Корреляция стадий (`review_run_id`), SLO, прогон алертов, подтвердить что логи/дашборды не светят токены / код PR / текст issue |
 
 <!-- section: quality-ops-deployment -->
-### Качество / ops / деплой
+### Качество / эксплуатация / деплой
 
-Сохранённые обязательства из прежнего помесячного плана (тесты Month 1 и exit Month 5 public beta).
+Сохранённые обязательства из прежнего помесячного плана (тесты месяца 1 и критерии выхода месяца 5 публичной беты).
 
-| Пункт | Status | Заметки |
+| Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **Redis/ARQ queue-recovery tests** | **planned** | Integration-покрытие Redis/ARQ: drain очереди после рестарта worker, delayed jobs и восстановление после сбоев брокера |
-| **Publish-failure tests** | **planned** | E2E-сценарии, где sticky comment / check-run / Jira publish падает mid-flight; состояние run и retries остаются корректными |
-| **Local pre-commit checks** | **planned** | Локальные hooks в линии с CI: Ruff lint/format, валидность YAML/JSON/TOML, secrets, large files, conflict markers, whitespace |
-| **Load testing** | **planned** | Устойчивая нагрузка ревью, cancellation под нагрузкой и queue recovery (exit Month 5) |
-| **Backup / restore testing** | **planned** | Drill'ы backup и restore БД как часть проверенного recovery path |
-| **Schema-upgrade testing** | **planned** | Alembic upgrades/downgrades на реалистичных данных сверх существующих unit-тестов миграций |
-| **Token rotation drills** | **planned** | Ротация GitHub / Jira / Slack / launcher / model credentials и проверка, что стек поднимается без сюрпризов по downtime |
-| **Deployment hardening examples** | **planned** | Примеры Compose/docs с закрытыми портами database/Redis, protected metrics, TLS и минимальными правами интеграций |
-| **Clean-install validation** | **planned** | Установка с чистой машины на новый проект (GitHub + Jira, затем второй host/runner когда будет); опубликовать compatibility matrix и guidance по миграции конфигурации; проверить отключение интеграций |
+| **Тесты восстановления очереди Redis/ARQ** | **planned** | Интеграционное покрытие Redis/ARQ: опустошение очереди после рестарта воркера, отложенные задания и восстановление после сбоев брокера |
+| **Тесты сбоев публикации** | **planned** | Сквозные сценарии, где закреплённый комментарий / check-run / публикация в Jira падает в середине; состояние прогона и повторы остаются корректными |
+| **Локальные проверки перед коммитом** | **planned** | Локальные hooks в линии с CI: Ruff lint/format, валидность YAML/JSON/TOML, секреты, большие файлы, маркеры конфликтов, пробелы |
+| **Нагрузочное тестирование** | **planned** | Устойчивая нагрузка ревью, отмена под нагрузкой и восстановление очереди (критерий выхода месяца 5) |
+| **Тестирование резервного копирования / восстановления** | **planned** | Учения backup и restore БД как часть проверенного пути восстановления |
+| **Тестирование обновления схемы** | **planned** | Alembic upgrades/downgrades на реалистичных данных сверх существующих unit-тестов миграций |
+| **Учения по ротации токенов** | **planned** | Ротация учётных данных GitHub / Jira / Slack / launcher / модели и проверка, что стек поднимается без сюрпризов по простою |
+| **Примеры усиления защиты деплоя** | **planned** | Примеры Compose/docs с закрытыми портами БД/Redis, защищёнными метриками, TLS и минимальными правами интеграций |
+| **Проверка чистой установки** | **planned** | Установка с чистой машины на новый проект (GitHub + Jira, затем второй host/runner когда будет); опубликовать матрицу совместимости и руководство по миграции конфигурации; проверить отключение интеграций |
 
 <!-- section: platform-expansion-later -->
 ### Расширение платформы (позже)
 
-| Пункт | Status | Заметки |
+| Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **`IssueTracker` contract + Jira update policy** | **planned** | Явно когда comments/transitions разрешены; audit; no-write preview; issue creation — отдельное решение |
-| **`CodeHost` contract + second host (e.g. GitLab)** | **planned** | Demand-driven; shared contract tests |
-| **`ReviewerRunner` contract + second CLI** | **planned** | Capability matrix; versioned finding format независимо от vendor |
-| **Independent cross-validation** | **planned** | Второй runner confirms/disputes findings; cost/concurrency caps; human на ambiguous P0/P1 |
-| **Locale catalog + channel templates** | **planned** | Versioned PR/Jira/Slack/digest templates; English fallback |
-| **Owners in DB / hot reload / quotas** | **planned** | Дальше file/env owner registry |
+| **Контракт `IssueTracker` + политика обновлений Jira** | **planned** | Явно когда комментарии/переходы разрешены; аудит; предпросмотр без записи; создание issue — отдельное решение |
+| **Контракт `CodeHost` + второй host (напр. GitLab)** | **planned** | По запросу; общие тесты контракта |
+| **Контракт `ReviewerRunner` + второй CLI** | **planned** | Матрица возможностей; версионированный формат findings независимо от вендора |
+| **Независимая перекрёстная проверка** | **planned** | Второй runner подтверждает/оспаривает findings; лимиты стоимости/параллелизма; человек на неоднозначных P0/P1 |
+| **Каталог локалей + шаблоны каналов** | **planned** | Версионированные шаблоны PR/Jira/Slack/digest; запасной вариант на английском |
+| **Владельцы в БД / горячая перезагрузка / квоты** | **planned** | Дальше реестра владельцев в file/env |
 
 <!-- section: directions-backlog -->
 ### Направления (бэклог, без расписания)
 
-Идеи, пока не подняты в таблицы Planned work со статусом. Admin panel **здесь не числится** — это near-term target в Planned work.
+Идеи, пока не подняты в таблицы запланированной работы со статусом. Панель администратора **здесь не числится** — это ближайшая цель в разделе запланированной работы.
 
-1. **Правила команды в репозитории** (`.autoreview/rules.md` из base branch).
-2. **Локальная проверка перед push** (CLI / pre-push, no-publish mode).
-3. **Отчёт об инженерном здоровье репозитория** (в основном non-LLM scheduled audit).
-4. **Spec-driven review** (long-term; two-pass #20 — первый конкретный шаг).
-5. **Обратная связь по findings** (useful / false-positive reactions → stats; near-term путь — admin finding management).
-6. **Строгий профиль для migrations / infra PR.**
+1. **Правила команды в репозитории** (`.autoreview/rules.md` из базовой ветки).
+2. **Локальная проверка перед push** (CLI / pre-push, режим без публикации).
+3. **Отчёт об инженерном здоровье репозитория** (в основном плановый аудит без LLM).
+4. **Ревью по спецификации** (долгосрочно; двухпроходное #20 — первый конкретный шаг).
+5. **Обратная связь по findings** (реакции «полезно» / «ложное срабатывание» → статистика; ближайший путь — управление findings в панели администратора).
+6. **Строгий профиль для PR с миграциями / инфраструктурой.**
 7. **Проверка зависимостей / CVE при смене lockfiles.**
 
 <!-- section: rules-that-still-apply -->
 ### Правила, которые по-прежнему действуют
 
-- Новые интеграции нуждаются в contract-, failure/retry- и permission-тестах до sample config.
-- Фикстуры остаются вымышленными; PR diffs и issues не попадают в public logs/telemetry.
-- Каждая автоматическая запись в Jira или code host имеет idempotency key, audit record и enable switch.
-- Публичные docs различают shipped, experimental и planned behaviour.
-- Schema model output не зависит от языка; templates никогда не меняют severity, ids, paths или machine statuses.
+- Новым интеграциям нужны тесты контракта, отказов/повторов и прав до примера конфигурации.
+- Фикстуры остаются вымышленными; diff PR и issues не попадают в публичные логи/телеметрию.
+- Каждая автоматическая запись в Jira или code host имеет ключ идемпотентности, запись аудита и переключатель включения.
+- Публичная документация различает поставленное, экспериментальное и запланированное поведение.
+- Схема вывода модели не зависит от языка; шаблоны никогда не меняют severity, ids, пути или машинные статусы.
