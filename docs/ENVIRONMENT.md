@@ -84,7 +84,7 @@ A missing variable marked required, or a missing variable named explicitly in `c
 <!-- section: review-launcher -->
 ## Review launcher (container backend)
 
-Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (or the Compose overlay `docker-compose.container-runner.yml`; see [DEPLOY.md](DEPLOY.md)); the base `docker compose up` / CI build does **not** load the launcher. The **launcher** is the only Compose service that mounts the Docker socket — treat `LAUNCHER_TOKEN` and host socket access as high trust ([SECURITY.md](../SECURITY.md)). An empty `LAUNCHER_TOKEN` does not break compose interpolation; the launcher process and the worker refuse to start (fail closed) when the container backend is selected without a token (≥ 16 characters).
+Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps1 up -Container` / `./scripts/stack.sh up --container` (or the Compose overlay `docker-compose.container-runner.yml`; see [DEPLOY.md](DEPLOY.md)); the base `docker compose up` / CI build does **not** load the launcher. The **launcher** is the only Compose service that mounts the Docker socket — treat `LAUNCHER_TOKEN` and host socket access as high trust ([SECURITY.md](../SECURITY.md)). An empty `LAUNCHER_TOKEN` does not break compose interpolation; the launcher process and the worker refuse to start (fail closed) when the container backend is selected without a token (≥ 16 characters). For `container`, `codex.timeout_seconds` plus launcher overhead must stay below `WORKER_JOB_TIMEOUT` / `worker_job_timeout` (startup fail closed).
 
 | Variable | Default | Read by | Purpose |
 | --- | --- | --- | --- |
@@ -96,6 +96,7 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker network attached to review containers (not postgres/redis/api). |
 | `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor profile for review containers (`apparmor=<value>`). Default `unconfined` (same posture as the worker) so bubblewrap mounts work on AppArmor Linux hosts; set a dedicated profile name when one is installed. |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Reaper removes labeled review containers older than this. |
+| `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` | `720` (600 + launcher overhead) | launcher | Reaper removes staged UUID job dirs under `OPR_CHECKOUT_BASE` older than this with no live `opr.job_id` container. |
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | How often the reaper scans for orphan review containers. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |

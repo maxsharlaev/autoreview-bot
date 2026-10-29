@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import os
 
+from app.launcher.timeouts import validate_codex_timeout_against_arq
 
-def ensure_container_runner_env(*, runner_backend: str) -> None:
+
+def ensure_container_runner_env(
+    *,
+    runner_backend: str,
+    timeout_seconds: int | None = None,
+    worker_job_timeout: int | None = None,
+) -> None:
     """Raise RuntimeError when container backend is selected without a launcher token.
 
     Compose keeps ``LAUNCHER_TOKEN`` optional for interpolation so the default
     ``in_process`` stack and CI work without the variable; selecting ``container``
     must fail closed before any review runs.
+
+    Also requires ``codex.timeout_seconds`` plus launcher overhead to stay below
+    the ARQ ``worker_job_timeout`` so the worker is not cancelled mid-launcher call.
     """
     if (runner_backend or "").strip() != "container":
         return
@@ -19,4 +29,9 @@ def ensure_container_runner_env(*, runner_backend: str) -> None:
         raise RuntimeError(
             "codex.runner_backend=container requires LAUNCHER_TOKEN "
             "(>= 16 chars) shared with the launcher service; refusing to start"
+        )
+    if timeout_seconds is not None and worker_job_timeout is not None:
+        validate_codex_timeout_against_arq(
+            timeout_seconds=timeout_seconds,
+            worker_job_timeout=worker_job_timeout,
         )

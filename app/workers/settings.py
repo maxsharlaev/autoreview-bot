@@ -40,7 +40,12 @@ async def startup(ctx: dict) -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
     try:
-        ensure_container_runner_env(runner_backend=get_app_config().codex.runner_backend)
+        cfg = get_app_config()
+        ensure_container_runner_env(
+            runner_backend=cfg.codex.runner_backend,
+            timeout_seconds=cfg.codex.timeout_seconds,
+            worker_job_timeout=settings.worker_job_timeout,
+        )
     except RuntimeError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc

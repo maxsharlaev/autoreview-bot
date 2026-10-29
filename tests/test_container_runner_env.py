@@ -26,3 +26,22 @@ def test_container_rejects_short_token(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_container_accepts_long_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
     ensure_container_runner_env(runner_backend="container")
+
+
+def test_container_rejects_timeout_vs_arq(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    with pytest.raises(RuntimeError, match="worker_job_timeout"):
+        ensure_container_runner_env(
+            runner_backend="container",
+            timeout_seconds=850,
+            worker_job_timeout=900,
+        )
+
+
+def test_container_accepts_timeout_under_arq(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    ensure_container_runner_env(
+        runner_backend="container",
+        timeout_seconds=600,
+        worker_job_timeout=900,
+    )

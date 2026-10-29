@@ -11,6 +11,7 @@ from pathlib import Path
 
 import httpx
 
+from app.launcher.timeouts import launcher_http_timeout_seconds
 from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
 from app.services.constants import CODEX_SANDBOX
@@ -88,7 +89,12 @@ class ContainerReviewExecutor:
                 encoding="utf-8",
             )
             checkout_ref = f"{job_id}/repo"
-            text = await self._call_launcher(job_id=job_id, checkout_ref=checkout_ref, model_api_key=openai_api_key)
+            text = await self._call_launcher(
+                job_id=job_id,
+                checkout_ref=checkout_ref,
+                model_api_key=openai_api_key,
+                timeout_seconds=timeout_seconds,
+            )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(text, encoding="utf-8")
             return text
@@ -114,7 +120,7 @@ class ContainerReviewExecutor:
         # Never dereference symlinks (ARB-27-002): preserve links then drop escapes.
         safe_copytree(src, repo_dir)
 
-    async def _call_launcher(self, *, job_id: str, checkout_ref: str, model_api_key: str) -> str:
+    async def _call_launcher(self, *, job_id: str, checkout_ref: str, model_api_key: str, timeout_seconds: int) -> str:
         headers = {
             "Authorization": f"Bearer {self._launcher_token}",
             "X-Model-Api-Key": model_api_key,
@@ -122,7 +128,10 @@ class ContainerReviewExecutor:
         }
         payload = {"job_id": job_id, "checkout_ref": checkout_ref}
         owns = self._http_client is None
-        client = self._http_client or httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=10.0))
+        read_timeout = launcher_http_timeout_seconds(timeout_seconds)
+        client = self._http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=read_timeout, write=60.0, pool=10.0)
+        )
         try:
             response = await client.post(f"{self._launcher_url}/v1/reviews", headers=headers, json=payload)
         except httpx.HTTPError as exc:

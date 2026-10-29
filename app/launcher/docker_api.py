@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from app.launcher.timeouts import DOCKER_WAIT_CLIENT_GRACE_SECONDS
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_UNIX_SOCKET = "unix:///var/run/docker.sock"
@@ -130,7 +132,7 @@ class DockerClient:
         # Docker wait blocks until exit; client timeout = job timeout + grace.
         r = self._http().post(
             f"/containers/{container_id}/wait",
-            timeout=float(timeout_seconds) + 60.0,
+            timeout=float(timeout_seconds) + float(DOCKER_WAIT_CLIENT_GRACE_SECONDS),
         )
         if r.status_code != 200:
             raise DockerApiError(

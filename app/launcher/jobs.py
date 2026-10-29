@@ -16,6 +16,7 @@ from app.launcher.spec import (
     checkout_volume_name,
     container_name,
 )
+from app.launcher.timeouts import CONTAINER_WAIT_GRACE_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,9 @@ def run_review_job(
         try:
             container_id = docker.create_container(name, config)
             docker.start_container(container_id)
-            status_code = docker.wait_container(container_id, timeout_seconds=timeout_seconds + 30)
+            status_code = docker.wait_container(
+                container_id, timeout_seconds=timeout_seconds + CONTAINER_WAIT_GRACE_SECONDS
+            )
         except DockerApiError as exc:
             raise LauncherJobError("CODEX_SANDBOX", f"docker error: {exc}") from exc
 

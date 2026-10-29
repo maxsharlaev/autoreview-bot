@@ -108,3 +108,50 @@ def json_body(request: httpx.Request) -> dict:
 def _touch(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+@pytest.mark.asyncio
+async def test_container_executor_http_timeout_derived(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When no http_client is injected, read timeout follows timeout_seconds + overhead."""
+    from app.launcher.timeouts import launcher_http_timeout_seconds
+
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"job_id": "x", "status": "ok", "output": "{}", "duration_seconds": 0.0}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.services.container_executor.httpx.AsyncClient", FakeClient)
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    (checkout / "f.py").write_text("x=1\n", encoding="utf-8")
+    ex = ContainerReviewExecutor(
+        launcher_url="http://launcher",
+        launcher_token="test-launcher-token-32chars-ok",
+        checkout_base=tmp_path / "base",
+    )
+    await ex.run(
+        checkout=checkout,
+        prompt="p",
+        schema_path=_touch(tmp_path / "s.json", "{}"),
+        output_path=tmp_path / "o.json",
+        model="m",
+        timeout_seconds=120,
+        openai_api_key="sk",
+    )
+    timeout = captured["timeout"]
+    assert timeout is not None
+    assert timeout.read == launcher_http_timeout_seconds(120)

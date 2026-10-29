@@ -31,6 +31,7 @@ services:
       OPR_REVIEW_IMAGE: opr-review:local
       OPR_REVIEW_NETWORK: autoreview_review_egress
       LAUNCHER_APPARMOR_PROFILE: "${LAUNCHER_APPARMOR_PROFILE:-unconfined}"
+      OPR_CHECKOUT_ORPHAN_TTL_SECONDS: "${OPR_CHECKOUT_ORPHAN_TTL_SECONDS:-720}"
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       # High trust: this is the only service that mounts the Docker socket.
