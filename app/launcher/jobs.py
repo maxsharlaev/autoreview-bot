@@ -158,6 +158,14 @@ def run_review_job(
                 container_id, timeout_seconds=timeout_seconds + CONTAINER_WAIT_GRACE_SECONDS
             )
         except DockerApiError as exc:
+            # Cancel endpoint may force-remove the container while we wait.
+            body = (getattr(exc, "body", None) or str(exc)).lower()
+            code = getattr(exc, "status_code", None)
+            if code == 404 or "no such container" in body or "not found" in body:
+                raise LauncherJobError(
+                    "CODEX_SANDBOX",
+                    "review container removed during wait (cancelled or reaped)",
+                ) from exc
             raise LauncherJobError("CODEX_SANDBOX", f"docker error: {exc}") from exc
 
         logs = ""
@@ -194,5 +202,41 @@ def run_review_job(
                 docker.remove_container(container_id, force=True)
             except DockerApiError as exc:
                 logger.warning("failed to remove review container %s: %s", container_id[:12], exc)
+        if owns:
+            docker.close()
+
+
+def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dict:
+    """Force-remove review containers labeled with ``job_id``. Idempotent.
+
+    Returns ``{"job_id", "removed"}`` where ``removed`` is the number of
+    containers successfully deleted (0 if none were present).
+    """
+    from app.launcher.paths import validate_uuid_job_id
+
+    jid = validate_uuid_job_id(job_id)
+    owns = client is None
+    docker = client or DockerClient()
+    removed = 0
+    try:
+        try:
+            containers = docker.list_containers_for_job(jid)
+        except DockerApiError as exc:
+            raise LauncherJobError("CODEX_SANDBOX", f"docker list failed: {exc}") from exc
+        for item in containers:
+            cid = str(item.get("Id") or "")
+            if not cid:
+                continue
+            try:
+                docker.kill_container(cid)
+            except DockerApiError:
+                pass
+            try:
+                docker.remove_container(cid, force=True)
+                removed += 1
+            except DockerApiError as exc:
+                logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
+        return {"job_id": jid, "removed": removed}
+    finally:
         if owns:
             docker.close()

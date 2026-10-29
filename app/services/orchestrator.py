@@ -41,6 +41,7 @@ from app.services.constants import (
     AI_OUTPUT_INVALID,
     CODEX_NO_RETRY,
     ISSUE_UNAVAILABLE,
+    JOB_BUDGET_EXHAUSTED,
     POLICY_VERSION,
     SKIP_DRAFT,
     SKIP_FORK,
@@ -51,6 +52,7 @@ from app.services.constants import (
 from app.services.context_builder import PreviousFinding, build_context
 from app.services.git_clone import GitCloneError, cleanup_checkout, clone_head
 from app.services.issue_key import extract_issue_key, remove_issue_key
+from app.services.job_deadline import JobDeadline
 from app.services.pr_description import (
     COMMENT_MARKER,
     build_pr_description_context,
@@ -461,6 +463,10 @@ async def _run_review(
 
     # Build clients from owner context (unless overridden for testing)
     config = config or ctx.config
+    # One ARQ job may run retry + alignment + PR description; clamp each Codex call
+    # to the remaining wall-clock budget (startup still validates a single call fits).
+    deadline = JobDeadline.from_worker_job_timeout(settings.worker_job_timeout)
+    budget_notes: list[str] = []
     if codex_fn is None:
         codex_fn = get_review_executor(config.codex.runner_backend).run
     if github is None:
@@ -738,8 +744,24 @@ async def _run_review(
         shutil.copyfile(data_file("schemas", "review_output.json"), schema_copy)
         await _advance_phase(session, tracking, run, PHASE_ANALYZING)
         for attempt in range(2):
+            call_timeout = deadline.clamp_timeout(config.codex.timeout_seconds)
+            if call_timeout is None:
+                note = JOB_BUDGET_EXHAUSTED if attempt == 0 else "retry skipped: insufficient job budget"
+                budget_notes.append(note)
+                progress.event(f"codex attempt {attempt + 1} skipped: {note}")
+                logger.warning("Codex attempt %s skipped: %s remaining=%.1fs", attempt + 1, note, deadline.remaining())
+                if attempt == 0:
+                    last_error = JOB_BUDGET_EXHAUSTED
+                    last_detail = "insufficient ARQ job budget to start Codex"
+                break
+            if attempt > 0 and call_timeout < config.codex.timeout_seconds:
+                progress.event(
+                    f"codex attempt {attempt + 1} clamped timeout={call_timeout}s "
+                    f"(configured={config.codex.timeout_seconds}s)"
+                )
             progress.event(
-                f"codex attempt {attempt + 1}/2 model={config.codex.model} effort={config.codex.reasoning_effort}"
+                f"codex attempt {attempt + 1}/2 model={config.codex.model} "
+                f"effort={config.codex.reasoning_effort} timeout={call_timeout}s"
             )
             try:
                 raw_text = await codex_fn(
@@ -748,7 +770,7 @@ async def _run_review(
                     schema_path=schema_copy,
                     output_path=output_path,
                     model=config.codex.model,
-                    timeout_seconds=config.codex.timeout_seconds,
+                    timeout_seconds=call_timeout,
                     openai_api_key=openai_api_key,
                     reasoning_effort=config.codex.reasoning_effort,
                     sandbox=config.codex.sandbox,
@@ -811,19 +833,29 @@ async def _run_review(
                 visibility=visibility,
                 force_public_redaction=publication == "public_fallback",
                 tracking=tracking,
+                notes=budget_notes,
             )
             return await _fail(session, run, started, error_code)
         public_alignment = "unknown" if visibility == "public" else None
         if visibility == "public" and jira_text:
-            public_alignment = await _check_public_alignment(
-                codex_fn=codex_fn,
-                checkout=checkout,
-                info=info,
-                files=files,
-                jira_text=jira_text,
-                config=config,
-                openai_api_key=openai_api_key,
-            )
+            align_timeout = min(120, config.codex.timeout_seconds)
+            clamped = deadline.clamp_timeout(align_timeout)
+            if clamped is None:
+                note = "public alignment skipped: insufficient job budget"
+                budget_notes.append(note)
+                progress.event(note)
+                logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            else:
+                public_alignment = await _check_public_alignment(
+                    codex_fn=codex_fn,
+                    checkout=checkout,
+                    info=info,
+                    files=files,
+                    jira_text=jira_text,
+                    config=config,
+                    openai_api_key=openai_api_key,
+                    timeout_seconds=clamped,
+                )
     finally:
         if checkout is not None:
             cleanup_checkout(checkout)
@@ -894,6 +926,7 @@ async def _run_review(
         unredacted_transitions=transitions,
         jira_in_context=bool(jira_text) and context_visibility == "private",
         tracking=tracking,
+        notes=budget_notes,
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
     progress.event(f"completed in {elapsed_ms}ms")
@@ -917,6 +950,8 @@ async def _run_review(
             openai_api_key=openai_api_key,
             pr=pr,
             visibility=visibility,
+            deadline=deadline,
+            budget_notes=budget_notes,
         ),
     )
 
@@ -1024,6 +1059,7 @@ async def _check_public_alignment(
     jira_text: str,
     config: AppConfig,
     openai_api_key: str,
+    timeout_seconds: int | None = None,
 ) -> str:
     schema_path = checkout / ".open-pr-review-public-alignment-schema.json"
     output_path = checkout / ".open-pr-review-public-alignment-out.json"
@@ -1046,7 +1082,9 @@ async def _check_public_alignment(
             schema_path=schema_path,
             output_path=output_path,
             model=config.codex.model,
-            timeout_seconds=min(120, config.codex.timeout_seconds),
+            timeout_seconds=(
+                timeout_seconds if timeout_seconds is not None else min(120, config.codex.timeout_seconds)
+            ),
             openai_api_key=openai_api_key,
             reasoning_effort=config.codex.reasoning_effort,
             sandbox="read-only",
@@ -1074,7 +1112,19 @@ async def _run_pr_description_after_review(
     openai_api_key: str,
     pr: PullRequest,
     visibility: Visibility,
+    deadline: JobDeadline | None = None,
+    budget_notes: list[str] | None = None,
 ) -> None:
+    notes = budget_notes if budget_notes is not None else []
+    desc_timeout = config.codex.timeout_seconds
+    if deadline is not None:
+        clamped = deadline.clamp_timeout(desc_timeout)
+        if clamped is None:
+            note = "PR description skipped: insufficient job budget"
+            notes.append(note)
+            logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            return
+        desc_timeout = clamped
     token = await github.installation_token(info.owner, info.repo)
     checkout = await clone_head(
         owner=info.owner,
@@ -1097,6 +1147,9 @@ async def _run_pr_description_after_review(
             openai_api_key=openai_api_key,
             pr=pr,
             visibility=visibility,
+            timeout_seconds=desc_timeout,
+            deadline=deadline,
+            budget_notes=notes,
         )
     finally:
         cleanup_checkout(checkout)
@@ -1115,6 +1168,9 @@ async def _publish_pr_description(
     openai_api_key: str,
     pr: PullRequest | None = None,
     visibility: Visibility = "public",
+    timeout_seconds: int | None = None,
+    deadline: JobDeadline | None = None,
+    budget_notes: list[str] | None = None,
 ) -> None:
     current = await github.get_pull_request(info.owner, info.repo, info.number)
     if current.head_sha != info.head_sha or current.state != "open" or current.draft or current.is_fork:
@@ -1152,15 +1208,27 @@ async def _publish_pr_description(
     language_output_path = checkout / ".open-pr-review-pr-language-out.json"
     if language not in {"en", "ru"}:
         shutil.copyfile(data_file("schemas", "pr_text_language_check.json"), language_schema_path)
+    notes = budget_notes if budget_notes is not None else []
+    call_timeout = timeout_seconds if timeout_seconds is not None else config.codex.timeout_seconds
     payload = None
     for attempt in range(2):
+        if deadline is not None:
+            clamped = deadline.clamp_timeout(call_timeout)
+            if clamped is None:
+                note = "PR description skipped: insufficient job budget"
+                notes.append(note)
+                logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+                return
+            effective = clamped
+        else:
+            effective = call_timeout
         raw = await codex_fn(
             checkout=checkout,
             prompt=prompt,
             schema_path=schema_path,
             output_path=output_path,
             model=config.codex.model,
-            timeout_seconds=config.codex.timeout_seconds,
+            timeout_seconds=effective,
             openai_api_key=openai_api_key,
             reasoning_effort=config.codex.reasoning_effort,
             sandbox="read-only",
@@ -1178,6 +1246,8 @@ async def _publish_pr_description(
                 output_path=language_output_path,
                 config=config,
                 openai_api_key=openai_api_key,
+                deadline=deadline,
+                budget_notes=notes,
             )
         if matches:
             payload = candidate
@@ -1331,6 +1401,8 @@ async def _verify_generated_language(
     output_path,
     config: AppConfig,
     openai_api_key: str,
+    deadline: JobDeadline | None = None,
+    budget_notes: list[str] | None = None,
 ) -> bool:
     prose = {name: payload[name] for name in ("summary", "changes", "testing", "notes_risks", "suggested_title")}
     data = strip_boundary_tags(json.dumps(prose, ensure_ascii=False))
@@ -1341,13 +1413,23 @@ async def _verify_generated_language(
         "Set matches=false if the language is different or uncertain.\n\n"
         f"<untrusted_generated_pr_text>\n{data}\n</untrusted_generated_pr_text>"
     )
+    notes = budget_notes if budget_notes is not None else []
+    call_timeout = config.codex.timeout_seconds
+    if deadline is not None:
+        clamped = deadline.clamp_timeout(call_timeout)
+        if clamped is None:
+            note = "PR language check skipped: insufficient job budget"
+            notes.append(note)
+            logger.warning("%s remaining=%.1fs", note, deadline.remaining())
+            return True
+        call_timeout = clamped
     raw = await codex_fn(
         checkout=checkout,
         prompt=prompt,
         schema_path=schema_path,
         output_path=output_path,
         model=config.codex.model,
-        timeout_seconds=config.codex.timeout_seconds,
+        timeout_seconds=call_timeout,
         openai_api_key=openai_api_key,
         reasoning_effort=config.codex.reasoning_effort,
         sandbox="read-only",
@@ -1633,6 +1715,7 @@ async def _publish(
     unredacted_transitions: list[FindingTransitionView] | None = None,
     jira_in_context: bool = False,
     tracking: _ProgressTracking | None = None,
+    notes: list[str] | None = None,
 ) -> None:
     # Every publication path goes through here, so the progress status always shows this phase.
     if tracking is not None and session is not None:
@@ -1671,6 +1754,7 @@ async def _publish(
         ),
         public_alignment=public_alignment,
         redacted_prior_ids=redacted_prior_ids or set(),
+        notes=list(notes or []),
     )
     has_blockers = any(item.severity in {"P0", "P1"} for item in verified.findings)
     result = await publisher.publish(

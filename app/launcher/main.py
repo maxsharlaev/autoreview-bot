@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field
 
 from app.launcher.auth import require_launcher_auth
 from app.launcher.docker_api import DockerApiError, DockerClient
-from app.launcher.jobs import LauncherJobError, run_review_job
-from app.launcher.paths import CheckoutPathError, validate_job_id
+from app.launcher.jobs import LauncherJobError, cancel_review_job, run_review_job
+from app.launcher.paths import CheckoutPathError, validate_job_id, validate_uuid_job_id
 from app.launcher.reaper import reaper_loop
 from app.launcher.timeouts import ensure_launcher_orphan_ttl_config
 from app.launcher.token import launcher_token_is_configured
@@ -76,6 +76,32 @@ app = FastAPI(title="autoreview-bot review launcher", version="0.2.0", lifespan=
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+class CancelJobResponse(BaseModel):
+    job_id: str
+    removed: int
+
+
+@app.delete("/v1/jobs/{job_id}", response_model=CancelJobResponse, dependencies=[Depends(require_launcher_auth)])
+def cancel_job(job_id: str) -> CancelJobResponse:
+    """Force-remove the review container for ``job_id``. Idempotent.
+
+    Used when the worker is cancelled mid-call so the container does not outlive
+    the ARQ job. Strict UUID validation only (same as staged job dirs).
+    """
+    try:
+        validate_uuid_job_id(job_id)
+    except CheckoutPathError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    try:
+        result = cancel_review_job(job_id=job_id)
+    except LauncherJobError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return CancelJobResponse(job_id=result["job_id"], removed=int(result["removed"]))
 
 
 @app.post("/v1/reviews", response_model=RunReviewResponse, dependencies=[Depends(require_launcher_auth)])

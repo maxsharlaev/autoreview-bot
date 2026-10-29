@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_UUID_JOB_ID_RE = re.compile(
+    r"^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
 _REF_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -17,6 +21,14 @@ def validate_job_id(job_id: str) -> str:
     value = (job_id or "").strip()
     if not _JOB_ID_RE.fullmatch(value):
         raise CheckoutPathError("invalid job_id")
+    return value
+
+
+def validate_uuid_job_id(job_id: str) -> str:
+    """Strict UUID job id (hex or dashed) for cancel / staging dirs."""
+    value = (job_id or "").strip()
+    if not _UUID_JOB_ID_RE.fullmatch(value):
+        raise CheckoutPathError("invalid job_id: expected UUID")
     return value
 
 

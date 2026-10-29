@@ -168,3 +168,22 @@ async def test_e2e_volume_subpath_staging_to_output(e2e_stack) -> None:
     output = json.loads(data["output"])
     assert output.get("e2e") is True
     # Never echo secrets in assertions beyond fixed test tokens (no env dumps).
+
+
+@pytest.mark.asyncio
+async def test_e2e_cancel_job_endpoint(e2e_stack) -> None:
+    """Cancel is idempotent and authorized; removes labeled containers when present."""
+    token = e2e_stack["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    job_id = uuid.uuid4().hex
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Idempotent when nothing to remove
+        r = await client.delete(f"{e2e_stack['url']}/v1/jobs/{job_id}", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["removed"] == 0
+        # Auth required
+        r401 = await client.delete(f"{e2e_stack['url']}/v1/jobs/{job_id}")
+        assert r401.status_code == 401
+        # Strict UUID validation
+        r400 = await client.delete(f"{e2e_stack['url']}/v1/jobs/not-a-uuid", headers=headers)
+        assert r400.status_code == 400

@@ -46,6 +46,8 @@ class RenderInput:
     private_channels_configured: bool = False
     public_alignment: str | None = None
     redacted_prior_ids: set[str] = field(default_factory=set)
+    # Soft notices (e.g. skipped retry / extras for job budget); shown like errors.
+    notes: list[str] = field(default_factory=list)
     # When the analysis finished (UTC); rendered with head_sha and duration_ms.
     analysed_at: datetime | None = None
 
@@ -72,6 +74,7 @@ _LABELS = {
         "run": "Run",
         "reviewed": "Reviewed",
         "error": "Error",
+        "note": "Note",
         "files": "files",
         "model": "model",
         "public_summary": "Review completed. See the findings below.",
@@ -100,6 +103,7 @@ _LABELS = {
         "run": "Запуск",
         "reviewed": "Проверено",
         "error": "Ошибка",
+        "note": "Замечание",
         "files": "файлов",
         "model": "модель",
         "public_summary": "Ревью завершено. Замечания приведены ниже.",
@@ -454,6 +458,10 @@ def render_sticky_comment(data: RenderInput) -> str:
         lines.append(f"**Jira:** `{data.jira_warning}`")
     if data.error_code:
         lines.append(f"**{labels['error']}:** `{data.error_code}`")
+    for note in data.notes:
+        text = (note or "").strip()
+        if text:
+            lines.append(f"**{labels['note']}:** `{text}`")
     has_redactable = any(_finding_is_security(item) for item in verified.findings) or any(
         _transition_is_security(item) for item in data.transitions
     )

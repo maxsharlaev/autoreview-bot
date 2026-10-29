@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import httpx
 import pytest
 from app.services.codex_runner import CodexRunnerError
-from app.services.constants import CODEX_SANDBOX
+from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
 from app.services.container_executor import ContainerReviewExecutor
 from app.services.review_executor import CONTAINER_BACKEND, get_review_executor
 
@@ -155,3 +156,147 @@ async def test_container_executor_http_timeout_derived(tmp_path: Path, monkeypat
     timeout = captured["timeout"]
     assert timeout is not None
     assert timeout.read == launcher_http_timeout_seconds(120)
+
+
+@pytest.mark.asyncio
+async def test_container_executor_cancel_deletes_job_and_removes_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    out = tmp_path / "out.json"
+    seen_delete: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            seen_delete.append(request.url.path)
+            return httpx.Response(200, json={"job_id": "x", "removed": 1})
+        # Hang simulation: raise CancelledError via side channel — use slow path
+        raise httpx.ReadTimeout("slow")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://launcher") as client:
+        ex = ContainerReviewExecutor(
+            launcher_url="http://launcher",
+            launcher_token="test-launcher-token-32chars-ok",
+            checkout_base=tmp_path / "base",
+            http_client=client,
+        )
+
+        async def boom(*args, **kwargs):  # noqa: ANN001
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(ex, "_call_launcher", boom)
+        cancels: list[str] = []
+
+        async def fake_cancel(job_id: str) -> bool:
+            cancels.append(job_id)
+            return True
+
+        monkeypatch.setattr(ex, "_cancel_job", fake_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await ex.run(
+                checkout=checkout,
+                prompt="hello",
+                schema_path=schema,
+                output_path=out,
+                model="gpt-test",
+                timeout_seconds=30,
+                openai_api_key="sk-test",
+            )
+    assert cancels
+    # job dir removed after confirmed cancel
+    base = tmp_path / "base"
+    leftovers = [p for p in base.iterdir()] if base.exists() else []
+    assert leftovers == []
+
+
+@pytest.mark.asyncio
+async def test_container_executor_leaves_job_dir_when_cancel_not_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    out = tmp_path / "out.json"
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+        base_url="http://launcher",
+    ) as client:
+        ex = ContainerReviewExecutor(
+            launcher_url="http://launcher",
+            launcher_token="test-launcher-token-32chars-ok",
+            checkout_base=tmp_path / "base",
+            http_client=client,
+        )
+
+        async def boom(*args, **kwargs):  # noqa: ANN001
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(ex, "_call_launcher", boom)
+
+        async def fake_cancel(job_id: str) -> bool:
+            return False
+
+        monkeypatch.setattr(ex, "_cancel_job", fake_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await ex.run(
+                checkout=checkout,
+                prompt="hello",
+                schema_path=schema,
+                output_path=out,
+                model="gpt-test",
+                timeout_seconds=30,
+                openai_api_key="sk-test",
+            )
+    base = tmp_path / "base"
+    leftovers = list(base.iterdir())
+    assert len(leftovers) == 1
+    assert leftovers[0].name  # uuid hex job dir left for reaper
+
+
+@pytest.mark.asyncio
+async def test_container_executor_timeout_triggers_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    out = tmp_path / "out.json"
+    cancels: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            cancels.append(request.url.path)
+            return httpx.Response(200, json={"job_id": "x", "removed": 1})
+        raise httpx.ReadTimeout("timed out")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://launcher") as client:
+        ex = ContainerReviewExecutor(
+            launcher_url="http://launcher",
+            launcher_token="test-launcher-token-32chars-ok",
+            checkout_base=tmp_path / "base",
+            http_client=client,
+        )
+        with pytest.raises(CodexRunnerError) as ei:
+            await ex.run(
+                checkout=checkout,
+                prompt="hello",
+                schema_path=schema,
+                output_path=out,
+                model="gpt-test",
+                timeout_seconds=30,
+                openai_api_key="sk-test",
+            )
+    assert ei.value.code == CODEX_TIMEOUT
+    assert cancels

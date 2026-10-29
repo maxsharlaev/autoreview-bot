@@ -176,6 +176,20 @@ class DockerClient:
             )
         return list(r.json())
 
+    def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        """Containers labeled ``opr.job_id=<job_id>`` (any state)."""
+        r = self._http().get(
+            "/containers/json",
+            params={"all": "true", "filters": json.dumps({"label": [f"opr.job_id={job_id}"]})},
+        )
+        if r.status_code != 200:
+            raise DockerApiError(
+                f"container list by job failed: {r.status_code}",
+                status_code=r.status_code,
+                body=r.text[:500],
+            )
+        return list(r.json())
+
     def kill_container(self, container_id: str) -> None:
         r = self._http().post(f"/containers/{container_id}/kill", params={"signal": "KILL"})
         if r.status_code not in (204, 404):

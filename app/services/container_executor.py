@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,9 +15,12 @@ import httpx
 from app.launcher.timeouts import launcher_http_timeout_seconds
 from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
-from app.services.constants import CODEX_SANDBOX
+from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+# Short timeout for cancel DELETE so it can run under asyncio.shield.
+_CANCEL_HTTP_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
 
 
 class ContainerReviewExecutor:
@@ -68,6 +72,7 @@ class ContainerReviewExecutor:
         base.mkdir(parents=True, exist_ok=True)
         job_dir = base / job_id
         repo_dir = job_dir / "repo"
+        remove_job_dir = True
         try:
             job_dir.mkdir(parents=True, exist_ok=False)
             self._stage_checkout(checkout, repo_dir)
@@ -89,36 +94,83 @@ class ContainerReviewExecutor:
                 encoding="utf-8",
             )
             checkout_ref = f"{job_id}/repo"
-            text = await self._call_launcher(
-                job_id=job_id,
-                checkout_ref=checkout_ref,
-                model_api_key=openai_api_key,
-                timeout_seconds=timeout_seconds,
-            )
+            try:
+                text = await self._call_launcher(
+                    job_id=job_id,
+                    checkout_ref=checkout_ref,
+                    model_api_key=openai_api_key,
+                    timeout_seconds=timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                # ARQ/job cancellation: ask launcher to kill the container, then drop
+                # staging only if cancel was acknowledged (else leave for reaper).
+                remove_job_dir = False
+                if await self._cancel_job_shielded(job_id):
+                    remove_job_dir = True
+                raise
+            except CodexRunnerError as exc:
+                if exc.code == CODEX_TIMEOUT:
+                    remove_job_dir = False
+                    if await self._cancel_job_shielded(job_id):
+                        remove_job_dir = True
+                raise
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(text, encoding="utf-8")
             return text
         except CodexRunnerError:
             raise
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001 - map unexpected staging/HTTP errors to fail-closed
             raise CodexRunnerError(CODEX_SANDBOX, f"container executor failed: {exc}") from exc
         finally:
-            # Keep checkout for orchestrator cleanup; remove only our staging copy.
-            if job_dir.exists() and repo_dir.resolve() != checkout.resolve():
+            # Keep checkout for orchestrator cleanup; remove only our staging copy when safe.
+            if remove_job_dir and job_dir.exists() and repo_dir.resolve() != checkout.resolve():
                 shutil.rmtree(job_dir, ignore_errors=True)
 
     def _stage_checkout(self, checkout: Path, repo_dir: Path) -> None:
         src = checkout.resolve()
-        # If the worker already cloned under the shared base as .../job/repo, reuse.
         try:
             src.relative_to(self._checkout_base.resolve())
             if src.name == "repo" and src.parent.parent == self._checkout_base.resolve():
-                # Already a staged job layout; copy tree still isolates launcher path.
                 pass
         except ValueError:
             pass
-        # Never dereference symlinks (ARB-27-002): preserve links then drop escapes.
         safe_copytree(src, repo_dir)
+
+    async def _cancel_job_shielded(self, job_id: str) -> bool:
+        """Best-effort cancel that survives surrounding task cancellation."""
+        try:
+            return bool(await asyncio.shield(self._cancel_job(job_id)))
+        except Exception:  # noqa: BLE001 - never let cancel errors mask CancelledError
+            logger.warning("launcher cancel failed for job_id=%s", job_id, exc_info=True)
+            return False
+
+    async def _cancel_job(self, job_id: str) -> bool:
+        """DELETE /v1/jobs/{id}. True when launcher confirmed (including already-gone)."""
+        headers = {"Authorization": f"Bearer {self._launcher_token}"}
+        owns = self._http_client is None
+        client = self._http_client or httpx.AsyncClient(timeout=_CANCEL_HTTP_TIMEOUT)
+        try:
+            response = await client.delete(f"{self._launcher_url}/v1/jobs/{job_id}", headers=headers)
+        except httpx.HTTPError as exc:
+            logger.warning("launcher cancel unreachable job_id=%s: %s", job_id, exc)
+            return False
+        finally:
+            if owns:
+                await client.aclose()
+        # 200/204 = removed or already absent; 404 on bad path should not happen with UUID.
+        if response.status_code in (200, 204):
+            return True
+        if response.status_code == 404:
+            return True
+        logger.warning(
+            "launcher cancel HTTP %s for job_id=%s body=%s",
+            response.status_code,
+            job_id,
+            response.text[:200],
+        )
+        return False
 
     async def _call_launcher(self, *, job_id: str, checkout_ref: str, model_api_key: str, timeout_seconds: int) -> str:
         headers = {
@@ -134,6 +186,8 @@ class ContainerReviewExecutor:
         )
         try:
             response = await client.post(f"{self._launcher_url}/v1/reviews", headers=headers, json=payload)
+        except httpx.TimeoutException as exc:
+            raise CodexRunnerError(CODEX_TIMEOUT, f"launcher call timed out: {exc}") from exc
         except httpx.HTTPError as exc:
             raise CodexRunnerError(CODEX_SANDBOX, f"launcher unreachable: {exc}") from exc
         finally:
