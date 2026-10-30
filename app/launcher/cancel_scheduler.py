@@ -6,6 +6,10 @@ to a long-lived thread pool, waits at most ``LAUNCHER_CANCEL_DEADLINE_SECONDS``,
 returns ``confirmed=false`` immediately if work is still running. Docker cleanup may
 continue in the background; lifecycle tombstones are set before wait so duplicate
 cancels coalesce; the reaper still reclaims leftovers.
+
+AR-030-005: ``add_done_callback`` must run *outside* ``_INFLIGHT_LOCK``. A non-reentrant
+``threading.Lock`` deadlocks when the future is already done and the callback runs
+synchronously (``_clear_inflight`` would re-acquire the same lock).
 """
 
 from __future__ import annotations
@@ -24,10 +28,11 @@ logger = logging.getLogger(__name__)
 # Long-lived pool — never created per-request (avoids executor shutdown joins).
 _CANCEL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="opr-cancel")
 _INFLIGHT: dict[str, Future] = {}
-_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT_LOCK = threading.Lock()  # non-reentrant; never call callbacks while held
 
 
 def _clear_inflight(job_id: str, fut: Future) -> None:
+    """Drop ``fut`` from the map only if it is still the registered in-flight cancel."""
     with _INFLIGHT_LOCK:
         if _INFLIGHT.get(job_id) is fut:
             del _INFLIGHT[job_id]
@@ -47,8 +52,10 @@ def _submit_cancel(job_id: str, *, client: Any | None) -> Future:
 
         fut = _CANCEL_POOL.submit(_run)
         _INFLIGHT[job_id] = fut
-        fut.add_done_callback(lambda f, jid=job_id: _clear_inflight(jid, f))
-        return fut
+    # Register callback *after* releasing the lock (AR-030-005).
+    # If ``fut`` is already done, the callback runs synchronously here — safe.
+    fut.add_done_callback(lambda f, jid=job_id: _clear_inflight(jid, f))
+    return fut
 
 
 def cancel_review_job_bounded(*, job_id: str, client: Any | None = None) -> dict:
