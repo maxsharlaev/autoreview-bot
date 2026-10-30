@@ -56,11 +56,29 @@ def allowlist_check(request: Request) -> str | None:
     return None
 
 
-async def read_bounded_body(request: Request, max_bytes: int) -> tuple[bytes | None, Response | None]:
-    """Read the request body with a hard size bound.
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _token_remaining(rec: JobTokenRecord) -> float:
+    return max(0.0, float(rec.expires_at) - time.time())
+
+
+async def read_bounded_body(
+    request: Request,
+    max_bytes: int,
+    *,
+    idle_timeout: float,
+    overall_timeout: float,
+    rec: JobTokenRecord | None = None,
+    store: TokenStore | None = None,
+) -> tuple[bytes | None, Response | None]:
+    """Read the request body with size + wall-clock bounds.
 
     Rejects oversized ``Content-Length`` before reading. For chunked / unknown
     length, reads ``request.stream()`` incrementally and aborts at ``max_bytes``.
+    Each chunk wait is bounded by idle, overall, and (when ``rec`` is set) token
+    remaining lifetime via ``asyncio.timeout``.
     Returns ``(body, None)`` on success or ``(None, error_response)``.
     """
     cl_raw = request.headers.get("content-length")
@@ -77,9 +95,79 @@ async def read_bounded_body(request: Request, max_bytes: int) -> tuple[bytes | N
                 media_type="application/json",
             )
 
+    overall_deadline = time.monotonic() + float(overall_timeout)
+    idle = float(idle_timeout)
     chunks: list[bytes] = []
     total = 0
-    async for chunk in request.stream():
+    stream = request.stream()
+    aiter = stream.__aiter__()
+    while True:
+        if store is not None and rec is not None and not store.still_valid(rec):
+            metrics.REQUESTS.labels(result="expired").inc()
+            return None, Response(
+                status_code=401,
+                content='{"error":"expired"}',
+                media_type="application/json",
+            )
+        remaining = _remaining(overall_deadline)
+        if remaining <= 0:
+            metrics.REQUESTS.labels(result="upload_timeout").inc()
+            return None, Response(
+                status_code=408,
+                content='{"error":"upload_timeout"}',
+                media_type="application/json",
+            )
+        token_left = _token_remaining(rec) if rec is not None else remaining
+        if rec is not None and token_left <= 0:
+            metrics.REQUESTS.labels(result="expired").inc()
+            return None, Response(
+                status_code=401,
+                content='{"error":"expired"}',
+                media_type="application/json",
+            )
+        wait = min(idle, remaining, token_left if rec is not None else remaining)
+        if wait <= 0:
+            metrics.REQUESTS.labels(result="upload_timeout").inc()
+            return None, Response(
+                status_code=408,
+                content='{"error":"upload_timeout"}',
+                media_type="application/json",
+            )
+        try:
+            async with asyncio.timeout(wait):
+                chunk = await anext(aiter)
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            kind = "upload_timeout"
+            if rec is not None and _token_remaining(rec) <= 0:
+                kind = "expired"
+                metrics.REQUESTS.labels(result=kind).inc()
+                return None, Response(
+                    status_code=401,
+                    content='{"error":"expired"}',
+                    media_type="application/json",
+                )
+            if _remaining(overall_deadline) <= 0 or wait < idle:
+                metrics.REQUESTS.labels(result="upload_timeout").inc()
+                return None, Response(
+                    status_code=408,
+                    content='{"error":"upload_timeout"}',
+                    media_type="application/json",
+                )
+            metrics.REQUESTS.labels(result="upload_idle_timeout").inc()
+            return None, Response(
+                status_code=408,
+                content='{"error":"upload_idle_timeout"}',
+                media_type="application/json",
+            )
+        if store is not None and rec is not None and not store.still_valid(rec):
+            metrics.REQUESTS.labels(result="expired").inc()
+            return None, Response(
+                status_code=401,
+                content='{"error":"expired"}',
+                media_type="application/json",
+            )
         if not chunk:
             continue
         total += len(chunk)
@@ -106,10 +194,6 @@ def _forward_response_headers(response: httpx.Response) -> dict[str, str]:
     return out
 
 
-def _remaining(deadline: float) -> float:
-    return max(0.0, deadline - time.monotonic())
-
-
 async def forward_responses(
     *,
     request: Request,
@@ -121,25 +205,24 @@ async def forward_responses(
     upstream_api_key: str,
     client: httpx.AsyncClient,
 ) -> Response:
+    """Forward a POST /v1/responses under an already-held per-job slot.
+
+    Caller must have reserved the slot via ``TokenStore.begin_request`` and
+    accounted inbound bytes. This function always releases the slot (without
+    refunding request count) before returning, including StreamingResponse
+    completion.
+    """
     reason = allowlist_check(request)
     if reason:
+        store.end_request(rec)
         metrics.ALLOWLIST_DENY.labels(reason=reason).inc()
         metrics.REQUESTS.labels(result="allowlist_deny").inc()
         return Response(status_code=403, content='{"error":"forbidden"}', media_type="application/json")
 
     if len(body) > settings.max_body_bytes:
+        store.end_request(rec)
         metrics.REQUESTS.labels(result="body_too_large").inc()
         return Response(status_code=413, content='{"error":"body_too_large"}', media_type="application/json")
-
-    limit_err = store.begin_request(rec, body_len=len(body))
-    if limit_err:
-        metrics.REQUESTS.labels(result=limit_err).inc()
-        code = 429 if limit_err in {"request_limit", "byte_limit", "concurrency_limit"} else 401
-        return Response(
-            status_code=code,
-            content=f'{{"error":"{limit_err}"}}',
-            media_type="application/json",
-        )
 
     target = provider.responses_target()
     headers = {
@@ -180,7 +263,7 @@ async def forward_responses(
             content=body,
             timeout=httpx_timeout,
         )
-        budget = _remaining(overall_deadline)
+        budget = min(_remaining(overall_deadline), _token_remaining(rec))
         if budget <= 0:
             store.end_request(rec)
             metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
@@ -227,32 +310,43 @@ async def forward_responses(
             pass
 
     async def _next_chunk(aiter: AsyncIterator[bytes]) -> bytes | None:
-        """Wait for the next upstream chunk under idle + overall wall-clock bounds.
+        """Wait for the next upstream chunk under idle + overall + token bounds.
 
-        Returns ``None`` on clean EOF or token expiry (upstream closed). Raises
-        ``TimeoutError("idle"|"overall")`` when a deadline fires.
+        Returns ``None`` on clean EOF or token invalidation (upstream closed).
+        Raises ``TimeoutError("idle"|"overall"|"expired")`` when a deadline fires.
         """
         if not store.still_valid(rec):
             await _close_upstream()
             return None
         remaining = _remaining(overall_deadline)
+        token_left = _token_remaining(rec)
         if remaining <= 0:
             await _close_upstream()
             raise TimeoutError("overall")
-        wait = min(idle, remaining)
+        if token_left <= 0:
+            await _close_upstream()
+            raise TimeoutError("expired")
+        wait = min(idle, remaining, token_left)
         if wait <= 0:
             await _close_upstream()
             raise TimeoutError("overall")
         try:
             async with asyncio.timeout(wait):
-                return await anext(aiter)
+                chunk = await anext(aiter)
         except StopAsyncIteration:
             return None
         except TimeoutError as exc:
             await _close_upstream()
+            if not store.still_valid(rec) or _token_remaining(rec) <= 0:
+                raise TimeoutError("expired") from exc
             if _remaining(overall_deadline) <= 0 or wait < idle:
                 raise TimeoutError("overall") from exc
             raise TimeoutError("idle") from exc
+        # Recheck after the wait: revocation/expiry during anext must not forward.
+        if not store.still_valid(rec):
+            await _close_upstream()
+            return None
+        return chunk
 
     async def stream_body() -> AsyncIterator[bytes]:
         aiter = response.aiter_bytes()
@@ -266,6 +360,8 @@ async def forward_responses(
                     if kind == "idle":
                         metrics.UPSTREAM_ERRORS.labels(kind="idle_timeout").inc()
                         result_label = "idle_timeout"
+                    elif kind == "expired":
+                        result_label = "expired"
                     else:
                         metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
                         result_label = "upstream_timeout"
@@ -322,6 +418,13 @@ async def forward_responses(
                     return Response(
                         status_code=504,
                         content='{"error":"idle_timeout"}',
+                        media_type="application/json",
+                    )
+                if kind == "expired":
+                    metrics.REQUESTS.labels(result="expired").inc()
+                    return Response(
+                        status_code=401,
+                        content='{"error":"expired"}',
                         media_type="application/json",
                     )
                 metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()

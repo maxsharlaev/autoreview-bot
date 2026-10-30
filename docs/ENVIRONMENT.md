@@ -130,9 +130,9 @@ The proxy sends upstream `Accept-Encoding: identity` and strips representation h
 | `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Max request body size: oversized `Content-Length` rejected with 413 before read; chunked/unknown length read incrementally and aborted at the cap. |
 | `PROXY_MAX_REQUESTS_PER_JOB` | `50` | model-proxy | Max proxied requests per job token. |
 | `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Max in+out bytes per job token; outbound counted incrementally/atomically while consuming upstream (stream and non-stream) so concurrent requests cannot jointly exceed the cap. |
-| `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Max concurrent upstream streams per job. |
-| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle bound between upstream response chunks (`asyncio.timeout` per next-chunk wait; HTTPX float timeout is only a soft per-phase backstop). |
-| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock overall deadline for the whole upstream request+response (not HTTPX inactivity alone); also stops at job-token expiry and closes the upstream response. |
+| `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Max concurrent in-flight proxied requests per job (slot reserved before reading the client body; released on upload failure/timeout/413). |
+| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle bound between chunks for both client upload (`request.stream`) and upstream response (`asyncio.timeout` per next-chunk wait; HTTPX float timeout is only a soft per-phase backstop). |
+| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock overall deadline for reading the client request body and for the whole upstream request+response (not HTTPX inactivity alone); also stops at job-token expiry and closes the upstream response. |
 
 Public allowlist on the proxy: **`POST /v1/responses`** only (SSE supported). No WebSocket / CONNECT. Logs never include tokens, keys, or bodies.
 

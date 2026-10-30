@@ -174,7 +174,7 @@ async def test_read_bounded_body_rejects_content_length(monkeypatch: pytest.Monk
         "server": ("test", 80),
     }
     request = Request(scope, receive)
-    body, err = await read_bounded_body(request, max_bytes=100)
+    body, err = await read_bounded_body(request, max_bytes=100, idle_timeout=5.0, overall_timeout=30.0)
     assert body is None
     assert err is not None
     assert err.status_code == 413
@@ -211,7 +211,7 @@ async def test_read_bounded_body_chunked_aborts(monkeypatch: pytest.MonkeyPatch)
         "server": ("test", 80),
     }
     request = Request(scope, receive)
-    body, err = await read_bounded_body(request, max_bytes=64)
+    body, err = await read_bounded_body(request, max_bytes=64, idle_timeout=5.0, overall_timeout=30.0)
     assert body is None
     assert err is not None
     assert err.status_code == 413

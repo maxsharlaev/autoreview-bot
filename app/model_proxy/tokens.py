@@ -136,21 +136,41 @@ class TokenStore:
             live = self._by_hash.get(rec.token_hash)
             return live is not None and live.expires_at > now
 
-    def begin_request(self, rec: JobTokenRecord, *, body_len: int) -> str | None:
-        """Reserve a request slot. Returns error code or None on success."""
+    def begin_request(self, rec: JobTokenRecord, *, body_len: int = 0) -> str | None:
+        """Reserve concurrency + request count before body upload / upstream work.
+
+        ``body_len`` may be 0 when the body is not yet read; call
+        ``record_bytes_in`` after a successful upload. Returns an error code or
+        None on success.
+        """
+        inbound = max(0, int(body_len))
         with self._lock:
             live = self._by_hash.get(rec.token_hash)
             if live is None or live.expires_at <= time.time():
                 return "expired"
             if live.req_count >= self._settings.max_requests_per_job:
                 return "request_limit"
-            if live.bytes_in + live.bytes_out + body_len > self._settings.max_bytes_per_job:
-                return "byte_limit"
             if live.active_streams >= self._settings.max_concurrent_per_job:
                 return "concurrency_limit"
+            if inbound and live.bytes_in + live.bytes_out + inbound > self._settings.max_bytes_per_job:
+                return "byte_limit"
             live.req_count += 1
-            live.bytes_in += max(0, int(body_len))
+            live.bytes_in += inbound
             live.active_streams += 1
+            return None
+
+    def record_bytes_in(self, rec: JobTokenRecord, body_len: int) -> str | None:
+        """Account inbound bytes after the body was read under a held slot."""
+        inbound = max(0, int(body_len))
+        if inbound == 0:
+            return None
+        with self._lock:
+            live = self._by_hash.get(rec.token_hash)
+            if live is None or live.expires_at <= time.time():
+                return "expired"
+            if live.bytes_in + live.bytes_out + inbound > self._settings.max_bytes_per_job:
+                return "byte_limit"
+            live.bytes_in += inbound
             return None
 
     def consume_bytes_out(self, rec: JobTokenRecord, n: int) -> int:
@@ -172,13 +192,22 @@ class TokenStore:
             live.bytes_out += take
             return take
 
-    def end_request(self, rec: JobTokenRecord) -> None:
-        """Release one concurrent stream slot (outbound bytes already recorded)."""
+    def end_request(self, rec: JobTokenRecord, *, refund_request: bool = False) -> None:
+        """Release one concurrent slot; optionally refund request count (upload abort)."""
         with self._lock:
             live = self._by_hash.get(rec.token_hash)
             if live is None:
                 return
             live.active_streams = max(0, live.active_streams - 1)
+            if refund_request:
+                live.req_count = max(0, live.req_count - 1)
+
+    def active_stream_count(self, rec: JobTokenRecord) -> int:
+        with self._lock:
+            live = self._by_hash.get(rec.token_hash)
+            if live is None:
+                return 0
+            return int(live.active_streams)
 
     def bytes_used(self, rec: JobTokenRecord) -> int:
         with self._lock:

@@ -156,30 +156,90 @@ async def catch_all(full_path: str, request: Request) -> Response:
         metrics.REQUESTS.labels(result="auth_fail").inc()
         raise
 
-    body, err = await read_bounded_body(request, settings.max_body_bytes)
-    if err is not None:
-        return err
-    assert body is not None
+    # Reject oversized Content-Length before reserving a slot (no refund churn).
+    cl_raw = request.headers.get("content-length")
+    if cl_raw is not None and cl_raw.strip() != "":
+        try:
+            if int(cl_raw) > settings.max_body_bytes:
+                metrics.REQUESTS.labels(result="body_too_large").inc()
+                return Response(
+                    status_code=413,
+                    content='{"error":"body_too_large"}',
+                    media_type="application/json",
+                )
+        except ValueError:
+            pass
 
+    # Reserve concurrency + request count BEFORE reading the body so slow/stuck
+    # uploads cannot exceed PROXY_MAX_CONCURRENT_PER_JOB.
+    limit_err = store.begin_request(rec, body_len=0)
+    if limit_err:
+        metrics.REQUESTS.labels(result=limit_err).inc()
+        code = 429 if limit_err in {"request_limit", "byte_limit", "concurrency_limit"} else 401
+        return Response(
+            status_code=code,
+            content=f'{{"error":"{limit_err}"}}',
+            media_type="application/json",
+        )
+
+    slot_held = True
     try:
-        upstream_key = settings.upstream_key_for_owner(rec.owner_id)
-    except KeyError as exc:
-        metrics.REQUESTS.labels(result="no_upstream_key").inc()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="upstream key missing") from exc
+        body, err = await read_bounded_body(
+            request,
+            settings.max_body_bytes,
+            idle_timeout=settings.stream_idle_timeout_seconds,
+            overall_timeout=settings.upstream_timeout_seconds,
+            rec=rec,
+            store=store,
+        )
+        if err is not None:
+            store.end_request(rec, refund_request=True)
+            slot_held = False
+            return err
+        assert body is not None
 
-    logger.info(
-        "model_proxy forward job_id=%s owner_id=%s body_len=%s",
-        rec.job_id,
-        rec.owner_id or "-",
-        len(body),
-    )
-    return await forward_responses(
-        request=request,
-        body=body,
-        settings=settings,
-        provider=request.app.state.provider,
-        store=store,
-        rec=rec,
-        upstream_api_key=upstream_key,
-        client=request.app.state.http,
-    )
+        byte_err = store.record_bytes_in(rec, len(body))
+        if byte_err:
+            store.end_request(rec, refund_request=True)
+            slot_held = False
+            metrics.REQUESTS.labels(result=byte_err).inc()
+            code = 429 if byte_err == "byte_limit" else 401
+            return Response(
+                status_code=code,
+                content=f'{{"error":"{byte_err}"}}',
+                media_type="application/json",
+            )
+
+        try:
+            upstream_key = settings.upstream_key_for_owner(rec.owner_id)
+        except KeyError as exc:
+            store.end_request(rec, refund_request=True)
+            slot_held = False
+            metrics.REQUESTS.labels(result="no_upstream_key").inc()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="upstream key missing",
+            ) from exc
+
+        logger.info(
+            "model_proxy forward job_id=%s owner_id=%s body_len=%s",
+            rec.job_id,
+            rec.owner_id or "-",
+            len(body),
+        )
+        # forward_responses releases the slot (no refund) on all paths.
+        slot_held = False
+        return await forward_responses(
+            request=request,
+            body=body,
+            settings=settings,
+            provider=request.app.state.provider,
+            store=store,
+            rec=rec,
+            upstream_api_key=upstream_key,
+            client=request.app.state.http,
+        )
+    except BaseException:
+        if slot_held:
+            store.end_request(rec, refund_request=True)
+        raise

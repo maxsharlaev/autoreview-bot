@@ -130,9 +130,9 @@ Proxy отправляет upstream `Accept-Encoding: identity` и снимае�
 | `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Макс. размер тела запроса: завышенный `Content-Length` — 413 до чтения; chunked/без длины читается потоково и обрывается на лимите. |
 | `PROXY_MAX_REQUESTS_PER_JOB` | `50` | model-proxy | Макс. число proxied-запросов на job-токен. |
 | `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Макс. байты in+out на job-токен; исходящие учитываются инкрементально/атомарно при чтении upstream (stream и non-stream), чтобы параллельные запросы вместе не превысили лимит. |
-| `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Макс. одновременных upstream-потоков на job. |
-| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle между чанками ответа upstream (`asyncio.timeout` на ожидание следующего чанка; float-timeout HTTPX — только мягкий per-phase backstop). |
-| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock общий дедлайн на весь upstream request+response (не только inactivity HTTPX); также останавливается по expiry job-токена и закрывает upstream-ответ. |
+| `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Макс. одновременных proxied-запросов на job (слот резервируется до чтения тела клиента; освобождается при сбое/таймауте/413 загрузки). |
+| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle между чанками и для загрузки клиента (`request.stream`), и для ответа upstream (`asyncio.timeout` на ожидание следующего чанка; float-timeout HTTPX — только мягкий per-phase backstop). |
+| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock общий дедлайн на чтение тела запроса клиента и на весь upstream request+response (не только inactivity HTTPX); также останавливается по expiry job-токена и закрывает upstream-ответ. |
 
 Публичный allowlist proxy: только **`POST /v1/responses`** (SSE поддерживается). Без WebSocket / CONNECT. Логи не содержат токены, ключи и тела запросов.
 
