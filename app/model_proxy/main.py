@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from app.model_proxy import metrics
 from app.model_proxy.auth import require_issuer_auth, resolve_job_bearer
 from app.model_proxy.providers import build_provider
-from app.model_proxy.proxy import allowlist_check, forward_responses
+from app.model_proxy.proxy import allowlist_check, forward_responses, read_bounded_body
 from app.model_proxy.settings import ProxySettings, validate_settings
 from app.model_proxy.tokens import TokenStore
 
@@ -141,13 +141,10 @@ def revoke_token(
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def catch_all(full_path: str, request: Request) -> Response:
     """Public surface for review containers: only POST /v1/responses is allowed."""
-    # Internal routes are registered above; this catches everything else including
-    # allowlist denials before auth when path/method is wrong.
     deny = allowlist_check(request)
     if deny:
         metrics.ALLOWLIST_DENY.labels(reason=deny).inc()
         metrics.REQUESTS.labels(result="allowlist_deny").inc()
-        # Never upgrade to WebSocket.
         return Response(status_code=403, content='{"error":"forbidden"}', media_type="application/json")
 
     settings = _settings(request)
@@ -159,7 +156,11 @@ async def catch_all(full_path: str, request: Request) -> Response:
         metrics.REQUESTS.labels(result="auth_fail").inc()
         raise
 
-    body = await request.body()
+    body, err = await read_bounded_body(request, settings.max_body_bytes)
+    if err is not None:
+        return err
+    assert body is not None
+
     try:
         upstream_key = settings.upstream_key_for_owner(rec.owner_id)
     except KeyError as exc:

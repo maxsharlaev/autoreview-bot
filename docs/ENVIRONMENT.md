@@ -113,6 +113,9 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 
 Used when the container-runner overlay includes `model-proxy` (opt-in Compose). The proxy holds real model keys; review containers will use short-lived job tokens (wiring in a follow-up PR). The **worker** is the issuer (`PROXY_ISSUER_TOKEN`). `in_process` does **not** use the proxy in M3.
 
+The proxy sends upstream `Accept-Encoding: identity` and strips representation headers `content-encoding` / `content-length` / `transfer-encoding` from the client response (so a decoded body is never forwarded with a stale encoding).
+
+
 | Variable | Default | Read by | Notes |
 | --- | --- | --- | --- |
 | `PROXY_ISSUER_TOKEN` | (required to start model-proxy) | model-proxy, worker | Shared bearer for `POST/DELETE /internal/jobs/{job_id}/token`. Generate with `openssl rand -hex 32` (>= 16 chars). |
@@ -124,12 +127,12 @@ Used when the container-runner overlay includes `model-proxy` (opt-in Compose). 
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` or `http` (tests). |
 | `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | model-proxy, worker, launcher | Caps job-token TTL with grace. |
 | `PROXY_TOKEN_GRACE_SECONDS` | `60` | model-proxy | Added to `timeout_seconds` for token TTL (capped by max review + grace). |
-| `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Max request body size. |
+| `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Max request body size: oversized `Content-Length` rejected with 413 before read; chunked/unknown length read incrementally and aborted at the cap. |
 | `PROXY_MAX_REQUESTS_PER_JOB` | `50` | model-proxy | Max proxied requests per job token. |
-| `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Max in+out bytes per job token. |
+| `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Max in+out bytes per job token; outbound counted incrementally/atomically while consuming upstream (stream and non-stream) so concurrent requests cannot jointly exceed the cap. |
 | `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Max concurrent upstream streams per job. |
-| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Idle bound for SSE streams (read timeout). |
-| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Overall upstream HTTP timeout. |
+| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle bound between upstream response chunks (`asyncio.timeout` per next-chunk wait; HTTPX float timeout is only a soft per-phase backstop). |
+| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock overall deadline for the whole upstream request+response (not HTTPX inactivity alone); also stops at job-token expiry and closes the upstream response. |
 
 Public allowlist on the proxy: **`POST /v1/responses`** only (SSE supported). No WebSocket / CONNECT. Logs never include tokens, keys, or bodies.
 

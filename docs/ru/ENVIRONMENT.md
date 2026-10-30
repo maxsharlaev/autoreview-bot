@@ -113,6 +113,9 @@
 
 Нужен, когда overlay container-runner поднимает `model-proxy` (opt-in Compose). Proxy хранит настоящие ключи модели; контейнеры ревью будут использовать короткоживущие job-токены (подключение — в следующем PR). **Issuer** — worker (`PROXY_ISSUER_TOKEN`). Режим `in_process` в M3 **не** использует proxy.
 
+Proxy отправляет upstream `Accept-Encoding: identity` и снимает representation-заголовки `content-encoding` / `content-length` / `transfer-encoding` из ответа клиенту (чтобы не пробросить encoding после декодированного тела).
+
+
 | Переменная | По умолчанию | Кто читает | Заметки |
 | --- | --- | --- | --- |
 | `PROXY_ISSUER_TOKEN` | (нужен для старта model-proxy) | model-proxy, worker | Общий bearer для `POST/DELETE /internal/jobs/{job_id}/token`. Сгенерируйте `openssl rand -hex 32` (>= 16 символов). |
@@ -124,12 +127,12 @@
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` или `http` (тесты). |
 | `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | model-proxy, worker, launcher | Верхняя граница TTL job-токена вместе с grace. |
 | `PROXY_TOKEN_GRACE_SECONDS` | `60` | model-proxy | Добавка к `timeout_seconds` для TTL токена. |
-| `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Макс. размер тела запроса. |
+| `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Макс. размер тела запроса: завышенный `Content-Length` — 413 до чтения; chunked/без длины читается потоково и обрывается на лимите. |
 | `PROXY_MAX_REQUESTS_PER_JOB` | `50` | model-proxy | Макс. число proxied-запросов на job-токен. |
-| `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Макс. байт in+out на job-токен. |
+| `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Макс. байты in+out на job-токен; исходящие учитываются инкрементально/атомарно при чтении upstream (stream и non-stream), чтобы параллельные запросы вместе не превысили лимит. |
 | `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Макс. одновременных upstream-потоков на job. |
-| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Idle-лимит для SSE (read timeout). |
-| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Общий HTTP-таймаут upstream. |
+| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle между чанками ответа upstream (`asyncio.timeout` на ожидание следующего чанка; float-timeout HTTPX — только мягкий per-phase backstop). |
+| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock общий дедлайн на весь upstream request+response (не только inactivity HTTPX); также останавливается по expiry job-токена и закрывает upstream-ответ. |
 
 Публичный allowlist proxy: только **`POST /v1/responses`** (SSE поддерживается). Без WebSocket / CONNECT. Логи не содержат токены, ключи и тела запросов.
 

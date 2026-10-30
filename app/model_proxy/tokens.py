@@ -39,7 +39,7 @@ class IssuedToken:
 
 
 class TokenStore:
-    """In-memory hashed job tokens (process-local; lost on restart → 401)."""
+    """In-memory hashed job tokens (process-local; lost on restart -> 401)."""
 
     def __init__(self, settings: ProxySettings) -> None:
         self._settings = settings
@@ -129,6 +129,13 @@ class TokenStore:
                 return None
             return rec
 
+    def still_valid(self, rec: JobTokenRecord) -> bool:
+        """True if the job token is still present and unexpired."""
+        now = time.time()
+        with self._lock:
+            live = self._by_hash.get(rec.token_hash)
+            return live is not None and live.expires_at > now
+
     def begin_request(self, rec: JobTokenRecord, *, body_len: int) -> str | None:
         """Reserve a request slot. Returns error code or None on success."""
         with self._lock:
@@ -146,13 +153,39 @@ class TokenStore:
             live.active_streams += 1
             return None
 
-    def end_request(self, rec: JobTokenRecord, *, bytes_out: int = 0) -> None:
+    def consume_bytes_out(self, rec: JobTokenRecord, n: int) -> int:
+        """Atomically account for up to ``n`` outbound bytes.
+
+        Returns how many bytes were accepted (0..n). Concurrent callers for the
+        same job cannot jointly exceed ``max_bytes_per_job``.
+        """
+        want = max(0, int(n))
+        if want == 0:
+            return 0
+        with self._lock:
+            live = self._by_hash.get(rec.token_hash)
+            if live is None:
+                return 0
+            used = live.bytes_in + live.bytes_out
+            remaining = max(0, int(self._settings.max_bytes_per_job) - used)
+            take = min(want, remaining)
+            live.bytes_out += take
+            return take
+
+    def end_request(self, rec: JobTokenRecord) -> None:
+        """Release one concurrent stream slot (outbound bytes already recorded)."""
         with self._lock:
             live = self._by_hash.get(rec.token_hash)
             if live is None:
                 return
-            live.bytes_out += max(0, int(bytes_out))
             live.active_streams = max(0, live.active_streams - 1)
+
+    def bytes_used(self, rec: JobTokenRecord) -> int:
+        with self._lock:
+            live = self._by_hash.get(rec.token_hash)
+            if live is None:
+                return 0
+            return int(live.bytes_in + live.bytes_out)
 
     def active_job_count(self) -> int:
         now = time.time()
