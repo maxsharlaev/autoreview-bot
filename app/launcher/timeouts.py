@@ -10,12 +10,17 @@ CONTAINER_WAIT_GRACE_SECONDS = 30
 DOCKER_WAIT_CLIENT_GRACE_SECONDS = 60
 # Staging, create/start/logs/remove, and worker<->launcher network slack.
 LAUNCHER_HTTP_MARGIN_SECONDS = 30
-# Cancel coordination: launcher wait must stay strictly below worker DELETE read timeout.
+# Cancel coordination: whole cancel (list/kill/remove + wait) must stay below worker DELETE read.
+DEFAULT_LAUNCHER_CANCEL_DEADLINE_SECONDS = 4.0
+# Lifecycle idle wait inside that overall deadline (kept for kill-first coordination).
 DEFAULT_LAUNCHER_CANCEL_WAIT_SECONDS = 3.0
-# Back-compat alias (default); prefer launcher_cancel_wait_seconds() at runtime.
+# Back-compat aliases (defaults); prefer launcher_cancel_*_seconds() at runtime.
+LAUNCHER_CANCEL_DEADLINE_SECONDS = DEFAULT_LAUNCHER_CANCEL_DEADLINE_SECONDS
 LAUNCHER_CANCEL_WAIT_SECONDS = DEFAULT_LAUNCHER_CANCEL_WAIT_SECONDS
 WORKER_CANCEL_HTTP_READ_SECONDS = 5.0
 WORKER_CANCEL_HTTP_CONNECT_SECONDS = 2.0
+# Mandatory gap: cancel deadline must leave at least this much below worker DELETE read.
+CANCEL_DEADLINE_WORKER_MARGIN_SECONDS = 0.5
 # Container orphan reaper: max review + wait grace (not clone+review coupling).
 REVIEW_CONTAINER_ORPHAN_GRACE_SECONDS = CONTAINER_WAIT_GRACE_SECONDS + DOCKER_WAIT_CLIENT_GRACE_SECONDS
 # Clone may finish before review starts; orphan TTL must cover clone + review.
@@ -40,6 +45,17 @@ def clone_budget_seconds() -> int:
         return max(1, int(raw))
     except ValueError:
         return DEFAULT_CLONE_BUDGET_SECONDS
+
+
+def launcher_cancel_deadline_seconds() -> float:
+    """Overall seconds for DELETE cancel incl. Docker calls (``LAUNCHER_CANCEL_DEADLINE_SECONDS``)."""
+    raw = os.environ.get("LAUNCHER_CANCEL_DEADLINE_SECONDS", "").strip()
+    if not raw:
+        return float(DEFAULT_LAUNCHER_CANCEL_DEADLINE_SECONDS)
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return float(DEFAULT_LAUNCHER_CANCEL_DEADLINE_SECONDS)
 
 
 def launcher_cancel_wait_seconds() -> float:
@@ -151,12 +167,25 @@ def validate_review_container_orphan_ttl(*, orphan_ttl_seconds: int | None = Non
 
 
 def validate_cancel_timeouts() -> None:
-    """Fail closed when launcher cancel wait can exceed worker DELETE read timeout."""
+    """Fail closed when cancel deadline/wait can exceed worker DELETE read timeout.
+
+    Requires a mandatory margin (``CANCEL_DEADLINE_WORKER_MARGIN_SECONDS``, 0.5s) below
+    the worker DELETE HTTP read timeout so scheduling slack cannot push cancel past the
+    worker's client timeout. Default deadline 4.0 still passes (5.0 - 0.5 = 4.5 max).
+    """
     wait = launcher_cancel_wait_seconds()
-    if not (wait < WORKER_CANCEL_HTTP_READ_SECONDS):
+    deadline = launcher_cancel_deadline_seconds()
+    if not (wait < deadline):
         raise RuntimeError(
-            f"LAUNCHER_CANCEL_WAIT_SECONDS ({wait}) must be < "
-            f"WORKER_CANCEL_HTTP_READ_SECONDS ({WORKER_CANCEL_HTTP_READ_SECONDS})"
+            f"LAUNCHER_CANCEL_WAIT_SECONDS ({wait}) must be < LAUNCHER_CANCEL_DEADLINE_SECONDS ({deadline})"
+        )
+    max_deadline = WORKER_CANCEL_HTTP_READ_SECONDS - CANCEL_DEADLINE_WORKER_MARGIN_SECONDS
+    if deadline > max_deadline:
+        raise RuntimeError(
+            f"LAUNCHER_CANCEL_DEADLINE_SECONDS ({deadline}) must be <= "
+            f"WORKER_CANCEL_HTTP_READ_SECONDS ({WORKER_CANCEL_HTTP_READ_SECONDS}) - "
+            f"CANCEL_DEADLINE_WORKER_MARGIN_SECONDS ({CANCEL_DEADLINE_WORKER_MARGIN_SECONDS}) "
+            f"(max {max_deadline})"
         )
 
 

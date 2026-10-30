@@ -22,7 +22,7 @@ def test_validate_uuid_job_id() -> None:
 
 def test_cancel_review_job_idempotent_when_empty() -> None:
     class FakeDocker:
-        def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
             return []
 
         def close(self) -> None:
@@ -40,13 +40,13 @@ def test_cancel_review_job_kills_and_removes() -> None:
     alive = [{"Id": "cidabcdef1234", "Labels": {"opr.job_id": "c" * 32}}]
 
     class FakeDocker:
-        def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
             return list(alive)
 
-        def kill_container(self, cid: str) -> None:
+        def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
             killed.append(cid)
 
-        def remove_container(self, cid: str, *, force: bool = True) -> None:
+        def remove_container(self, cid: str, *, force: bool = True, timeout: float | None = None) -> None:
             removed.append(cid)
             alive.clear()
 
@@ -95,7 +95,7 @@ def test_cancel_endpoint_rejects_non_uuid(cancel_client) -> None:
 def test_cancel_endpoint_idempotent(cancel_client, monkeypatch: pytest.MonkeyPatch) -> None:
     client, token = cancel_client
     monkeypatch.setattr(
-        "app.launcher.main.cancel_review_job",
+        "app.launcher.main.cancel_review_job_bounded",
         lambda **kwargs: {"job_id": kwargs["job_id"], "removed": 0, "confirmed": True},
     )
     r = client.delete(

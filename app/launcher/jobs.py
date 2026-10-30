@@ -7,7 +7,7 @@ import os
 import time
 from pathlib import Path
 
-from app.launcher.docker_api import DockerApiError, DockerClient
+from app.launcher.docker_api import DockerApiError, DockerClient, DockerDeadlineExceeded
 from app.launcher.job_lifecycle import lifecycle
 from app.launcher.paths import CheckoutPathError, job_work_dir, resolve_checkout, validate_job_id
 from app.launcher.spec import (
@@ -19,6 +19,8 @@ from app.launcher.spec import (
 )
 from app.launcher.timeouts import (
     CONTAINER_WAIT_GRACE_SECONDS,
+    launcher_cancel_deadline_seconds,
+    launcher_cancel_wait_seconds,
     max_review_timeout_seconds,
     validate_checkout_orphan_ttl,
 )
@@ -227,24 +229,74 @@ def run_review_job(
             docker.close()
 
 
-def _force_remove_job_containers(docker: DockerClient, jid: str) -> int:
-    """Kill + force-remove all containers labeled for ``jid``. Returns removals count."""
+# Below this remaining budget, skip the Docker call (do not inflate timeout above real left).
+_MIN_CANCEL_DOCKER_BUDGET_SECONDS = 0.05
+
+
+def _remaining_cancel_budget(
+    deadline_monotonic: float,
+    *,
+    min_usable: float = _MIN_CANCEL_DOCKER_BUDGET_SECONDS,
+) -> float:
+    """Seconds left before the overall cancel deadline.
+
+    Never returns more than the actual remaining time. If remaining is positive but
+    below ``min_usable`` (default 50ms for Docker calls), returns ``0.0`` so callers
+    skip the call; cancel then returns ``confirmed=false`` (worker keeps staging).
+    Pass ``min_usable=0.0`` for lifecycle wait, which may use any positive remainder.
+    """
+    left = deadline_monotonic - time.monotonic()
+    if left < float(min_usable):
+        return 0.0
+    return float(left)
+
+
+def _force_remove_job_containers(
+    docker: DockerClient,
+    jid: str,
+    *,
+    deadline_monotonic: float,
+) -> int:
+    """Kill + force-remove all containers labeled for ``jid``. Returns removals count.
+
+    Each Docker call uses only the remaining overall cancel budget as a *wall-clock*
+    deadline (see ``DockerClient`` cancel-path requests). On deadline the loop stops
+    early so ``cancel_review_job`` can return ``confirmed=False`` (worker keeps staging).
+    """
     removed = 0
+    budget = _remaining_cancel_budget(deadline_monotonic)
+    if budget <= 0:
+        return 0
     try:
-        containers = docker.list_containers_for_job(jid)
+        containers = docker.list_containers_for_job(jid, timeout=budget)
+    except DockerDeadlineExceeded:
+        logger.warning("cancel list hit wall-clock deadline job=%s", jid)
+        return 0
     except DockerApiError as exc:
         raise LauncherJobError("CODEX_SANDBOX", f"docker list failed: {exc}") from exc
     for item in containers:
         cid = str(item.get("Id") or "")
         if not cid:
             continue
+        budget = _remaining_cancel_budget(deadline_monotonic)
+        if budget <= 0:
+            break
         try:
-            docker.kill_container(cid)
+            docker.kill_container(cid, timeout=budget)
+        except DockerDeadlineExceeded:
+            logger.warning("cancel kill hit wall-clock deadline job=%s cid=%s", jid, cid[:12])
+            break
         except DockerApiError:
             pass
+        budget = _remaining_cancel_budget(deadline_monotonic)
+        if budget <= 0:
+            break
         try:
-            docker.remove_container(cid, force=True)
+            docker.remove_container(cid, force=True, timeout=budget)
             removed += 1
+        except DockerDeadlineExceeded:
+            logger.warning("cancel remove hit wall-clock deadline job=%s cid=%s", jid, cid[:12])
+            break
         except DockerApiError as exc:
             logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
     return removed
@@ -256,8 +308,13 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
     Marks the job cancelled (tombstone if unknown), **immediately** kills any visible
     containers, then waits briefly for an in-flight launch to reach a terminal state,
     and removes again. ``confirmed`` is True only when no container remains and no
-    launch is active. Wait bound is ``LAUNCHER_CANCEL_WAIT_SECONDS`` (< worker DELETE
-    read timeout).
+    launch is active.
+
+    The whole operation (Docker list/kill/remove + lifecycle wait) shares one deadline
+    ``LAUNCHER_CANCEL_DEADLINE_SECONDS`` (< worker DELETE read timeout). Each Docker
+    call receives only the remaining budget as a wall-clock bound (async HTTPX +
+    ``asyncio.timeout``). If the deadline fires, return ``confirmed=False`` so the
+    worker keeps staging for the reaper.
     """
     from app.launcher.paths import validate_uuid_job_id
 
@@ -267,15 +324,25 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
     owns = client is None
     docker = client or DockerClient()
     removed = 0
+    deadline = time.monotonic() + launcher_cancel_deadline_seconds()
     try:
         # Kill first so a blocked wait_container can finish and mark_finished promptly.
-        removed += _force_remove_job_containers(docker, jid)
-        lifecycle.wait_until_launch_idle(jid)
-        removed += _force_remove_job_containers(docker, jid)
+        removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
+        wait_budget = min(launcher_cancel_wait_seconds(), _remaining_cancel_budget(deadline, min_usable=0.0))
+        if wait_budget > 0:
+            lifecycle.wait_until_launch_idle(jid, timeout=wait_budget)
+        removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
 
-        try:
-            leftover = docker.list_containers_for_job(jid)
-        except DockerApiError:
+        leftover: list = ["?"]
+        budget = _remaining_cancel_budget(deadline)
+        if budget > 0:
+            try:
+                leftover = docker.list_containers_for_job(jid, timeout=budget)
+            except DockerDeadlineExceeded:
+                leftover = ["?"]
+            except DockerApiError:
+                leftover = ["?"]
+        else:
             leftover = ["?"]
         confirmed = (not leftover) and (not lifecycle.launch_active(jid))
         return {"job_id": jid, "removed": removed, "confirmed": confirmed}
