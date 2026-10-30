@@ -47,6 +47,13 @@ def _make_client(timeout: float = 60.0) -> httpx.Client:
     return httpx.Client(base_url=base, timeout=timeout)
 
 
+def _request_timeout(timeout: float | None) -> float | httpx.Timeout | None:
+    """Pass through an explicit per-call timeout; None keeps the client default."""
+    if timeout is None:
+        return None
+    return float(timeout)
+
+
 class DockerClient:
     """Subset of Docker Engine API used by the launcher."""
 
@@ -153,11 +160,14 @@ class DockerClient:
         # Raw multiplexed stream; decode lossily for diagnostics (no secrets expected in logs).
         return r.content.decode("utf-8", errors="replace")[-4000:]
 
-    def remove_container(self, container_id: str, *, force: bool = True) -> None:
-        r = self._http().delete(
-            f"/containers/{container_id}",
-            params={"force": "true" if force else "false", "v": "true"},
-        )
+    def remove_container(self, container_id: str, *, force: bool = True, timeout: float | None = None) -> None:
+        kwargs: dict[str, object] = {
+            "params": {"force": "true" if force else "false", "v": "true"},
+        }
+        req_timeout = _request_timeout(timeout)
+        if req_timeout is not None:
+            kwargs["timeout"] = req_timeout
+        r = self._http().delete(f"/containers/{container_id}", **kwargs)
         if r.status_code not in (204, 404):
             logger.warning("container remove %s failed: %s %s", container_id[:12], r.status_code, r.text[:200])
 
@@ -176,12 +186,15 @@ class DockerClient:
             )
         return list(r.json())
 
-    def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+    def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
         """Containers labeled ``opr.job_id=<job_id>`` (any state)."""
-        r = self._http().get(
-            "/containers/json",
-            params={"all": "true", "filters": json.dumps({"label": [f"opr.job_id={job_id}"]})},
-        )
+        kwargs: dict[str, object] = {
+            "params": {"all": "true", "filters": json.dumps({"label": [f"opr.job_id={job_id}"]})},
+        }
+        req_timeout = _request_timeout(timeout)
+        if req_timeout is not None:
+            kwargs["timeout"] = req_timeout
+        r = self._http().get("/containers/json", **kwargs)
         if r.status_code != 200:
             raise DockerApiError(
                 f"container list by job failed: {r.status_code}",
@@ -190,7 +203,11 @@ class DockerClient:
             )
         return list(r.json())
 
-    def kill_container(self, container_id: str) -> None:
-        r = self._http().post(f"/containers/{container_id}/kill", params={"signal": "KILL"})
+    def kill_container(self, container_id: str, *, timeout: float | None = None) -> None:
+        kwargs: dict[str, object] = {"params": {"signal": "KILL"}}
+        req_timeout = _request_timeout(timeout)
+        if req_timeout is not None:
+            kwargs["timeout"] = req_timeout
+        r = self._http().post(f"/containers/{container_id}/kill", **kwargs)
         if r.status_code not in (204, 404):
             logger.warning("container kill %s: %s", container_id[:12], r.status_code)

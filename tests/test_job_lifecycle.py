@@ -91,13 +91,13 @@ def test_cancel_during_create(
         def logs(self, container_id: str, *, tail: int = 200) -> str:
             return ""
 
-        def remove_container(self, container_id: str, *, force: bool = True) -> None:
+        def remove_container(self, container_id: str, *, force: bool = True, timeout: float | None = None) -> None:
             removed.append(container_id)
 
-        def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
             return []
 
-        def kill_container(self, cid: str) -> None:
+        def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
             return None
 
         def close(self) -> None:
@@ -176,13 +176,13 @@ def test_cancel_after_start(
         def logs(self, container_id: str, *, tail: int = 200) -> str:
             return ""
 
-        def remove_container(self, container_id: str, *, force: bool = True) -> None:
+        def remove_container(self, container_id: str, *, force: bool = True, timeout: float | None = None) -> None:
             containers.clear()
 
-        def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
             return list(containers)
 
-        def kill_container(self, cid: str) -> None:
+        def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
             killed.append(cid)
             containers.clear()
 
@@ -236,7 +236,7 @@ def test_late_start_after_tombstone(isolated_lifecycle: JobLifecycleRegistry) ->
 
 
 class _EmptyDocker:
-    def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+    def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
         return []
 
     def create_container(self, name: str, config: dict[str, Any]) -> str:

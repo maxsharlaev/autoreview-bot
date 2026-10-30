@@ -19,6 +19,8 @@ from app.launcher.spec import (
 )
 from app.launcher.timeouts import (
     CONTAINER_WAIT_GRACE_SECONDS,
+    launcher_cancel_deadline_seconds,
+    launcher_cancel_wait_seconds,
     max_review_timeout_seconds,
     validate_checkout_orphan_ttl,
 )
@@ -227,23 +229,49 @@ def run_review_job(
             docker.close()
 
 
-def _force_remove_job_containers(docker: DockerClient, jid: str) -> int:
-    """Kill + force-remove all containers labeled for ``jid``. Returns removals count."""
+def _remaining_cancel_budget(deadline_monotonic: float, *, floor: float = 0.05) -> float:
+    """Seconds left before the overall cancel deadline (never below ``floor`` while positive)."""
+    left = deadline_monotonic - time.monotonic()
+    if left <= 0:
+        return 0.0
+    return max(floor, left)
+
+
+def _force_remove_job_containers(
+    docker: DockerClient,
+    jid: str,
+    *,
+    deadline_monotonic: float,
+) -> int:
+    """Kill + force-remove all containers labeled for ``jid``. Returns removals count.
+
+    Each Docker call uses only the remaining overall cancel budget so list/kill/remove
+    cannot run to the client default (60 s) under a slow daemon.
+    """
     removed = 0
+    budget = _remaining_cancel_budget(deadline_monotonic)
+    if budget <= 0:
+        return 0
     try:
-        containers = docker.list_containers_for_job(jid)
+        containers = docker.list_containers_for_job(jid, timeout=budget)
     except DockerApiError as exc:
         raise LauncherJobError("CODEX_SANDBOX", f"docker list failed: {exc}") from exc
     for item in containers:
         cid = str(item.get("Id") or "")
         if not cid:
             continue
+        budget = _remaining_cancel_budget(deadline_monotonic)
+        if budget <= 0:
+            break
         try:
-            docker.kill_container(cid)
+            docker.kill_container(cid, timeout=budget)
         except DockerApiError:
             pass
+        budget = _remaining_cancel_budget(deadline_monotonic)
+        if budget <= 0:
+            break
         try:
-            docker.remove_container(cid, force=True)
+            docker.remove_container(cid, force=True, timeout=budget)
             removed += 1
         except DockerApiError as exc:
             logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
@@ -256,8 +284,11 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
     Marks the job cancelled (tombstone if unknown), **immediately** kills any visible
     containers, then waits briefly for an in-flight launch to reach a terminal state,
     and removes again. ``confirmed`` is True only when no container remains and no
-    launch is active. Wait bound is ``LAUNCHER_CANCEL_WAIT_SECONDS`` (< worker DELETE
-    read timeout).
+    launch is active.
+
+    The whole operation (Docker list/kill/remove + lifecycle wait) shares one deadline
+    ``LAUNCHER_CANCEL_DEADLINE_SECONDS`` (< worker DELETE read timeout). Each Docker
+    call receives only the remaining budget.
     """
     from app.launcher.paths import validate_uuid_job_id
 
@@ -267,16 +298,22 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
     owns = client is None
     docker = client or DockerClient()
     removed = 0
+    deadline = time.monotonic() + launcher_cancel_deadline_seconds()
     try:
         # Kill first so a blocked wait_container can finish and mark_finished promptly.
-        removed += _force_remove_job_containers(docker, jid)
-        lifecycle.wait_until_launch_idle(jid)
-        removed += _force_remove_job_containers(docker, jid)
+        removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
+        wait_budget = min(launcher_cancel_wait_seconds(), _remaining_cancel_budget(deadline, floor=0.0))
+        if wait_budget > 0:
+            lifecycle.wait_until_launch_idle(jid, timeout=wait_budget)
+        removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
 
-        try:
-            leftover = docker.list_containers_for_job(jid)
-        except DockerApiError:
-            leftover = ["?"]
+        leftover: list = ["?"]
+        budget = _remaining_cancel_budget(deadline)
+        if budget > 0:
+            try:
+                leftover = docker.list_containers_for_job(jid, timeout=budget)
+            except DockerApiError:
+                leftover = ["?"]
         confirmed = (not leftover) and (not lifecycle.launch_active(jid))
         return {"job_id": jid, "removed": removed, "confirmed": confirmed}
     finally:

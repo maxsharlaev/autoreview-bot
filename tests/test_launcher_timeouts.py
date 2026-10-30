@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from app.launcher.timeouts import (
     DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS,
+    LAUNCHER_CANCEL_DEADLINE_SECONDS,
     LAUNCHER_CANCEL_WAIT_SECONDS,
     REVIEW_CONTAINER_ORPHAN_GRACE_SECONDS,
     WORKER_CANCEL_HTTP_READ_SECONDS,
@@ -19,7 +20,8 @@ from app.launcher.timeouts import (
 
 
 def test_cancel_wait_strictly_below_worker_delete_read() -> None:
-    assert LAUNCHER_CANCEL_WAIT_SECONDS < WORKER_CANCEL_HTTP_READ_SECONDS
+    assert LAUNCHER_CANCEL_WAIT_SECONDS < LAUNCHER_CANCEL_DEADLINE_SECONDS
+    assert LAUNCHER_CANCEL_DEADLINE_SECONDS < WORKER_CANCEL_HTTP_READ_SECONDS
     validate_cancel_timeouts()
 
 
