@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Minimal echo/fake OpenAI-compatible proxy for M3 Codex spike. Logs requests; no real key."""
+
 from __future__ import annotations
 
 import json
-import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
 LOG_PATH = Path("/tmp/fake_proxy_requests.jsonl")
-PORT = int((__import__("os").environ.get("FAKE_PROXY_PORT") or "18080"))
+PORT = int(__import__("os").environ.get("FAKE_PROXY_PORT") or "18080")
 
 
 def _append(rec: dict) -> None:
@@ -36,7 +36,9 @@ class Handler(BaseHTTPRequestHandler):
         auth_meta = {
             "present": bool(auth),
             "scheme": auth.split(" ", 1)[0] if auth else "",
-            "token_prefix": (auth.split(" ", 1)[1][:12] + "…") if " " in auth and len(auth.split(" ", 1)[1]) > 12 else (auth.split(" ", 1)[1] if " " in auth else ""),
+            "token_prefix": (auth.split(" ", 1)[1][:12] + "…")
+            if " " in auth and len(auth.split(" ", 1)[1]) > 12
+            else (auth.split(" ", 1)[1] if " " in auth else ""),
             "raw_len": len(auth),
         }
         headers = {k: v for k, v in self.headers.items() if k.lower() not in {"authorization"}}
@@ -56,7 +58,13 @@ class Handler(BaseHTTPRequestHandler):
             "body_preview": body[:800].decode("utf-8", errors="replace"),
         }
         _append(rec)
-        print(json.dumps({"method": rec["method"], "path": rec["path"], "auth": rec["auth"], "body_len": rec["body_len"]}, ensure_ascii=False), flush=True)
+        print(
+            json.dumps(
+                {"method": rec["method"], "path": rec["path"], "auth": rec["auth"], "body_len": rec["body_len"]},
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         return rec
 
     def _send(self, code: int, body: bytes, content_type: str = "application/json") -> None:
@@ -94,9 +102,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Connection", "close")
                 self.end_headers()
                 chunks = [
-                    {"id": "chatcmpl-fake", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]},
-                    {"id": "chatcmpl-fake", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "{\"findings\":[]}"}, "finish_reason": None}]},
-                    {"id": "chatcmpl-fake", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                    {
+                        "id": "chatcmpl-fake",
+                        "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                    },
+                    {
+                        "id": "chatcmpl-fake",
+                        "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {"content": '{"findings":[]}'}, "finish_reason": None}],
+                    },
+                    {
+                        "id": "chatcmpl-fake",
+                        "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    },
                 ]
                 for ch in chunks:
                     self.wfile.write(f"data: {json.dumps(ch)}\n\n".encode())
@@ -107,7 +127,13 @@ class Handler(BaseHTTPRequestHandler):
             data = {
                 "id": "chatcmpl-fake",
                 "object": "chat.completion",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": "{\"findings\":[]}"}, "finish_reason": "stop"}],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"findings":[]}'},
+                        "finish_reason": "stop",
+                    }
+                ],
             }
             self._send(200, json.dumps(data).encode())
             return
@@ -121,9 +147,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Connection", "close")
                 self.end_headers()
                 events = [
-                    ("response.created", {"type": "response.created", "response": {"id": "resp_fake", "status": "in_progress"}}),
-                    ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "{\"findings\":[]}"}),
-                    ("response.completed", {"type": "response.completed", "response": {"id": "resp_fake", "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "{\"findings\":[]}"}]}]}}),
+                    (
+                        "response.created",
+                        {"type": "response.created", "response": {"id": "resp_fake", "status": "in_progress"}},
+                    ),
+                    ("response.output_text.delta", {"type": "response.output_text.delta", "delta": '{"findings":[]}'}),
+                    (
+                        "response.completed",
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_fake",
+                                "status": "completed",
+                                "output": [
+                                    {"type": "message", "content": [{"type": "output_text", "text": '{"findings":[]}'}]}
+                                ],
+                            },
+                        },
+                    ),
                 ]
                 for evt, payload_evt in events:
                     self.wfile.write(f"event: {evt}\ndata: {json.dumps(payload_evt)}\n\n".encode())
@@ -138,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "type": "message",
                         "role": "assistant",
-                        "content": [{"type": "output_text", "text": "{\"findings\":[]}"}],
+                        "content": [{"type": "output_text", "text": '{"findings":[]}'}],
                     }
                 ],
             }
