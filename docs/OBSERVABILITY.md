@@ -7,6 +7,7 @@ This service does not run Grafana, Prometheus, or Loki. It only **exports**:
 | --- | --- | --- |
 | Prometheus text | API `GET /metrics` (`:8000`) | none |
 | Prometheus text | Worker `GET /metrics` (`:9100`) | none |
+| Prometheus text | Model-proxy `GET /metrics` (`:8081`, container-runner overlay) | none |
 | Ops snapshot | `GET /api/v1/ops/status` | Bearer `REVIEW_API_KEY` |
 | Logs | stdout (`LOG_FORMAT=text\|json`) | — |
 

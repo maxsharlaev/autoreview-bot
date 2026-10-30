@@ -1,15 +1,18 @@
 # Opt-in overlay for codex.runner_backend: container (not loaded by default CI/`docker compose`).
 # Usage:
 #   docker build -f Dockerfile.review -t opr-review:local .
-#   # set LAUNCHER_TOKEN in .env (openssl rand -hex 32), then:
+#   # set LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN in .env (openssl rand -hex 32), then:
 #   docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build
-# LAUNCHER_TOKEN uses non-required interpolation (${LAUNCHER_TOKEN:-}) so this file can be
-# parsed without the var; the launcher process and ContainerExecutor fail closed if it is empty.
+# LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN use non-required interpolation (${VAR:-}) so this file can be
+# parsed without the vars; launcher / model-proxy fail closed if empty when used.
+# model-proxy holds real model keys (OPENAI_API_KEY / PROXY_OWNER_*); no Docker socket, no env_file.
 services:
   worker:
     environment:
       LAUNCHER_URL: http://launcher:8080
       LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
+      PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
+      MODEL_PROXY_URL: "${MODEL_PROXY_URL:-http://model-proxy:8081}"
       OPR_CHECKOUT_BASE: /var/opr/checkouts
       OPR_CHECKOUT_VOLUME: opr_checkouts
       OPR_MAX_REVIEW_TIMEOUT_SECONDS: "${OPR_MAX_REVIEW_TIMEOUT_SECONDS:-600}"
@@ -55,6 +58,33 @@ services:
       redis:
         condition: service_healthy
 
+  model-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.model-proxy
+    # No env_file / no Docker socket. Real model keys live only here (M3).
+    # Per-owner keys: add PROXY_OWNER_<ID>_OPENAI_API_KEY via host env / compose override
+    # (Compose only passes listed keys; OPENAI_API_KEY is the default upstream key).
+    environment:
+      PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      PROXY_PROVIDER: "${PROXY_PROVIDER:-openai}"
+      PROXY_UPSTREAM_HOST: "${PROXY_UPSTREAM_HOST:-api.openai.com}"
+      PROXY_UPSTREAM_SCHEME: "${PROXY_UPSTREAM_SCHEME:-https}"
+      OPR_MAX_REVIEW_TIMEOUT_SECONDS: "${OPR_MAX_REVIEW_TIMEOUT_SECONDS:-600}"
+      PROXY_TOKEN_GRACE_SECONDS: "${PROXY_TOKEN_GRACE_SECONDS:-60}"
+      PROXY_MAX_BODY_BYTES: "${PROXY_MAX_BODY_BYTES:-4194304}"
+      PROXY_MAX_REQUESTS_PER_JOB: "${PROXY_MAX_REQUESTS_PER_JOB:-50}"
+      PROXY_MAX_BYTES_PER_JOB: "${PROXY_MAX_BYTES_PER_JOB:-16777216}"
+      PROXY_MAX_CONCURRENT_PER_JOB: "${PROXY_MAX_CONCURRENT_PER_JOB:-2}"
+      PROXY_STREAM_IDLE_TIMEOUT_SECONDS: "${PROXY_STREAM_IDLE_TIMEOUT_SECONDS:-300}"
+      PROXY_UPSTREAM_TIMEOUT_SECONDS: "${PROXY_UPSTREAM_TIMEOUT_SECONDS:-660}"
+    expose:
+      - "8081"
+    networks:
+      - internal
+      - review_egress
+
 volumes:
   opr_checkouts:
     name: opr_checkouts
@@ -62,5 +92,7 @@ volumes:
 networks:
   review_egress:
     name: autoreview_review_egress
-    # MVP: internet-capable for the model API; not attached to postgres/redis/api.
-    # Strict egress allowlist arrives with the M3 model-API proxy.
+    # Review containers join this network to reach model-proxy only (PR3 wiring).
+    # model-proxy also joins internal + review_egress; it alone reaches the upstream API.
+    # Host firewall / cloud SG should still restrict egress from review containers to the
+    # proxy (and from the proxy to the upstream model host).

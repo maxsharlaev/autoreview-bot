@@ -42,7 +42,7 @@
 | **M1 — ReviewExecutor + `in_process`** | **done** | [#26](https://github.com/maxsharlaev/autoreview-bot/pull/26) на `main` |
 | **M2 — Эфемерный контейнер ревью + launcher** | **done** | [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27) на `main`: сокет Docker только у launcher, жёстко заданный create spec, leases, fail-closed |
 | **Ограниченная отмена launcher при таймауте worker DELETE** | **planned** | [#29](https://github.com/maxsharlaev/autoreview-bot/issues/29): ограничить всю отмену (list/kill/remove), не только ожидание lifecycle, чтобы worker DELETE не таймаутился под нагрузкой Docker |
-| **M3 — Прокси исходящего трафика к API модели + строгий список разрешённых** | **design** | Убрать ключ модели из контейнера ревью |
+| **M3 — Прокси исходящего трафика к API модели + строгий список разрешённых** | **in progress** | Сначала сервис proxy (токены, allowlist, SSE); затем wiring контейнеров ревью + host egress; после этого убрать ключ модели из контейнера ревью |
 | **M4 — Контейнерный backend по умолчанию** | **planned** | После M3: сделать `runner_backend=container` значением по умолчанию |
 | **AppArmor на Linux-хосте для контейнеров ревью** | **planned** | Docker Desktop: N/A; Linux-хосты: отдельный профиль вместо follow-up с default/unconfined |
 

@@ -107,6 +107,31 @@
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
 | `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | Только M2: ключ модели в env процесса Codex. Уйдёт после model-API proxy в M3. |
 
+<!-- section: model-proxy-m3 -->
+## Model proxy (M3)
+
+Нужен, когда overlay container-runner поднимает `model-proxy` (opt-in Compose). Proxy хранит настоящие ключи модели; контейнеры ревью будут использовать короткоживущие job-токены (подключение — в следующем PR). **Issuer** — worker (`PROXY_ISSUER_TOKEN`). Режим `in_process` в M3 **не** использует proxy.
+
+| Переменная | По умолчанию | Кто читает | Заметки |
+| --- | --- | --- | --- |
+| `PROXY_ISSUER_TOKEN` | (нужен для старта model-proxy) | model-proxy, worker | Общий bearer для `POST/DELETE /internal/jobs/{job_id}/token`. Сгенерируйте `openssl rand -hex 32` (>= 16 символов). |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker | Базовый URL для issuer-вызовов (и позже для wiring ревью). |
+| `OPENAI_API_KEY` | `""` | model-proxy (и api/worker как сейчас) | Upstream-ключ модели по умолчанию внутри proxy. |
+| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Upstream-ключ на владельца; иначе `OPENAI_API_KEY`. |
+| `PROXY_PROVIDER` | `openai` | model-proxy | Id провайдера (в M3 PR2 только `openai`; позже расширим). |
+| `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Фиксированный upstream host (клиент не переопределяет). |
+| `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` или `http` (тесты). |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | model-proxy, worker, launcher | Верхняя граница TTL job-токена вместе с grace. |
+| `PROXY_TOKEN_GRACE_SECONDS` | `60` | model-proxy | Добавка к `timeout_seconds` для TTL токена. |
+| `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Макс. размер тела запроса. |
+| `PROXY_MAX_REQUESTS_PER_JOB` | `50` | model-proxy | Макс. число proxied-запросов на job-токен. |
+| `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Макс. байт in+out на job-токен. |
+| `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Макс. одновременных upstream-потоков на job. |
+| `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Idle-лимит для SSE (read timeout). |
+| `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Общий HTTP-таймаут upstream. |
+
+Публичный allowlist proxy: только **`POST /v1/responses`** (SSE поддерживается). Без WebSocket / CONNECT. Логи не содержат токены, ключи и тела запросов.
+
 <!-- section: passed-through-to-subprocesses -->
 ## Передаётся подпроцессам
 

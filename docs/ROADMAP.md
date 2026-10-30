@@ -42,7 +42,7 @@ What works today on `main`, and the honest limits of each area.
 | **M1 - ReviewExecutor + `in_process`** | **done** | [#26](https://github.com/maxsharlaev/autoreview-bot/pull/26) on `main` |
 | **M2 - Ephemeral review container + launcher** | **done** | [#27](https://github.com/maxsharlaev/autoreview-bot/pull/27) on `main`: launcher-only Docker socket, hard-coded create spec, leases, fail closed |
 | **Launcher cancel bounded under worker DELETE timeout** | **planned** | [#29](https://github.com/maxsharlaev/autoreview-bot/issues/29): bound the whole cancel (list/kill/remove), not only the lifecycle wait, so worker DELETE cannot time out under Docker load |
-| **M3 - Model-API egress proxy + strict egress allowlist** | **design** | Remove model key from the review container |
+| **M3 - Model-API egress proxy + strict egress allowlist** | **in progress** | Proxy service (tokens, allowlist, SSE) lands first; review-container wiring + host egress next; then remove model key from the review container |
 | **M4 - Container backend as default** | **planned** | After M3: make `runner_backend=container` the default |
 | **Linux-host AppArmor for review containers** | **planned** | Docker Desktop: N/A; Linux hosts: dedicated profile instead of default/unconfined follow-up |
 
