@@ -1,0 +1,17 @@
+model_provider = "opr_proxy"
+model = "gpt-4.1-mini"
+
+[model_providers.opr_proxy]
+name = "OPR fake proxy"
+base_url = "http://opr-fake-proxy:18080/v1"
+env_key = "CODEX_API_KEY"
+wire_api = "responses"
+
+[shell_environment_policy]
+inherit = "core"
+ignore_default_excludes = false
+[shell_environment_policy.set]
+LANG = "C.UTF-8"
+TERM = "dumb"
+[analytics]
+enabled = false
