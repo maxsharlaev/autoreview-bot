@@ -66,11 +66,11 @@ def test_launcher_has_no_env_file_and_no_secret_env_names() -> None:
     launcher = _service(overlay, "launcher")
     assert "env_file" not in launcher, "launcher must not use env_file (would ingest .env secrets)"
     for name in sorted(_env_keys(launcher)):
-        if name == "LAUNCHER_TOKEN":
+        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN"}:
             continue
         assert _SECRETISH.search(name) is None, (
             f"launcher environment must not include secret-like name {name!r} "
-            "(only LAUNCHER_TOKEN is allowed among KEY/TOKEN/SECRET/PASSWORD/PRIVATE)"
+            "(only LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN among KEY/TOKEN/SECRET/PASSWORD/PRIVATE)"
         )
 
 
@@ -132,7 +132,7 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
     launcher = _service(data, "launcher")
     assert not launcher.get("env_file"), "rendered launcher must not carry env_file"
     for name in sorted(_env_keys(launcher)):
-        if name == "LAUNCHER_TOKEN":
+        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN"}:
             continue
         assert _SECRETISH.search(name) is None, name
     # Host env supplies LAUNCHER_TOKEN for interpolation; api must not receive it
@@ -173,9 +173,12 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
 
 
 # Launcher settings documented in docs/ENVIRONMENT.md that must appear in the overlay
-# with host-interpolated defaults (ARB-27-020). Secrets except LAUNCHER_TOKEN are forbidden.
+# with host-interpolated defaults (ARB-27-020). Secrets except LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN are forbidden.
 _DOCUMENTED_LAUNCHER_SETTINGS = (
     "LAUNCHER_TOKEN",
+    "PROXY_ISSUER_TOKEN",
+    "MODEL_PROXY_URL",
+    "OPR_MODEL_PROXY_BASE_URL",
     "LAUNCHER_APPARMOR_PROFILE",
     "LAUNCHER_CANCEL_DEADLINE_SECONDS",
     "LAUNCHER_CANCEL_WAIT_SECONDS",
@@ -300,7 +303,7 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
     assert str(launcher_env.get("LAUNCHER_CANCEL_WAIT_SECONDS")) in {"2.5", "2.50"}
     assert str(launcher_env.get("OPR_CHECKOUT_ORPHAN_TTL_SECONDS")) == "1200"
     for name in sorted(_env_keys(_service(data, "launcher"))):
-        if name == "LAUNCHER_TOKEN":
+        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN"}:
             continue
         assert _SECRETISH.search(name) is None, name
 
@@ -366,6 +369,12 @@ def test_overlay_lists_model_proxy_service() -> None:
     nets = _network_names(proxy)
     assert "internal" in nets
     assert "review_egress" in nets
+    assert "proxy_egress" in nets
+    review_net = (overlay.get("networks") or {}).get("review_egress") or {}
+    assert review_net.get("internal") is True
+    launcher_keys = _env_keys(_service(overlay, "launcher"))
+    for name in ("PROXY_ISSUER_TOKEN", "MODEL_PROXY_URL", "OPR_MODEL_PROXY_BASE_URL"):
+        assert name in launcher_keys, f"launcher missing {name}"
     keys = _env_keys(proxy)
     for name in _DOCUMENTED_MODEL_PROXY_SETTINGS:
         assert name in keys, f"model-proxy missing {name}"
@@ -374,7 +383,7 @@ def test_overlay_lists_model_proxy_service() -> None:
         assert name in worker_keys, f"worker missing {name}"
     docs_names = _docs_model_proxy_table_vars()
     # MODEL_PROXY_URL is worker-only; PROXY_OWNER_* pattern is override-only
-    missing = docs_names - keys - {"MODEL_PROXY_URL"}
+    missing = docs_names - keys - {"MODEL_PROXY_URL", "OPR_MODEL_PROXY_BASE_URL"}
     assert not missing, f"docs model-proxy vars missing from compose: {sorted(missing)}"
 
 

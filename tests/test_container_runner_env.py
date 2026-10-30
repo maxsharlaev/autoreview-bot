@@ -6,6 +6,11 @@ import pytest
 from app.services.container_runner_env import ensure_container_runner_env
 
 
+def _set_proxy_issuer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PROXY_ISSUER_TOKEN", "test-issuer-token-32chars-ok!!")
+    monkeypatch.setenv("MODEL_PROXY_URL", "http://model-proxy:8081")
+
+
 def test_in_process_allows_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LAUNCHER_TOKEN", raising=False)
     ensure_container_runner_env(runner_backend="in_process")
@@ -25,11 +30,13 @@ def test_container_rejects_short_token(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_container_accepts_long_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    _set_proxy_issuer(monkeypatch)
     ensure_container_runner_env(runner_backend="container")
 
 
 def test_container_rejects_timeout_vs_arq(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    _set_proxy_issuer(monkeypatch)
     with pytest.raises(RuntimeError, match="worker_job_timeout"):
         ensure_container_runner_env(
             runner_backend="container",
@@ -40,6 +47,7 @@ def test_container_rejects_timeout_vs_arq(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_container_accepts_timeout_under_arq(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    _set_proxy_issuer(monkeypatch)
     ensure_container_runner_env(
         runner_backend="container",
         timeout_seconds=600,
@@ -50,6 +58,7 @@ def test_container_accepts_timeout_under_arq(monkeypatch: pytest.MonkeyPatch) ->
 def test_container_allows_short_checkout_ttl_with_leases(monkeypatch: pytest.MonkeyPatch) -> None:
     """Checkout dirs are lease-protected; short OPR_CHECKOUT_ORPHAN_TTL is only a no-lease fallback."""
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    _set_proxy_issuer(monkeypatch)
     monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "100")
     ensure_container_runner_env(
         runner_backend="container",
@@ -60,6 +69,7 @@ def test_container_allows_short_checkout_ttl_with_leases(monkeypatch: pytest.Mon
 
 def test_container_accepts_orphan_ttl_covering_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    _set_proxy_issuer(monkeypatch)
     monkeypatch.delenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", raising=False)
     monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
     ensure_container_runner_env(
@@ -89,6 +99,7 @@ def test_worker_still_requires_launcher_token(monkeypatch: pytest.MonkeyPatch) -
 def test_container_rejects_timeout_above_max_review(monkeypatch: pytest.MonkeyPatch) -> None:
     """ARB-27-019: codex.timeout_seconds must be <= OPR_MAX_REVIEW_TIMEOUT_SECONDS."""
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    _set_proxy_issuer(monkeypatch)
     monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
     with pytest.raises(RuntimeError, match="OPR_MAX_REVIEW_TIMEOUT_SECONDS"):
         ensure_container_runner_env(
@@ -100,9 +111,26 @@ def test_container_rejects_timeout_above_max_review(monkeypatch: pytest.MonkeyPa
 
 def test_container_accepts_timeout_equal_max_review(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    _set_proxy_issuer(monkeypatch)
     monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
     ensure_container_runner_env(
         runner_backend="container",
         timeout_seconds=600,
         worker_job_timeout=900,
     )
+
+
+def test_container_requires_proxy_issuer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    monkeypatch.delenv("PROXY_ISSUER_TOKEN", raising=False)
+    monkeypatch.setenv("MODEL_PROXY_URL", "http://model-proxy:8081")
+    with pytest.raises(RuntimeError, match="PROXY_ISSUER_TOKEN"):
+        ensure_container_runner_env(runner_backend="container")
+
+
+def test_container_requires_model_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+    monkeypatch.setenv("PROXY_ISSUER_TOKEN", "test-issuer-token-32chars-ok!!")
+    monkeypatch.delenv("MODEL_PROXY_URL", raising=False)
+    with pytest.raises(RuntimeError, match="MODEL_PROXY_URL"):
+        ensure_container_runner_env(runner_backend="container")

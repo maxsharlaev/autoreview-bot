@@ -24,10 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 class RunReviewRequest(BaseModel):
-    """Worker may send only these fields in the JSON body (plus auth + model key header)."""
+    """Worker may send only these fields in the JSON body (plus launcher auth)."""
 
     job_id: str = Field(min_length=1, max_length=128)
     checkout_ref: str = Field(min_length=1, max_length=512)
+    proxy_token: str = Field(min_length=1, max_length=512)
 
 
 class RunReviewResponse(BaseModel):
@@ -123,22 +124,28 @@ def start_review(
 ) -> RunReviewResponse:
     """Start a hard-coded review container.
 
-    Body is only ``job_id`` + ``checkout_ref``. The model key is passed in
-    ``X-Model-Api-Key`` for M2 (removed once M3 model-API proxy lands). Job
-    tunables (model, timeout, sandbox) are read from staged ``job.json``.
+    Body: ``job_id``, ``checkout_ref``, and ``proxy_token`` (short-lived ``opr_job_``
+    bearer from model-proxy). The legacy ``X-Model-Api-Key`` header is ignored
+    when present (M3: real model keys never enter the launcher). Job tunables
+    (model, timeout, sandbox) are read from staged ``job.json``.
     """
     try:
         validate_job_id(body.job_id)
     except CheckoutPathError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    key = (x_model_api_key or "").strip()
-    if not key:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Model-Api-Key required")
+    # Explicitly ignore legacy model-key header (do not log or forward the value).
+    _ = x_model_api_key
+    token = (body.proxy_token or "").strip()
+    if not token.startswith("opr_job_"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="proxy_token must be an opr_job_ bearer from model-proxy",
+        )
     try:
         result = run_review_job(
             job_id=body.job_id,
             checkout_ref=body.checkout_ref,
-            model_api_key=key,
+            proxy_token=token,
         )
     except LauncherJobError as exc:
         # Map all launcher/container failures to a fail-closed sandbox signal for the worker.

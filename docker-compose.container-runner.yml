@@ -46,6 +46,9 @@ services:
       OPR_LEASE_HEARTBEAT_SECONDS: "${OPR_LEASE_HEARTBEAT_SECONDS:-30}"
       OPR_REVIEW_ORPHAN_TTL_SECONDS: "${OPR_REVIEW_ORPHAN_TTL_SECONDS:-7200}"
       OPR_REVIEW_REAPER_INTERVAL_SECONDS: "${OPR_REVIEW_REAPER_INTERVAL_SECONDS:-300}"
+      PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
+      MODEL_PROXY_URL: "${MODEL_PROXY_URL:-http://model-proxy:8081}"
+      OPR_MODEL_PROXY_BASE_URL: "${OPR_MODEL_PROXY_BASE_URL:-http://model-proxy:8081/v1}"
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       # High trust: this is the only service that mounts the Docker socket.
@@ -58,6 +61,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      model-proxy:
+        condition: service_started
 
   model-proxy:
     build:
@@ -85,6 +90,7 @@ services:
     networks:
       - internal
       - review_egress
+      - proxy_egress
 
 volumes:
   opr_checkouts:
@@ -93,7 +99,10 @@ volumes:
 networks:
   review_egress:
     name: autoreview_review_egress
-    # Review containers join this network to reach model-proxy only (PR3 wiring).
-    # model-proxy also joins internal + review_egress; it alone reaches the upstream API.
-    # Host firewall / cloud SG should still restrict egress from review containers to the
-    # proxy (and from the proxy to the upstream model host).
+    # Review containers + model-proxy only (no external routes). Containers cannot
+    # reach the public internet; they talk to model-proxy by Compose DNS.
+    internal: true
+  proxy_egress:
+    name: autoreview_proxy_egress
+    # model-proxy alone uses this network to reach the upstream model API.
+    # Host firewall / cloud SG should still restrict egress to the upstream host.

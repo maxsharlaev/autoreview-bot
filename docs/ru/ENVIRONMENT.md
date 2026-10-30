@@ -106,20 +106,23 @@
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
-| `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | Только M2: ключ модели в env процесса Codex. Уйдёт после model-API proxy в M3. |
+| `PROXY_ISSUER_TOKEN` | (обязателен для container backend) | worker, launcher, model-proxy | Общий issuer bearer; launcher reaper/cancel отзывают оставшиеся job-токены. |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Base URL issuer API (worker выдаёт; launcher отзывает при cancel/reaper). |
+| `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | Пишется в review `CODEX_HOME/config.toml` as the custom provider `base_url`. |
 
 <!-- section: model-proxy-m3 -->
 ## Model proxy (M3)
 
-Нужен, когда overlay container-runner поднимает `model-proxy` (opt-in Compose). Proxy хранит настоящие ключи модели; контейнеры ревью будут использовать короткоживущие job-токены (подключение — в следующем PR). **Issuer** — worker (`PROXY_ISSUER_TOKEN`). Режим `in_process` в M3 **не** использует proxy.
+Нужен, когда overlay container-runner поднимает `model-proxy` (opt-in Compose). Proxy хранит настоящие ключи модели; worker выдаёт короткоживущие `opr_job_` токены, а launcher передаёт в контейнер только этот токен как `CODEX_API_KEY` и сгенерированный `config.toml` (`model_provider = "opr_proxy"`). Review-контейнеры подключены только к internal-сети `review_egress` (без интернета); `model-proxy` ходит к upstream через `proxy_egress`. Режим `in_process` в M3 proxy не использует. Codex 0.164.0: отдельного надёжного флага отключения chatgpt.com model-catalog не найдено (кастомный провайдер в spike этот путь обходил); изоляция сети — запасной барьер.
 
 Proxy отправляет upstream `Accept-Encoding: identity` и снимает representation-заголовки `content-encoding` / `content-length` / `transfer-encoding` из ответа клиенту (чтобы не пробросить encoding после декодированного тела).
 
 
 | Переменная | По умолчанию | Кто читает | Заметки |
 | --- | --- | --- | --- |
-| `PROXY_ISSUER_TOKEN` | (нужен для старта model-proxy) | model-proxy, worker | Общий bearer для `POST/DELETE /internal/jobs/{job_id}/token`. Сгенерируйте `openssl rand -hex 32` (>= 16 символов). |
-| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker | Базовый URL для issuer-вызовов (и позже для wiring ревью). |
+| `PROXY_ISSUER_TOKEN` | (нужен для старта model-proxy) | model-proxy, worker, launcher | Общий bearer для `POST/DELETE /internal/jobs/{job_id}/token`. Сгенерируйте `openssl rand -hex 32` (>= 16 символов). |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher |
+| `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (и api/worker как сейчас) | Upstream-ключ модели по умолчанию внутри proxy. |
 | `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Upstream-ключ на владельца; иначе `OPENAI_API_KEY`. |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Id провайдера (в M3 PR2 только `openai`; позже расширим). |

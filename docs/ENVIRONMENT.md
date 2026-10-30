@@ -106,20 +106,23 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Docker Engine endpoint. Compose sets the unix socket; do not point this at a remote daemon from an untrusted network. |
-| `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | M2 only: per-run model key for the Codex process env. Removed once the M3 model-API proxy lands. |
+| `PROXY_ISSUER_TOKEN` | (required for container backend) | worker, launcher, model-proxy | Shared issuer bearer; launcher reaper/cancel revoke leftover job tokens. |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Issuer base URL (worker issues; launcher revokes on cancel/reaper). |
+| `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | Written into review `CODEX_HOME/config.toml` as the custom provider `base_url`. |
 
 <!-- section: model-proxy-m3 -->
 ## Model proxy (M3)
 
-Used when the container-runner overlay includes `model-proxy` (opt-in Compose). The proxy holds real model keys; review containers will use short-lived job tokens (wiring in a follow-up PR). The **worker** is the issuer (`PROXY_ISSUER_TOKEN`). `in_process` does **not** use the proxy in M3.
+Used when the container-runner overlay includes `model-proxy` (opt-in Compose). The proxy holds real model keys; the worker issues short-lived `opr_job_` tokens and the launcher injects only that token as `CODEX_API_KEY` plus a generated `config.toml` (`model_provider = "opr_proxy"`). Review containers attach only to the internal `review_egress` network (no internet); `model-proxy` reaches the upstream API via `proxy_egress`. `in_process` does **not** use the proxy in M3. Codex 0.164.0: no separate reliable knob was found to disable the built-in chatgpt.com model-catalog fetch beyond using a custom provider (which avoided that path in the spike); network isolation is the backstop.
 
 The proxy sends upstream `Accept-Encoding: identity` and strips representation headers `content-encoding` / `content-length` / `transfer-encoding` from the client response (so a decoded body is never forwarded with a stale encoding).
 
 
 | Variable | Default | Read by | Notes |
 | --- | --- | --- | --- |
-| `PROXY_ISSUER_TOKEN` | (required to start model-proxy) | model-proxy, worker | Shared bearer for `POST/DELETE /internal/jobs/{job_id}/token`. Generate with `openssl rand -hex 32` (>= 16 chars). |
-| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker | Base URL for issuer calls (and later for review wiring). |
+| `PROXY_ISSUER_TOKEN` | (required to start model-proxy / container backend) | model-proxy, worker, launcher | Shared bearer for `POST/DELETE /internal/jobs/{job_id}/token`. Generate with `openssl rand -hex 32` (>= 16 chars). |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Base URL for issuer/revoke calls. |
+| `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (and api/worker as today) | Default upstream model key inside the proxy. |
 | `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Per-owner upstream key; falls back to `OPENAI_API_KEY`. |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Upstream provider id (only `openai` in M3 PR2; extensible later). |

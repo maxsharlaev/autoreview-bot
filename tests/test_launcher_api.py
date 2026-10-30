@@ -46,7 +46,10 @@ def test_healthz(client: TestClient) -> None:
 
 
 def test_reviews_requires_auth(client: TestClient) -> None:
-    r = client.post("/v1/reviews", json={"job_id": "abc", "checkout_ref": "abc/repo"})
+    r = client.post(
+        "/v1/reviews",
+        json={"job_id": "abc", "checkout_ref": "abc/repo", "proxy_token": "opr_job_test_token_ok"},
+    )
     assert r.status_code == 401
 
 
@@ -55,12 +58,12 @@ def test_reviews_rejects_bad_token(client: TestClient, launcher_env) -> None:
     r = client.post(
         "/v1/reviews",
         headers={"Authorization": "Bearer wrong-token-wrong-token", "X-Model-Api-Key": "sk"},
-        json={"job_id": "abc", "checkout_ref": "abc/repo"},
+        json={"job_id": "abc", "checkout_ref": "abc/repo", "proxy_token": "opr_job_test_token_ok"},
     )
     assert r.status_code == 401
 
 
-def test_reviews_requires_model_key(client: TestClient, launcher_env) -> None:
+def test_reviews_requires_proxy_token(client: TestClient, launcher_env) -> None:
     token, base = launcher_env
     job = base / "abc" / "repo"
     job.mkdir(parents=True)
@@ -71,7 +74,7 @@ def test_reviews_requires_model_key(client: TestClient, launcher_env) -> None:
         headers={"Authorization": f"Bearer {token}"},
         json={"job_id": "abc", "checkout_ref": "abc/repo"},
     )
-    assert r.status_code == 400
+    assert r.status_code == 422  # pydantic missing proxy_token
 
 
 def test_reviews_fail_closed_on_docker_error(client: TestClient, launcher_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,8 +92,12 @@ def test_reviews_fail_closed_on_docker_error(client: TestClient, launcher_env, m
     monkeypatch.setattr("app.launcher.main.run_review_job", boom)
     r = client.post(
         "/v1/reviews",
-        headers={"Authorization": f"Bearer {token}", "X-Model-Api-Key": "sk-test"},
-        json={"job_id": "abc", "checkout_ref": "abc/repo"},
+        headers={"Authorization": f"Bearer {token}", "X-Model-Api-Key": "sk-real-key-must-be-ignored"},
+        json={
+            "job_id": "abc",
+            "checkout_ref": "abc/repo",
+            "proxy_token": "opr_job_test_token_ok",
+        },
     )
     assert r.status_code == 502
     body = r.json()

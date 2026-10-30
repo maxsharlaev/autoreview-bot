@@ -190,12 +190,15 @@ def build_container_config(
     sandbox: str,
     approval_policy: str,
     allow_unsandboxed: bool,
-    model_api_key: str,
+    proxy_token: str,
 ) -> dict[str, Any]:
-    """Full ContainerCreate body. Command/entrypoint come from the image."""
+    """Full ContainerCreate body. Command/entrypoint come from the image.
+
+    ``proxy_token`` is the short-lived ``opr_job_`` bearer (never a real model key).
+    Only ``CODEX_API_KEY`` is set; entrypoint may mirror it to ``OPENAI_API_KEY``.
+    """
     env = [
-        f"CODEX_API_KEY={model_api_key}",
-        f"OPENAI_API_KEY={model_api_key}",
+        f"CODEX_API_KEY={proxy_token}",
         f"OPR_MODEL={model}",
         f"OPR_TIMEOUT_SECONDS={int(timeout_seconds)}",
         f"OPR_REASONING_EFFORT={reasoning_effort}",

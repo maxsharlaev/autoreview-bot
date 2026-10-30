@@ -53,7 +53,7 @@ def test_cancel_before_create(
         run_review_job(
             job_id=jid,
             checkout_ref=f"{jid}/repo",
-            model_api_key="sk",
+            proxy_token="opr_job_test_token_ok",
             client=_EmptyDocker(),  # type: ignore[arg-type]
         )
 
@@ -111,7 +111,7 @@ def test_cancel_during_create(
             run_review_job(
                 job_id=jid,
                 checkout_ref=f"{jid}/repo",
-                model_api_key="sk",
+                proxy_token="opr_job_test_token_ok",
                 client=SlowCreateDocker(),  # type: ignore[arg-type]
             )
         except BaseException as exc:  # noqa: BLE001
@@ -197,7 +197,7 @@ def test_cancel_after_start(
             run_review_job(
                 job_id=jid,
                 checkout_ref=f"{jid}/repo",
-                model_api_key="sk",
+                proxy_token="opr_job_test_token_ok",
                 client=RunningDocker(),  # type: ignore[arg-type]
             )
         except BaseException as exc:  # noqa: BLE001

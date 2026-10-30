@@ -102,14 +102,14 @@ def test_canary_env_absent_in_review_container(review_image: str) -> None:
         sandbox="read-only",
         approval_policy="never",
         allow_unsandboxed=False,
-        model_api_key="sk",
+        proxy_token="opr_job_test_token_ok",
     )
     joined = "\n".join(cfg["Env"])
     assert "DATABASE_URL" not in joined
     assert "GITHUB" not in joined
     assert "WORKER_CANARY" not in joined
     assert "REDIS" not in joined
-    assert "CODEX_API_KEY=sk" in joined
+    assert any(e.startswith("CODEX_API_KEY=opr_job_") for e in cfg["Env"])
 
 
 def test_postgres_unreachable_from_review_network(review_image: str) -> None:
