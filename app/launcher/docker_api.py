@@ -3,13 +3,21 @@
 Uses httpx + a custom transport so unit tests can inject a mock transport without
 the ``docker`` PyPI package. Production talks to ``DOCKER_HOST`` or the default
 socket path.
+
+Cancel-path calls pass a wall-clock ``timeout`` (remaining cancel budget). That
+bound is enforced with ``asyncio.timeout`` around an ``httpx.AsyncClient``
+request (including body read), not HTTPX per-phase inactivity timeouts alone —
+trickled responses cannot outlive the absolute deadline.
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -26,6 +34,10 @@ class DockerApiError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+
+
+class DockerDeadlineExceeded(DockerApiError):
+    """Absolute wall-clock deadline for a cancel-path Docker call was hit."""
 
 
 def docker_base_url() -> str:
@@ -47,11 +59,75 @@ def _make_client(timeout: float = 60.0) -> httpx.Client:
     return httpx.Client(base_url=base, timeout=timeout)
 
 
-def _request_timeout(timeout: float | None) -> float | httpx.Timeout | None:
-    """Pass through an explicit per-call timeout; None keeps the client default."""
-    if timeout is None:
-        return None
-    return float(timeout)
+def _make_async_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    base = docker_base_url()
+    if base.startswith("unix://"):
+        socket_path = base.removeprefix("unix://")
+        transport = httpx.AsyncHTTPTransport(uds=socket_path)
+        return httpx.AsyncClient(transport=transport, base_url="http://docker", timeout=timeout)
+    if base.startswith("npipe:"):
+        raise DockerApiError("named-pipe DOCKER_HOST is not supported in-launcher; run launcher in Linux")
+    return httpx.AsyncClient(base_url=base, timeout=timeout)
+
+
+def _run_coro_sync(coro: Any) -> Any:
+    """Run ``coro`` from sync launcher code.
+
+    Cancel endpoints are sync FastAPI handlers (threadpool, no running loop).
+    If a loop is already running, run in a fresh thread with its own loop so we
+    never nest ``asyncio.run`` or leave work on a cancelled task.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+async def _arequest_with_wall_deadline(
+    method: str,
+    path: str,
+    *,
+    wall_timeout: float,
+    params: dict[str, Any] | None = None,
+    json_body: Any = None,
+) -> httpx.Response:
+    """HTTP request whose *entire* lifetime (connect + headers + body) is capped.
+
+    ``asyncio.timeout`` cancels the awaitable and closes the AsyncClient, so the
+    underlying connection does not keep draining a trickling response after the
+    cancel budget is gone. HTTPX inactivity timeouts are set to the same budget
+    only as a secondary backstop.
+    """
+    if wall_timeout <= 0:
+        raise DockerDeadlineExceeded("docker call deadline exceeded before start")
+    # Tiny floor so we do not pass 0 to HTTPX / asyncio.timeout.
+    budget = max(0.001, float(wall_timeout))
+    started = time.monotonic()
+    timeout = httpx.Timeout(budget)
+    client = _make_async_client(timeout)
+    try:
+        async with asyncio.timeout(budget):
+            response = await client.request(method, path, params=params, json=json_body)
+            # Non-stream request already buffers the body; aread is cheap / no-op
+            # when content is cached, and keeps streamed callers honest.
+            await response.aread()
+            return response
+    except TimeoutError as exc:
+        elapsed = time.monotonic() - started
+        raise DockerDeadlineExceeded(
+            f"docker call wall-clock deadline exceeded after {elapsed:.3f}s (budget={budget:.3f}s)"
+        ) from exc
+    except httpx.TimeoutException as exc:
+        # Inactivity timeout fired inside the wall budget (e.g. stalled connect).
+        elapsed = time.monotonic() - started
+        raise DockerDeadlineExceeded(
+            f"docker call timed out after {elapsed:.3f}s (budget={budget:.3f}s): {exc}"
+        ) from exc
+    finally:
+        await client.aclose()
 
 
 class DockerClient:
@@ -76,6 +152,26 @@ class DockerClient:
 
     def __exit__(self, *args: object) -> None:
         self.close()
+
+    def _deadline_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        wall_timeout: float,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+    ) -> httpx.Response:
+        """Cancel-path request with a reliable absolute deadline."""
+        return _run_coro_sync(
+            _arequest_with_wall_deadline(
+                method,
+                path,
+                wall_timeout=wall_timeout,
+                params=params,
+                json_body=json_body,
+            )
+        )
 
     def ping(self) -> None:
         r = self._http().get("/_ping")
@@ -161,13 +257,16 @@ class DockerClient:
         return r.content.decode("utf-8", errors="replace")[-4000:]
 
     def remove_container(self, container_id: str, *, force: bool = True, timeout: float | None = None) -> None:
-        kwargs: dict[str, object] = {
-            "params": {"force": "true" if force else "false", "v": "true"},
-        }
-        req_timeout = _request_timeout(timeout)
-        if req_timeout is not None:
-            kwargs["timeout"] = req_timeout
-        r = self._http().delete(f"/containers/{container_id}", **kwargs)
+        params = {"force": "true" if force else "false", "v": "true"}
+        if timeout is not None:
+            r = self._deadline_request(
+                "DELETE",
+                f"/containers/{container_id}",
+                wall_timeout=float(timeout),
+                params=params,
+            )
+        else:
+            r = self._http().delete(f"/containers/{container_id}", params=params)
         if r.status_code not in (204, 404):
             logger.warning("container remove %s failed: %s %s", container_id[:12], r.status_code, r.text[:200])
 
@@ -188,13 +287,11 @@ class DockerClient:
 
     def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
         """Containers labeled ``opr.job_id=<job_id>`` (any state)."""
-        kwargs: dict[str, object] = {
-            "params": {"all": "true", "filters": json.dumps({"label": [f"opr.job_id={job_id}"]})},
-        }
-        req_timeout = _request_timeout(timeout)
-        if req_timeout is not None:
-            kwargs["timeout"] = req_timeout
-        r = self._http().get("/containers/json", **kwargs)
+        params = {"all": "true", "filters": json.dumps({"label": [f"opr.job_id={job_id}"]})}
+        if timeout is not None:
+            r = self._deadline_request("GET", "/containers/json", wall_timeout=float(timeout), params=params)
+        else:
+            r = self._http().get("/containers/json", params=params)
         if r.status_code != 200:
             raise DockerApiError(
                 f"container list by job failed: {r.status_code}",
@@ -204,10 +301,15 @@ class DockerClient:
         return list(r.json())
 
     def kill_container(self, container_id: str, *, timeout: float | None = None) -> None:
-        kwargs: dict[str, object] = {"params": {"signal": "KILL"}}
-        req_timeout = _request_timeout(timeout)
-        if req_timeout is not None:
-            kwargs["timeout"] = req_timeout
-        r = self._http().post(f"/containers/{container_id}/kill", **kwargs)
+        params = {"signal": "KILL"}
+        if timeout is not None:
+            r = self._deadline_request(
+                "POST",
+                f"/containers/{container_id}/kill",
+                wall_timeout=float(timeout),
+                params=params,
+            )
+        else:
+            r = self._http().post(f"/containers/{container_id}/kill", params=params)
         if r.status_code not in (204, 404):
             logger.warning("container kill %s: %s", container_id[:12], r.status_code)

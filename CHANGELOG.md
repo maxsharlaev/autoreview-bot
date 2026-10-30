@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+- **AR-030-001:** Launcher cancel Docker calls (`list`/`kill`/`remove`) enforce a wall-clock deadline via ``asyncio.timeout`` around ``httpx.AsyncClient`` (including body read), not HTTPX per-phase inactivity timeouts alone. Trickled daemon responses can no longer outlive ``LAUNCHER_CANCEL_DEADLINE_SECONDS``; on deadline cancel returns ``confirmed=false`` so the worker keeps staging. Transport-level tests cover trickle and slow-headers against a real local HTTP server.
+
 ### Added
 - **Issue #29:** Launcher DELETE cancel uses one overall deadline (``LAUNCHER_CANCEL_DEADLINE_SECONDS``, default 4s) below the worker DELETE read timeout; each Docker list/kill/remove call receives only the remaining budget (no 60s client hang).
 - **ARB-27-024 / ARB-27-025:** Checkout/job leases use a sidecar ``<dirname>.lease`` beside the directory (not inside the git worktree), so repos that track a top-level ``.lease`` can check out cleanly; reaper removes the sidecar with the dir. ``clone_head`` wraps askpass/git/neutralize in one ``BaseException`` cleanup that stops the lease and removes dir+sidecar.

@@ -7,7 +7,7 @@ import os
 import time
 from pathlib import Path
 
-from app.launcher.docker_api import DockerApiError, DockerClient
+from app.launcher.docker_api import DockerApiError, DockerClient, DockerDeadlineExceeded
 from app.launcher.job_lifecycle import lifecycle
 from app.launcher.paths import CheckoutPathError, job_work_dir, resolve_checkout, validate_job_id
 from app.launcher.spec import (
@@ -245,8 +245,9 @@ def _force_remove_job_containers(
 ) -> int:
     """Kill + force-remove all containers labeled for ``jid``. Returns removals count.
 
-    Each Docker call uses only the remaining overall cancel budget so list/kill/remove
-    cannot run to the client default (60 s) under a slow daemon.
+    Each Docker call uses only the remaining overall cancel budget as a *wall-clock*
+    deadline (see ``DockerClient`` cancel-path requests). On deadline the loop stops
+    early so ``cancel_review_job`` can return ``confirmed=False`` (worker keeps staging).
     """
     removed = 0
     budget = _remaining_cancel_budget(deadline_monotonic)
@@ -254,6 +255,9 @@ def _force_remove_job_containers(
         return 0
     try:
         containers = docker.list_containers_for_job(jid, timeout=budget)
+    except DockerDeadlineExceeded:
+        logger.warning("cancel list hit wall-clock deadline job=%s", jid)
+        return 0
     except DockerApiError as exc:
         raise LauncherJobError("CODEX_SANDBOX", f"docker list failed: {exc}") from exc
     for item in containers:
@@ -265,6 +269,9 @@ def _force_remove_job_containers(
             break
         try:
             docker.kill_container(cid, timeout=budget)
+        except DockerDeadlineExceeded:
+            logger.warning("cancel kill hit wall-clock deadline job=%s cid=%s", jid, cid[:12])
+            break
         except DockerApiError:
             pass
         budget = _remaining_cancel_budget(deadline_monotonic)
@@ -273,6 +280,9 @@ def _force_remove_job_containers(
         try:
             docker.remove_container(cid, force=True, timeout=budget)
             removed += 1
+        except DockerDeadlineExceeded:
+            logger.warning("cancel remove hit wall-clock deadline job=%s cid=%s", jid, cid[:12])
+            break
         except DockerApiError as exc:
             logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
     return removed
@@ -288,7 +298,9 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
 
     The whole operation (Docker list/kill/remove + lifecycle wait) shares one deadline
     ``LAUNCHER_CANCEL_DEADLINE_SECONDS`` (< worker DELETE read timeout). Each Docker
-    call receives only the remaining budget.
+    call receives only the remaining budget as a wall-clock bound (async HTTPX +
+    ``asyncio.timeout``). If the deadline fires, return ``confirmed=False`` so the
+    worker keeps staging for the reaper.
     """
     from app.launcher.paths import validate_uuid_job_id
 
@@ -312,8 +324,12 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
         if budget > 0:
             try:
                 leftover = docker.list_containers_for_job(jid, timeout=budget)
+            except DockerDeadlineExceeded:
+                leftover = ["?"]
             except DockerApiError:
                 leftover = ["?"]
+        else:
+            leftover = ["?"]
         confirmed = (not leftover) and (not lifecycle.launch_active(jid))
         return {"job_id": jid, "removed": removed, "confirmed": confirmed}
     finally:
