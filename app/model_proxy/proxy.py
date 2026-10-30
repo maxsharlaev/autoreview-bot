@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 
 import httpx
 from fastapi import Request, Response
@@ -17,6 +17,7 @@ from app.model_proxy.settings import ProxySettings
 from app.model_proxy.tokens import JobTokenRecord, TokenStore
 
 logger = logging.getLogger(__name__)
+
 
 _HOP_BY_HOP = {
     "connection",
@@ -196,6 +197,77 @@ async def _wait_invalidated(rec: JobTokenRecord, wait: float) -> bool:
     return rec.invalidated.is_set()
 
 
+async def _aclose_httpx_response(resp: httpx.Response) -> None:
+    try:
+        await resp.aclose()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _race_primary_or_invalidated[T](
+    primary: Coroutine[object, object, T],
+    rec: JobTokenRecord,
+    wait: float,
+    *,
+    on_discard: Callable[[T], Awaitable[None]] | None = None,
+) -> T:
+    """Race ``primary`` against token invalidation for up to ``wait`` seconds.
+
+    Cancellation-safe: a ``finally`` always cancels and awaits unfinished tasks.
+    If ``primary`` completed with a value that is not returned to the caller
+    (timeout, invalidation, or cancellation), ``on_discard`` is awaited on that
+    value when provided (e.g. ``httpx.Response.aclose`` for a late upstream
+    response).
+
+    Returns the primary result when it finishes first and the token is still
+    valid. Raises ``TimeoutError("expired")`` on invalidation and
+    ``TimeoutError("idle")`` when the wait elapses without a primary result.
+    Primary exceptions (including ``StopAsyncIteration``) propagate via
+    ``Task.result()``.
+    """
+    if rec.invalidated.is_set():
+        raise TimeoutError("expired")
+
+    primary_task: asyncio.Task[T] = asyncio.create_task(primary)  # type: ignore[arg-type]
+    inv_task = asyncio.create_task(_wait_invalidated(rec, wait))
+    keep_result = False
+    try:
+        done, _pending = await asyncio.wait(
+            {primary_task, inv_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        invalidated = rec.invalidated.is_set()
+        if inv_task in done and not inv_task.cancelled():
+            try:
+                invalidated = invalidated or bool(inv_task.result())
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+        if invalidated:
+            raise TimeoutError("expired")
+
+        if primary_task in done and not primary_task.cancelled():
+            keep_result = True
+            return primary_task.result()
+
+        raise TimeoutError("idle")
+    finally:
+        for task in (primary_task, inv_task):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, StopAsyncIteration, Exception):  # noqa: BLE001
+                    pass
+        if not keep_result and on_discard is not None and primary_task.done() and not primary_task.cancelled():
+            if primary_task.exception() is None:
+                try:
+                    await on_discard(primary_task.result())
+                except Exception:  # noqa: BLE001
+                    pass
+
+
 async def _anext_or_invalidated(
     aiter: AsyncIterator[bytes],
     rec: JobTokenRecord,
@@ -207,43 +279,11 @@ async def _anext_or_invalidated(
     (caller distinguishes via ``rec.invalidated`` / ``still_valid``).
     Raises ``StopAsyncIteration`` on clean EOF.
     """
-    if rec.invalidated.is_set():
-        raise TimeoutError("expired")
-
-    anext_task = asyncio.create_task(anext(aiter))  # type: ignore[arg-type]
-    inv_task = asyncio.create_task(_wait_invalidated(rec, wait))
-    try:
-        done, pending = await asyncio.wait(
-            {anext_task, inv_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, StopAsyncIteration, Exception):  # noqa: BLE001
-                pass
-
-        if inv_task in done and not inv_task.cancelled():
-            invalidated = bool(inv_task.result())
-            if invalidated or rec.invalidated.is_set():
-                raise TimeoutError("expired")
-            # Poll timed out without invalidation.
-            if anext_task in done and not anext_task.cancelled():
-                return anext_task.result()
-            raise TimeoutError("idle")
-
-        return anext_task.result()
-    except StopAsyncIteration:
-        raise
-    except Exception:
-        if not anext_task.done():
-            anext_task.cancel()
-            try:
-                await anext_task
-            except (asyncio.CancelledError, StopAsyncIteration, Exception):  # noqa: BLE001
-                pass
-        raise
+    return await _race_primary_or_invalidated(
+        anext(aiter),  # type: ignore[arg-type]
+        rec,
+        wait,
+    )
 
 
 def _forward_response_headers(response: httpx.Response) -> dict[str, str]:
@@ -332,39 +372,22 @@ async def forward_responses(
                 media_type="application/json",
             )
         try:
-            async with asyncio.timeout(budget):
-                # Also abort promptly if revoked while waiting for headers.
-                send_task = asyncio.create_task(client.send(upstream, stream=True))
-                inv_task = asyncio.create_task(_wait_invalidated(rec, budget))
-                done, pending = await asyncio.wait(
-                    {send_task, inv_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                        pass
-                if (
-                    inv_task in done
-                    and not inv_task.cancelled()
-                    and (bool(inv_task.result()) or rec.invalidated.is_set())
-                ):
-                    if send_task.done() and not send_task.cancelled():
-                        try:
-                            resp_obj = send_task.result()
-                            await resp_obj.aclose()
-                        except Exception:  # noqa: BLE001
-                            pass
-                    metrics.REQUESTS.labels(result="expired").inc()
-                    return Response(
-                        status_code=401,
-                        content='{"error":"expired"}',
-                        media_type="application/json",
-                    )
-                response = send_task.result()
+            # Shared cancellation-safe race: timeout / revoke / cancel always
+            # cancel+await the upstream send and aclose any late response.
+            response = await _race_primary_or_invalidated(
+                client.send(upstream, stream=True),
+                rec,
+                budget,
+                on_discard=_aclose_httpx_response,
+            )
         except TimeoutError:
+            if rec.invalidated.is_set() or not store.still_valid(rec):
+                metrics.REQUESTS.labels(result="expired").inc()
+                return Response(
+                    status_code=401,
+                    content='{"error":"expired"}',
+                    media_type="application/json",
+                )
             metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
             metrics.REQUESTS.labels(result="upstream_timeout").inc()
             return Response(
