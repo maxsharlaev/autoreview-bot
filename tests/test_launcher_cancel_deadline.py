@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from app.launcher.jobs import cancel_review_job
 from app.launcher.timeouts import (
+    CANCEL_DEADLINE_WORKER_MARGIN_SECONDS,
     LAUNCHER_CANCEL_DEADLINE_SECONDS,
     LAUNCHER_CANCEL_WAIT_SECONDS,
     WORKER_CANCEL_HTTP_READ_SECONDS,
@@ -22,7 +23,8 @@ from app.launcher.timeouts import (
 
 def test_production_cancel_deadline_ordering() -> None:
     validate_cancel_timeouts()
-    assert LAUNCHER_CANCEL_WAIT_SECONDS < LAUNCHER_CANCEL_DEADLINE_SECONDS < WORKER_CANCEL_HTTP_READ_SECONDS
+    assert LAUNCHER_CANCEL_WAIT_SECONDS < LAUNCHER_CANCEL_DEADLINE_SECONDS
+    assert LAUNCHER_CANCEL_DEADLINE_SECONDS <= WORKER_CANCEL_HTTP_READ_SECONDS - CANCEL_DEADLINE_WORKER_MARGIN_SECONDS
     assert launcher_cancel_deadline_seconds() == LAUNCHER_CANCEL_DEADLINE_SECONDS == 4.0
 
 
@@ -132,3 +134,92 @@ def test_validate_cancel_rejects_wait_above_deadline(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("LAUNCHER_CANCEL_WAIT_SECONDS", "2.5")
     with pytest.raises(RuntimeError, match="LAUNCHER_CANCEL_WAIT_SECONDS"):
         validate_cancel_timeouts()
+
+
+def test_validate_cancel_rejects_deadline_inside_worker_margin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AR-030-003: 4.99s is under worker 5s but violates the mandatory 0.5s margin."""
+    monkeypatch.setenv("LAUNCHER_CANCEL_DEADLINE_SECONDS", "4.99")
+    monkeypatch.setenv("LAUNCHER_CANCEL_WAIT_SECONDS", "3.0")
+    with pytest.raises(RuntimeError, match=r"CANCEL_DEADLINE_WORKER_MARGIN_SECONDS|max 4\.5"):
+        validate_cancel_timeouts()
+
+
+def test_validate_cancel_accepts_deadline_at_margin_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """4.5s == worker read (5s) - 0.5s margin → accepted."""
+    monkeypatch.setenv("LAUNCHER_CANCEL_DEADLINE_SECONDS", "4.5")
+    monkeypatch.setenv("LAUNCHER_CANCEL_WAIT_SECONDS", "3.0")
+    validate_cancel_timeouts()
+
+
+def test_remaining_cancel_budget_never_exceeds_actual() -> None:
+    from app.launcher.jobs import _remaining_cancel_budget
+
+    deadline = time.monotonic() + 0.02  # below 50ms min usable
+    assert _remaining_cancel_budget(deadline) == 0.0
+    deadline2 = time.monotonic() + 0.2
+    left = _remaining_cancel_budget(deadline2)
+    assert 0.0 < left <= 0.2
+    # min_usable=0 allows tiny positive remainders (lifecycle wait)
+    deadline3 = time.monotonic() + 0.02
+    tiny = _remaining_cancel_budget(deadline3, min_usable=0.0)
+    assert 0.0 < tiny <= 0.02
+
+
+def test_cancel_skips_docker_when_remaining_below_min_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Near-deadline: do not call Docker with an inflated timeout; return unconfirmed.
+
+    Patch ``launcher_cancel_deadline_seconds`` to return 20ms (below the 50ms Docker
+    min usable). The env helper clamps to >= 1.0, so we bypass it for this case.
+    """
+    jid = "a" * 32
+    monkeypatch.setattr("app.launcher.jobs.launcher_cancel_deadline_seconds", lambda: 0.02)
+    monkeypatch.setattr("app.launcher.jobs.launcher_cancel_wait_seconds", lambda: 0.01)
+    calls: list[str] = []
+
+    class TrackingDocker:
+        def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
+            calls.append(f"list:{timeout}")
+            return [{"Id": "should-not-run", "Labels": {"opr.job_id": jid}}]
+
+        def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
+            calls.append(f"kill:{timeout}")
+
+        def remove_container(self, cid: str, *, force: bool = True, timeout: float | None = None) -> None:
+            calls.append(f"remove:{timeout}")
+
+        def close(self) -> None:
+            return None
+
+    result = cancel_review_job(job_id=jid, client=TrackingDocker())  # type: ignore[arg-type]
+    assert result["confirmed"] is False
+    assert result["removed"] == 0
+    assert calls == []
+
+
+def test_force_remove_skips_docker_near_deadline() -> None:
+    """Direct: deadline only 20ms away → list/kill/remove never run."""
+    from app.launcher.jobs import _force_remove_job_containers
+
+    jid = "e" * 32
+    calls: list[str] = []
+
+    class TrackingDocker:
+        def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
+            calls.append("list")
+            return [{"Id": "x"}]
+
+        def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
+            calls.append("kill")
+
+        def remove_container(self, cid: str, *, force: bool = True, timeout: float | None = None) -> None:
+            calls.append("remove")
+
+    removed = _force_remove_job_containers(
+        TrackingDocker(),  # type: ignore[arg-type]
+        jid,
+        deadline_monotonic=time.monotonic() + 0.02,
+    )
+    assert removed == 0
+    assert calls == []

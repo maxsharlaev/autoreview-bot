@@ -229,12 +229,26 @@ def run_review_job(
             docker.close()
 
 
-def _remaining_cancel_budget(deadline_monotonic: float, *, floor: float = 0.05) -> float:
-    """Seconds left before the overall cancel deadline (never below ``floor`` while positive)."""
+# Below this remaining budget, skip the Docker call (do not inflate timeout above real left).
+_MIN_CANCEL_DOCKER_BUDGET_SECONDS = 0.05
+
+
+def _remaining_cancel_budget(
+    deadline_monotonic: float,
+    *,
+    min_usable: float = _MIN_CANCEL_DOCKER_BUDGET_SECONDS,
+) -> float:
+    """Seconds left before the overall cancel deadline.
+
+    Never returns more than the actual remaining time. If remaining is positive but
+    below ``min_usable`` (default 50ms for Docker calls), returns ``0.0`` so callers
+    skip the call; cancel then returns ``confirmed=false`` (worker keeps staging).
+    Pass ``min_usable=0.0`` for lifecycle wait, which may use any positive remainder.
+    """
     left = deadline_monotonic - time.monotonic()
-    if left <= 0:
+    if left < float(min_usable):
         return 0.0
-    return max(floor, left)
+    return float(left)
 
 
 def _force_remove_job_containers(
@@ -314,7 +328,7 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
     try:
         # Kill first so a blocked wait_container can finish and mark_finished promptly.
         removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
-        wait_budget = min(launcher_cancel_wait_seconds(), _remaining_cancel_budget(deadline, floor=0.0))
+        wait_budget = min(launcher_cancel_wait_seconds(), _remaining_cancel_budget(deadline, min_usable=0.0))
         if wait_budget > 0:
             lifecycle.wait_until_launch_idle(jid, timeout=wait_budget)
         removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
