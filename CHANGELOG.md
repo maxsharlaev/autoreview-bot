@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
-- **ARB34-001:** model-proxy owner id lookup uses one `canonicalize_owner_id` (uppercase, `-` -> `_`, reject other chars) for both `load_owner_upstream_keys` and `ProxySettings.upstream_key_for_owner`, so hyphenated owners resolve `PROXY_OWNER_ORG_A_OPENAI_API_KEY`; conflicting canonical keys fail at startup.
+- **ARB34-004:** `ContainerReviewExecutor.run` bounds finish-path `revoke_job_token` with `asyncio.timeout` / `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` (default 2s) so a slow proxy cannot delay lease cleanup or returning a completed review; reaper/launcher revoke remain backstops.
+- **ARB34-003:** replace hyphen-canonicalization with explicit `PROXY_OWNER_KEY_ENVS` (owner_id → env var *name*; secrets stay in env). Startup fails on duplicate env targets, missing/empty referenced env, or case-variant owners sharing one env; legacy `PROXY_OWNER_<UPPER>_OPENAI_API_KEY` remains only for owner ids without `-`.
 - **ARB34-002:** launcher cancel revokes the proxy token as a best-effort background task on the long-lived cancel pool (short timeout) after the bounded DELETE response, so a slow/unreachable model-proxy cannot delay cancel past the worker's 5s read timeout; reaper revoke remains the idempotent backstop.
 - **AR-030-001:** Launcher cancel Docker calls (`list`/`kill`/`remove`) enforce a wall-clock deadline via ``asyncio.timeout`` around ``httpx.AsyncClient`` (including body read), not HTTPX per-phase inactivity timeouts alone. Trickled daemon responses can no longer outlive ``LAUNCHER_CANCEL_DEADLINE_SECONDS``; on deadline cancel returns ``confirmed=false`` so the worker keeps staging. Transport-level tests cover trickle and slow-headers against a real local HTTP server.
 

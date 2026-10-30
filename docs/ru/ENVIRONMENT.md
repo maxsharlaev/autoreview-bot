@@ -125,7 +125,8 @@ Proxy отправляет upstream `Accept-Encoding: identity` и снимае�
 | `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (и api/worker как сейчас) | Upstream-ключ модели по умолчанию внутри proxy. |
-| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Upstream-ключ на владельца (`<ID>` = `[A-Z0-9_]+`). Lookup канонизирует owner_id (uppercase, `-` -> `_`), поэтому `org-a` / `ORG-A` / `org_a` используют `PROXY_OWNER_ORG_A_OPENAI_API_KEY`; конфликтующие значения для одного canonical id падают при старте. Fallback на `OPENAI_API_KEY` только если нет ключа владельца. |
+| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Legacy upstream-ключ на владельца (`<ID>` = `[A-Z0-9_]+`). Fallback только для owner id **без** `-`: lookup = `PROXY_OWNER_<OWNER_ID.upper()>_OPENAI_API_KEY`. Hyphenated id (`org-a`) требуют `PROXY_OWNER_KEY_ENVS` (no hyphen→underscore remap). Иначе `OPENAI_API_KEY`, если нет ключа владельца. |
+| `PROXY_OWNER_KEY_ENVS` | `{}` | model-proxy | JSON-объект: точный `owner_id` → **имя** env-переменной с upstream-ключом (секреты только в env). Обязателен для id с дефисом (`org-a`). Старт падает, если два owner указывают на один env, env пуст/отсутствует, или case-варианты делят один env. Пример: `{"org-a":"ORG_A_HYPHEN_KEY","org_a":"ORG_A_UNDER_KEY"}`. |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Id провайдера (в M3 PR2 только `openai`; позже расширим). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Фиксированный upstream host (клиент не переопределяет). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` или `http` (тесты). |
@@ -137,6 +138,7 @@ Proxy отправляет upstream `Accept-Encoding: identity` и снимае�
 | `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Макс. одновременных proxied-запросов на job (слот резервируется до чтения тела клиента; освобождается при сбое/таймауте/413 загрузки). |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle между чанками и для загрузки клиента (`request.stream`), и для ответа upstream (`asyncio.timeout` на ожидание следующего чанка; float-timeout HTTPX — только мягкий per-phase backstop). |
 | `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock общий дедлайн на чтение тела запроса клиента и на весь upstream request+response (не только inactivity HTTPX); также останавливается по expiry job-токена и закрывает upstream-ответ. |
+| `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` | `2` | worker | Wall-clock лимит best-effort `revoke_job_token` в finally `ContainerReviewExecutor.run` (ARB34-004). Cleanup lease и возврат результата не ждут зависший proxy; reaper/launcher revoke — backstop. |
 
 Публичный allowlist proxy: только **`POST /v1/responses`** (SSE поддерживается). Без WebSocket / CONNECT. Логи не содержат токены, ключи и тела запросов.
 

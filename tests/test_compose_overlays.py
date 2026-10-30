@@ -314,6 +314,7 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
 _DOCUMENTED_MODEL_PROXY_SETTINGS = (
     "PROXY_ISSUER_TOKEN",
     "OPENAI_API_KEY",
+    "PROXY_OWNER_KEY_ENVS",
     "PROXY_PROVIDER",
     "PROXY_UPSTREAM_HOST",
     "PROXY_UPSTREAM_SCHEME",
@@ -330,6 +331,7 @@ _DOCUMENTED_MODEL_PROXY_SETTINGS = (
 _WORKER_PROXY_SETTINGS = (
     "PROXY_ISSUER_TOKEN",
     "MODEL_PROXY_URL",
+    "OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS",
 )
 
 
@@ -385,7 +387,9 @@ def test_overlay_lists_model_proxy_service() -> None:
         assert name in worker_keys, f"worker missing {name}"
     docs_names = _docs_model_proxy_table_vars()
     # MODEL_PROXY_URL is worker-only; PROXY_OWNER_* pattern is override-only
-    missing = docs_names - keys - {"MODEL_PROXY_URL", "OPR_MODEL_PROXY_BASE_URL"}
+    missing = (
+        docs_names - keys - {"MODEL_PROXY_URL", "OPR_MODEL_PROXY_BASE_URL", "OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS"}
+    )
     assert not missing, f"docs model-proxy vars missing from compose: {sorted(missing)}"
 
 

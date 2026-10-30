@@ -125,7 +125,8 @@ The proxy sends upstream `Accept-Encoding: identity` and strips representation h
 | `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Base URL for issuer/revoke calls. |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (and api/worker as today) | Default upstream model key inside the proxy. |
-| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Per-owner upstream key (`<ID>` = `[A-Z0-9_]+`). Lookup canonicalizes owner_id (uppercase, `-` -> `_`), so `org-a` / `ORG-A` / `org_a` share `PROXY_OWNER_ORG_A_OPENAI_API_KEY`; conflicting values for the same canonical id fail at startup. Falls back to `OPENAI_API_KEY` only when no owner key matches. |
+| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Legacy per-owner upstream key (`<ID>` = `[A-Z0-9_]+`). Used only as a fallback for owner ids that do **not** contain `-`: lookup uses `PROXY_OWNER_<OWNER_ID.upper()>_OPENAI_API_KEY`. Hyphenated owner ids (`org-a`) must use `PROXY_OWNER_KEY_ENVS` (no hyphen→underscore remap). Falls back to `OPENAI_API_KEY` when no owner key matches. |
+| `PROXY_OWNER_KEY_ENVS` | `{}` | model-proxy | JSON object mapping exact `owner_id` → **name** of the env var that holds that owner's upstream key (secrets stay in env). Required for hyphenated ids (`org-a`). Startup fails if two owners map to the same env var, a referenced env is missing/empty, or case-variant owners share one env. Example: `{"org-a":"ORG_A_HYPHEN_KEY","org_a":"ORG_A_UNDER_KEY"}`. |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Upstream provider id (only `openai` in M3 PR2; extensible later). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Fixed upstream host (callers cannot override). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` or `http` (tests). |
@@ -137,6 +138,7 @@ The proxy sends upstream `Accept-Encoding: identity` and strips representation h
 | `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Max concurrent in-flight proxied requests per job (slot reserved before reading the client body; released on upload failure/timeout/413). |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle bound between chunks for both client upload (`request.stream`) and upstream response (`asyncio.timeout` per next-chunk wait; HTTPX float timeout is only a soft per-phase backstop). |
 | `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock overall deadline for reading the client request body and for the whole upstream request+response (not HTTPX inactivity alone); also stops at job-token expiry and closes the upstream response. |
+| `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` | `2` | worker | Wall-clock bound for best-effort `revoke_job_token` in `ContainerReviewExecutor.run` finally (ARB34-004). Lease cleanup and the review result must not wait on a hung proxy; reaper/launcher revoke remain backstops. |
 
 Public allowlist on the proxy: **`POST /v1/responses`** only (SSE supported). No WebSocket / CONNECT. Logs never include tokens, keys, or bodies.
 

@@ -13,6 +13,7 @@ services:
       LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
       PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
       MODEL_PROXY_URL: "${MODEL_PROXY_URL:-http://model-proxy:8081}"
+      OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS: "${OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS:-2}"
       OPR_CHECKOUT_BASE: /var/opr/checkouts
       OPR_CHECKOUT_VOLUME: opr_checkouts
       OPR_MAX_REVIEW_TIMEOUT_SECONDS: "${OPR_MAX_REVIEW_TIMEOUT_SECONDS:-600}"
@@ -70,11 +71,12 @@ services:
       context: .
       dockerfile: Dockerfile.model-proxy
     # No env_file / no Docker socket. Real model keys live only here (M3).
-    # Per-owner keys: add PROXY_OWNER_<ID>_OPENAI_API_KEY via host env / compose override
+    # Per-owner keys: PROXY_OWNER_KEY_ENVS JSON map and/or PROXY_OWNER_<ID>_OPENAI_API_KEY (legacy, no hyphen) via host env / compose override
     # (Compose only passes listed keys; OPENAI_API_KEY is the default upstream key).
     environment:
       PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      PROXY_OWNER_KEY_ENVS: "${PROXY_OWNER_KEY_ENVS:-}"
       PROXY_PROVIDER: "${PROXY_PROVIDER:-openai}"
       PROXY_UPSTREAM_HOST: "${PROXY_UPSTREAM_HOST:-api.openai.com}"
       PROXY_UPSTREAM_SCHEME: "${PROXY_UPSTREAM_SCHEME:-https}"

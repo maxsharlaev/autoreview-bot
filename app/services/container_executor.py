@@ -33,6 +33,20 @@ from app.services.model_proxy_client import (
 
 logger = logging.getLogger(__name__)
 
+# Finish-path proxy revoke budget (ARB34-004); reaper/launcher remain backstops.
+DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS = 2.0
+
+
+def finish_revoke_timeout_seconds() -> float:
+    raw = os.environ.get("OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return float(DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS)
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return float(DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS)
+
+
 # Short timeout for cancel DELETE so it can run under asyncio.shield.
 _CANCEL_HTTP_TIMEOUT = httpx.Timeout(
     connect=WORKER_CANCEL_HTTP_CONNECT_SECONDS,
@@ -159,9 +173,22 @@ class ContainerReviewExecutor:
             raise CodexRunnerError(CODEX_SANDBOX, f"container executor failed: {exc}") from exc
         finally:
             if proxy_token is not None:
-                # Finish / cancel / error: idempotent revoke (reaper also revokes orphans).
+                # Finish / cancel / error: best-effort revoke with short wall-clock bound
+                # (ARB34-004). Reaper + launcher cancel revoke remain idempotent backstops.
+                revoke_budget = finish_revoke_timeout_seconds()
                 try:
-                    await revoke_job_token(job_id=job_id, client=self._http_client)
+                    async with asyncio.timeout(revoke_budget):
+                        await revoke_job_token(
+                            job_id=job_id,
+                            client=self._http_client,
+                            timeout_seconds=revoke_budget,
+                        )
+                except TimeoutError:
+                    logger.warning(
+                        "model-proxy revoke timed out job_id=%s budget_s=%s",
+                        job_id,
+                        revoke_budget,
+                    )
                 except Exception:  # noqa: BLE001
                     logger.warning("model-proxy revoke failed job_id=%s", job_id, exc_info=True)
             await stop_directory_lease(job_dir)
