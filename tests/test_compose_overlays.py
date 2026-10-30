@@ -177,6 +177,7 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
 _DOCUMENTED_LAUNCHER_SETTINGS = (
     "LAUNCHER_TOKEN",
     "LAUNCHER_APPARMOR_PROFILE",
+    "LAUNCHER_CANCEL_DEADLINE_SECONDS",
     "LAUNCHER_CANCEL_WAIT_SECONDS",
     "OPR_CHECKOUT_BASE",
     "OPR_CHECKOUT_VOLUME",
@@ -254,6 +255,7 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
     assert isinstance(env, dict)
     expected_defaults = {
         "LAUNCHER_APPARMOR_PROFILE": "unconfined",
+        "LAUNCHER_CANCEL_DEADLINE_SECONDS": "4",
         "LAUNCHER_CANCEL_WAIT_SECONDS": "3",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
         "OPR_CLONE_TIMEOUT_SECONDS": "300",
@@ -275,6 +277,7 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
         "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
         "OPR_LEASE_HEARTBEAT_SECONDS": "42",
         "OPR_REVIEW_ORPHAN_TTL_SECONDS": "8000",
+        "LAUNCHER_CANCEL_DEADLINE_SECONDS": "3.5",
         "LAUNCHER_CANCEL_WAIT_SECONDS": "2.5",
         "OPR_CHECKOUT_ORPHAN_TTL_SECONDS": "1200",
     }

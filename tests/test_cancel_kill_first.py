@@ -10,6 +10,7 @@ import pytest
 from app.launcher.job_lifecycle import JobLifecycleRegistry
 from app.launcher.jobs import cancel_review_job
 from app.launcher.timeouts import (
+    LAUNCHER_CANCEL_DEADLINE_SECONDS,
     LAUNCHER_CANCEL_WAIT_SECONDS,
     WORKER_CANCEL_HTTP_READ_SECONDS,
     validate_cancel_timeouts,
@@ -18,8 +19,10 @@ from app.launcher.timeouts import (
 
 def test_production_cancel_timeout_ordering() -> None:
     validate_cancel_timeouts()
-    assert LAUNCHER_CANCEL_WAIT_SECONDS < WORKER_CANCEL_HTTP_READ_SECONDS
+    assert LAUNCHER_CANCEL_WAIT_SECONDS < LAUNCHER_CANCEL_DEADLINE_SECONDS
+    assert LAUNCHER_CANCEL_DEADLINE_SECONDS < WORKER_CANCEL_HTTP_READ_SECONDS
     assert LAUNCHER_CANCEL_WAIT_SECONDS == 3.0
+    assert LAUNCHER_CANCEL_DEADLINE_SECONDS == 4.0
     assert WORKER_CANCEL_HTTP_READ_SECONDS == 5.0
 
 
@@ -39,15 +42,15 @@ def test_cancel_kills_before_wait_with_running_container(
     release_finish = threading.Event()
 
     class FakeDocker:
-        def list_containers_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
             events.append("list")
             return list(containers)
 
-        def kill_container(self, cid: str) -> None:
+        def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
             events.append(f"kill:{cid}")
             containers.clear()
 
-        def remove_container(self, cid: str, *, force: bool = True) -> None:
+        def remove_container(self, cid: str, *, force: bool = True, timeout: float | None = None) -> None:
             events.append(f"remove:{cid}")
             containers.clear()
 
