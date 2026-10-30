@@ -7,6 +7,7 @@
 | --- | --- | --- |
 | Текст Prometheus | API `GET /metrics` (`:8000`) | нет |
 | Текст Prometheus | Worker `GET /metrics` (`:9100`) | нет |
+| Текст Prometheus | Model-proxy `GET /metrics` (`:8081`, overlay container-runner) | нет |
 | Снимок ops | `GET /api/v1/ops/status` | Bearer `REVIEW_API_KEY` |
 | Логи | stdout (`LOG_FORMAT=text\|json`) | — |
 

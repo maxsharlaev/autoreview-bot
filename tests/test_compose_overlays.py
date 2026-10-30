@@ -303,3 +303,104 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
         if name == "LAUNCHER_TOKEN":
             continue
         assert _SECRETISH.search(name) is None, name
+
+
+# Model-proxy settings documented in docs/ENVIRONMENT.md (M3 PR2).
+_DOCUMENTED_MODEL_PROXY_SETTINGS = (
+    "PROXY_ISSUER_TOKEN",
+    "OPENAI_API_KEY",
+    "PROXY_PROVIDER",
+    "PROXY_UPSTREAM_HOST",
+    "PROXY_UPSTREAM_SCHEME",
+    "OPR_MAX_REVIEW_TIMEOUT_SECONDS",
+    "PROXY_TOKEN_GRACE_SECONDS",
+    "PROXY_MAX_BODY_BYTES",
+    "PROXY_MAX_REQUESTS_PER_JOB",
+    "PROXY_MAX_BYTES_PER_JOB",
+    "PROXY_MAX_CONCURRENT_PER_JOB",
+    "PROXY_STREAM_IDLE_TIMEOUT_SECONDS",
+    "PROXY_UPSTREAM_TIMEOUT_SECONDS",
+)
+
+_WORKER_PROXY_SETTINGS = (
+    "PROXY_ISSUER_TOKEN",
+    "MODEL_PROXY_URL",
+)
+
+
+def _docs_model_proxy_table_vars() -> set[str]:
+    """Parse variable names from the Model proxy table in docs/ENVIRONMENT.md."""
+    text = (ROOT / "docs" / "ENVIRONMENT.md").read_text(encoding="utf-8")
+    start = text.find("## Model proxy")
+    assert start >= 0, "Model proxy section missing from docs/ENVIRONMENT.md"
+    rest = text[start:]
+    end = rest.find("\n## ", 3)
+    section = rest if end < 0 else rest[:end]
+    names: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        tick = line.find("`", 3)
+        if tick > 3:
+            names.add(line[3:tick])
+    names.discard("Variable")
+    # Pattern rows / headers that are not literal compose keys
+    names = {
+        n
+        for n in names
+        if n.isidentifier()
+        or n.startswith("OPR_")
+        or n.startswith("PROXY_")
+        or n in {"OPENAI_API_KEY", "MODEL_PROXY_URL"}
+    }
+    names = {n for n in names if "<" not in n and ">" not in n}
+    return names
+
+
+def test_overlay_lists_model_proxy_service() -> None:
+    overlay = _load(CONTAINER)
+    proxy = _service(overlay, "model-proxy")
+    assert "env_file" not in proxy, "model-proxy must not use env_file"
+    volumes = proxy.get("volumes") or []
+    assert not any("docker.sock" in str(v) for v in volumes), "model-proxy must not mount Docker socket"
+    nets = _network_names(proxy)
+    assert "internal" in nets
+    assert "review_egress" in nets
+    keys = _env_keys(proxy)
+    for name in _DOCUMENTED_MODEL_PROXY_SETTINGS:
+        assert name in keys, f"model-proxy missing {name}"
+    worker_keys = _env_keys(_service(overlay, "worker"))
+    for name in _WORKER_PROXY_SETTINGS:
+        assert name in worker_keys, f"worker missing {name}"
+    docs_names = _docs_model_proxy_table_vars()
+    # MODEL_PROXY_URL is worker-only; PROXY_OWNER_* pattern is override-only
+    missing = docs_names - keys - {"MODEL_PROXY_URL"}
+    assert not missing, f"docs model-proxy vars missing from compose: {sorted(missing)}"
+
+
+def test_overlay_model_proxy_settings_use_safe_defaults() -> None:
+    overlay = _load(CONTAINER)
+    env = _service(overlay, "model-proxy").get("environment") or {}
+    assert isinstance(env, dict)
+    expected_defaults = {
+        "PROXY_PROVIDER": "openai",
+        "PROXY_UPSTREAM_HOST": "api.openai.com",
+        "PROXY_UPSTREAM_SCHEME": "https",
+        "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
+        "PROXY_TOKEN_GRACE_SECONDS": "60",
+        "PROXY_MAX_BODY_BYTES": "4194304",
+        "PROXY_MAX_REQUESTS_PER_JOB": "50",
+        "PROXY_MAX_BYTES_PER_JOB": "16777216",
+        "PROXY_MAX_CONCURRENT_PER_JOB": "2",
+        "PROXY_STREAM_IDLE_TIMEOUT_SECONDS": "300",
+        "PROXY_UPSTREAM_TIMEOUT_SECONDS": "660",
+        "MODEL_PROXY_URL": "http://model-proxy:8081",  # checked on worker below
+    }
+    for key, default in expected_defaults.items():
+        if key == "MODEL_PROXY_URL":
+            continue
+        raw = str(env[key])
+        assert f":-{default}" in raw or raw == default, f"{key} should default to {default}, got {raw}"
+    worker_env = _service(overlay, "worker").get("environment") or {}
+    raw_url = str(worker_env["MODEL_PROXY_URL"])
+    assert "model-proxy:8081" in raw_url
