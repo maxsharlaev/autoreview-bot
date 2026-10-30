@@ -1,0 +1,10 @@
+openai_base_url = "http://opr-fake-proxy:18080/v1"
+
+[shell_environment_policy]
+inherit = "core"
+ignore_default_excludes = false
+[shell_environment_policy.set]
+LANG = "C.UTF-8"
+TERM = "dumb"
+[analytics]
+enabled = false

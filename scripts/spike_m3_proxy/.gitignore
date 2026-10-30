@@ -1,0 +1,4 @@
+workspace/.git/
+workspace/**/*.sqlite*
+workspace/**/out.json
+__pycache__/
