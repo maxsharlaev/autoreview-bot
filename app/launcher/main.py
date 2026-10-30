@@ -12,8 +12,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.launcher.auth import require_launcher_auth
+from app.launcher.cancel_scheduler import cancel_review_job_bounded
 from app.launcher.docker_api import DockerApiError, DockerClient
-from app.launcher.jobs import LauncherJobError, cancel_review_job, run_review_job
+from app.launcher.jobs import LauncherJobError, run_review_job
 from app.launcher.paths import CheckoutPathError, validate_job_id, validate_uuid_job_id
 from app.launcher.reaper import reaper_loop
 from app.launcher.timeouts import ensure_launcher_orphan_ttl_config
@@ -90,13 +91,19 @@ def cancel_job(job_id: str) -> CancelJobResponse:
 
     Used when the worker is cancelled mid-call so the container does not outlive
     the ARQ job. Strict UUID validation only (same as staged job dirs).
+
+    The handler waits at most ``LAUNCHER_CANCEL_DEADLINE_SECONDS`` for cancel work.
+    If Docker I/O is still stuck (DNS stall, trickling daemon, …), returns
+    ``confirmed=false`` immediately while cleanup continues in a background worker;
+    lifecycle tombstone is set before the wait. Duplicate DELETE for the same job
+    coalesces onto the in-flight work.
     """
     try:
         validate_uuid_job_id(job_id)
     except CheckoutPathError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     try:
-        result = cancel_review_job(job_id=job_id)
+        result = cancel_review_job_bounded(job_id=job_id)
     except LauncherJobError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

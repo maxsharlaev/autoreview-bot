@@ -95,7 +95,7 @@ def test_cancel_endpoint_rejects_non_uuid(cancel_client) -> None:
 def test_cancel_endpoint_idempotent(cancel_client, monkeypatch: pytest.MonkeyPatch) -> None:
     client, token = cancel_client
     monkeypatch.setattr(
-        "app.launcher.main.cancel_review_job",
+        "app.launcher.main.cancel_review_job_bounded",
         lambda **kwargs: {"job_id": kwargs["job_id"], "removed": 0, "confirmed": True},
     )
     r = client.delete(

@@ -6,10 +6,11 @@ socket path.
 
 Cancel-path calls pass a wall-clock ``timeout`` (remaining cancel budget). That
 bound is enforced with ``asyncio.timeout`` around an ``httpx.AsyncClient``
-request (including body read), not HTTPX per-phase inactivity timeouts alone —
-trickled responses cannot outlive the absolute deadline. Deadline-bound calls
-use the same endpoint/transport as the configured client (injectable async
-factory; derived from an injected sync client when possible).
+request (including body read) on a **long-lived** event-loop thread (not
+per-call ``asyncio.run``, which can block on resolver-executor shutdown).
+The DELETE handler also bounds the whole cancel (see ``cancel_scheduler``).
+Deadline-bound calls use the same endpoint/transport as the configured client
+(injectable async factory; derived from an injected sync client when possible).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -91,20 +93,59 @@ def _async_factory_from_sync_client(sync: httpx.Client) -> AsyncClientFactory:
     return factory
 
 
-def _run_coro_sync(coro: Any) -> Any:
-    """Run ``coro`` from sync launcher code.
+class _LongLivedAsyncLoop:
+    """Dedicated daemon thread with one event loop for cancel-path Docker HTTP.
 
-    Cancel endpoints are sync FastAPI handlers (threadpool, no running loop).
-    If a loop is already running, run in a fresh thread with its own loop so we
-    never nest ``asyncio.run`` or leave work on a cancelled task.
+    Avoids per-call ``asyncio.run``, which joins the default executor on shutdown
+    and can block past the cancel deadline when DNS (``getaddrinfo``) is stuck
+    (AR-030-004). The loop stays alive for the process lifetime.
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+
+    def ensure_started(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._loop is not None:
+                return self._loop
+
+            def _thread_main() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._loop = loop
+                self._ready.set()
+                loop.run_forever()
+
+            self._thread = threading.Thread(
+                target=_thread_main,
+                name="opr-docker-async",
+                daemon=True,
+            )
+            self._thread.start()
+        if not self._ready.wait(timeout=5.0):
+            raise DockerApiError("docker async loop failed to start")
+        assert self._loop is not None
+        return self._loop
+
+    def run(self, coro: Any, *, timeout: float | None = None) -> Any:
+        loop = self.ensure_started()
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            fut.cancel()
+            raise DockerDeadlineExceeded(f"docker async call did not finish within {timeout!r}s") from exc
+
+
+_ASYNC_LOOP = _LongLivedAsyncLoop()
+
+
+def _run_coro_sync(coro: Any, *, timeout: float | None = None) -> Any:
+    """Run ``coro`` on the long-lived Docker async loop (never per-call asyncio.run)."""
+    return _ASYNC_LOOP.run(coro, timeout=timeout)
 
 
 async def _arequest_with_wall_deadline(
@@ -196,6 +237,9 @@ class DockerClient:
         json_body: Any = None,
     ) -> httpx.Response:
         """Cancel-path request with a reliable absolute deadline."""
+        # Outer wait is a backstop; asyncio.timeout inside the coro is authoritative.
+        # Small slack so we do not race the inner timeout on scheduling.
+        outer = max(0.05, float(wall_timeout) + 0.25)
         return _run_coro_sync(
             _arequest_with_wall_deadline(
                 method,
@@ -204,7 +248,8 @@ class DockerClient:
                 async_client_factory=self._async_client_factory,
                 params=params,
                 json_body=json_body,
-            )
+            ),
+            timeout=outer,
         )
 
     def ping(self) -> None:
