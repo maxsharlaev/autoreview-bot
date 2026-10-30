@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 from app.launcher.docker_api import DockerClient, DockerDeadlineExceeded
 from app.launcher.jobs import cancel_review_job
@@ -274,3 +275,58 @@ def test_cancel_review_job_direct_trickle_unconfirmed(
     assert result["confirmed"] is False
     assert elapsed < 0.9 + 0.75
     assert elapsed < WORKER_CANCEL_HTTP_READ_SECONDS
+
+
+def test_deadline_calls_use_injected_mock_transport() -> None:
+    """AR-030-002: timeout-bearing cancel calls must hit the injected transport."""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+    sync = httpx.Client(transport=transport, base_url="http://docker.example.test")
+    docker = DockerClient(client=sync)
+    try:
+        assert docker.list_containers_for_job("e" * 32, timeout=2.0) == []
+        docker.kill_container("ciddeadbeef01", timeout=2.0)
+        docker.remove_container("ciddeadbeef01", force=True, timeout=2.0)
+    finally:
+        docker.close()
+        sync.close()
+
+    assert ("GET", "/containers/json") in calls
+    assert ("POST", "/containers/ciddeadbeef01/kill") in calls
+    assert ("DELETE", "/containers/ciddeadbeef01") in calls
+
+
+def test_deadline_calls_use_explicit_async_client_factory() -> None:
+    """Explicit async_client_factory is preferred over deriving from sync client."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json=[])
+
+    transport = httpx.MockTransport(handler)
+
+    def factory(timeout: httpx.Timeout) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=transport,
+            base_url="http://factory.example.test",
+            timeout=timeout,
+        )
+
+    # Sync client points elsewhere; factory must win for deadline path.
+    other = httpx.MockTransport(lambda r: httpx.Response(500, json={"error": "wrong"}))
+    sync = httpx.Client(transport=other, base_url="http://wrong.example.test")
+    docker = DockerClient(client=sync, async_client_factory=factory)
+    try:
+        assert docker.list_containers_for_job("f" * 32, timeout=2.0) == []
+    finally:
+        docker.close()
+        sync.close()
+    assert calls == ["/containers/json"]
