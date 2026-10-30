@@ -117,16 +117,26 @@ def revoke_job_token_sync(
     job_id: str,
     base_url: str | None = None,
     issuer_token: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> bool:
-    """Sync revoke for launcher reaper (thread / sync context). Idempotent."""
+    """Sync revoke for launcher reaper / background cancel (thread context). Idempotent.
+
+    ``timeout_seconds`` caps connect/read/write/pool (default 5/10/10/5). Cancel-path
+    background revoke passes a short budget so a hung proxy cannot stall the pool.
+    """
     token = (issuer_token if issuer_token is not None else proxy_issuer_token()).strip()
     if len(token) < 16:
         logger.warning("proxy revoke skipped job_id=%s: PROXY_ISSUER_TOKEN not configured", job_id)
         return False
     url = f"{(base_url or model_proxy_url()).rstrip('/')}/internal/jobs/{job_id}/token"
     headers = {"Authorization": f"Bearer {token}"}
+    if timeout_seconds is None:
+        timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
+    else:
+        budget = max(0.1, float(timeout_seconds))
+        timeout = httpx.Timeout(connect=budget, read=budget, write=budget, pool=budget)
     try:
-        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)) as http:
+        with httpx.Client(timeout=timeout) as http:
             response = http.delete(url, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("model-proxy revoke unreachable job_id=%s: %s", job_id, exc)

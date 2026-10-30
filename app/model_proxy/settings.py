@@ -18,6 +18,25 @@ DEFAULT_UPSTREAM_HOST = "api.openai.com"
 DEFAULT_UPSTREAM_SCHEME = "https"
 DEFAULT_PROVIDER = "openai"
 OWNER_KEY_RE = re.compile(r"^PROXY_OWNER_([A-Z0-9_]+)_OPENAI_API_KEY$")
+# After canonicalize_owner_id: uppercase A-Z / digits / underscore only.
+_CANON_OWNER_RE = re.compile(r"^[A-Z0-9_]+$")
+
+
+def canonicalize_owner_id(owner_id: str) -> str:
+    """Normalize an owner id for ``PROXY_OWNER_*`` env key matching.
+
+    Strips whitespace, uppercases, and maps ``-`` to ``_``. Empty input returns
+    ``""``. Any other character (after that mapping) raises ``ValueError`` so
+    load and lookup reject invalid ids consistently. Hyphenated and underscored
+    forms therefore share one key (``org-a`` / ``org_a`` / ``ORG-A`` → ``ORG_A``).
+    """
+    raw = (owner_id or "").strip()
+    if not raw:
+        return ""
+    canon = raw.upper().replace("-", "_")
+    if not _CANON_OWNER_RE.fullmatch(canon):
+        raise ValueError(f"invalid owner id for proxy key mapping: {owner_id!r}")
+    return canon
 
 
 def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
@@ -62,25 +81,45 @@ class ProxySettings:
         return int(self.max_review_timeout_seconds) + int(self.token_grace_seconds)
 
     def upstream_key_for_owner(self, owner_id: str) -> str:
-        oid = (owner_id or "").strip()
-        if oid:
-            key = self.owner_upstream_keys.get(oid) or self.owner_upstream_keys.get(oid.upper())
+        try:
+            canon = canonicalize_owner_id(owner_id)
+        except ValueError:
+            canon = ""
+        if canon:
+            key = self.owner_upstream_keys.get(canon)
             if key:
                 return key
         if not self.default_upstream_key:
-            raise KeyError(f"no upstream model key for owner {oid or 'default'}")
+            raise KeyError(f"no upstream model key for owner {(owner_id or '').strip() or 'default'}")
         return self.default_upstream_key
 
 
 def load_owner_upstream_keys() -> dict[str, str]:
+    """Load ``PROXY_OWNER_<ID>_OPENAI_API_KEY`` entries keyed by canonical owner id.
+
+    Env fragment ``<ID>`` must already be ``[A-Z0-9_]+`` (see ``OWNER_KEY_RE``).
+    Values are stored under ``canonicalize_owner_id(<ID>)``. If two env vars
+    canonicalize to the same id with different non-empty values, raise
+    ``RuntimeError`` at load time (startup fail-closed).
+    """
     out: dict[str, str] = {}
     for name, value in os.environ.items():
         match = OWNER_KEY_RE.fullmatch(name)
         if not match:
             continue
         key = (value or "").strip()
-        if key:
-            out[match.group(1)] = key
+        if not key:
+            continue
+        try:
+            canon = canonicalize_owner_id(match.group(1))
+        except ValueError as exc:
+            raise RuntimeError(f"invalid PROXY_OWNER env name {name!r}: {exc}") from exc
+        existing = out.get(canon)
+        if existing is not None and existing != key:
+            raise RuntimeError(
+                f"conflicting PROXY_OWNER keys for canonical owner {canon!r} (env {name!r}); refuse to start"
+            )
+        out[canon] = key
     return out
 
 

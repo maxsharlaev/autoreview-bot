@@ -103,6 +103,7 @@
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | Как часто reaper сканирует orphan review-контейнеры. |
 | `LAUNCHER_CANCEL_DEADLINE_SECONDS` | `4` | launcher | Жёсткий предел ожидания DELETE `/v1/jobs/{id}`: cancel выполняется в background-worker; handler ждёт не дольше этого времени и возвращает `confirmed=false`, пока Docker-очистка может продолжаться (tombstone уже выставлен; повторный DELETE coalesces; leftovers забирает reaper). Каждый вызов Docker — только фактический остаток бюджета (не завышается; меньше 50 мс → skip). Должен быть ≤ worker DELETE HTTP read timeout (5s) **минус обязательный запас 0.5 с** (макс. 4.5 с; default 4 с проходит) и больше `LAUNCHER_CANCEL_WAIT_SECONDS`. Docker HTTP — long-lived async loop + asyncio.timeout (не per-call asyncio.run). |
 | `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | После kill-first cancel — секунды ожидания in-flight launch перед confirmed idle (ограничено остатком `LAUNCHER_CANCEL_DEADLINE_SECONDS`). |
+| `LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS` | `2` | launcher | Короткий HTTP-таймаут для best-effort background revoke proxy-токена после bounded DELETE cancel (ARB34-002). Не удлиняет cancel deadline; reaper revoke остаётся idempotent backstop. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
@@ -124,7 +125,7 @@ Proxy отправляет upstream `Accept-Encoding: identity` и снимае�
 | `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (и api/worker как сейчас) | Upstream-ключ модели по умолчанию внутри proxy. |
-| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Upstream-ключ на владельца; иначе `OPENAI_API_KEY`. |
+| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Upstream-ключ на владельца (`<ID>` = `[A-Z0-9_]+`). Lookup канонизирует owner_id (uppercase, `-` -> `_`), поэтому `org-a` / `ORG-A` / `org_a` используют `PROXY_OWNER_ORG_A_OPENAI_API_KEY`; конфликтующие значения для одного canonical id падают при старте. Fallback на `OPENAI_API_KEY` только если нет ключа владельца. |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Id провайдера (в M3 PR2 только `openai`; позже расширим). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Фиксированный upstream host (клиент не переопределяет). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` или `http` (тесты). |

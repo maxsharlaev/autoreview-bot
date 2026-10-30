@@ -103,6 +103,7 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | How often the reaper scans for orphan review containers and stale checkout dirs. |
 | `LAUNCHER_CANCEL_DEADLINE_SECONDS` | `4` | launcher | Hard wait bound for DELETE `/v1/jobs/{id}`: cancel work runs in a background worker; the handler waits at most this long then returns `confirmed=false` while Docker cleanup may continue (tombstone already set; duplicate DELETE coalesces; reaper reclaims leftovers). Per Docker call also uses the actual remaining budget (never inflated; under 50ms → skip). Must be ≤ worker DELETE HTTP read timeout (5s) **minus a mandatory 0.5s margin** (max 4.5s; default 4s passes) and above `LAUNCHER_CANCEL_WAIT_SECONDS`. Docker HTTP uses a long-lived async loop + asyncio.timeout (not per-call asyncio.run). |
 | `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | After kill-first cancel, seconds to wait for an in-flight launch before confirming idle (capped by remaining `LAUNCHER_CANCEL_DEADLINE_SECONDS`). |
+| `LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS` | `2` | launcher | Short HTTP timeout for the best-effort background proxy token revoke scheduled after the bounded DELETE cancel response (ARB34-002). Does not extend the cancel deadline; reaper revoke remains the idempotent backstop. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Docker Engine endpoint. Compose sets the unix socket; do not point this at a remote daemon from an untrusted network. |
@@ -124,7 +125,7 @@ The proxy sends upstream `Accept-Encoding: identity` and strips representation h
 | `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Base URL for issuer/revoke calls. |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (and api/worker as today) | Default upstream model key inside the proxy. |
-| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Per-owner upstream key; falls back to `OPENAI_API_KEY`. |
+| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Per-owner upstream key (`<ID>` = `[A-Z0-9_]+`). Lookup canonicalizes owner_id (uppercase, `-` -> `_`), so `org-a` / `ORG-A` / `org_a` share `PROXY_OWNER_ORG_A_OPENAI_API_KEY`; conflicting values for the same canonical id fail at startup. Falls back to `OPENAI_API_KEY` only when no owner key matches. |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Upstream provider id (only `openai` in M3 PR2; extensible later). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Fixed upstream host (callers cannot override). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` or `http` (tests). |

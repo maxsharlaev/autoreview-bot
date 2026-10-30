@@ -356,10 +356,9 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
         else:
             leftover = ["?"]
         confirmed = (not leftover) and (not lifecycle.launch_active(jid))
-        # Cancel path: revoke proxy token (idempotent; worker also revokes in finally).
-        from app.services.model_proxy_client import revoke_job_token_sync
-
-        revoke_job_token_sync(job_id=jid)
+        # Proxy token revoke is scheduled by cancel_review_job_bounded (best-effort
+        # background, ARB34-002) so a slow proxy cannot delay the DELETE response.
+        # Reaper + worker finally remain idempotent backstops.
         return {"job_id": jid, "removed": removed, "confirmed": confirmed}
     finally:
         if owns:
