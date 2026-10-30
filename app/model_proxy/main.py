@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.model_proxy import metrics
@@ -94,7 +95,6 @@ def issue_token(
         metrics.AUTH_FAIL.labels(kind="issuer").inc()
         metrics.TOKEN_ISSUE.labels(result="auth_fail").inc()
         raise
-    # Ensure owner has a resolvable upstream key before issuing.
     try:
         settings.upstream_key_for_owner(body.owner_id)
     except KeyError as exc:
@@ -156,7 +156,6 @@ async def catch_all(full_path: str, request: Request) -> Response:
         metrics.REQUESTS.labels(result="auth_fail").inc()
         raise
 
-    # Reject oversized Content-Length before reserving a slot (no refund churn).
     cl_raw = request.headers.get("content-length")
     if cl_raw is not None and cl_raw.strip() != "":
         try:
@@ -170,8 +169,6 @@ async def catch_all(full_path: str, request: Request) -> Response:
         except ValueError:
             pass
 
-    # Reserve concurrency + request count BEFORE reading the body so slow/stuck
-    # uploads cannot exceed PROXY_MAX_CONCURRENT_PER_JOB.
     limit_err = store.begin_request(rec, body_len=0)
     if limit_err:
         metrics.REQUESTS.labels(result=limit_err).inc()
@@ -182,7 +179,11 @@ async def catch_all(full_path: str, request: Request) -> Response:
             media_type="application/json",
         )
 
+    # ARB32-008: single ownership via finally. Slot stays held until either
+    # (a) we transfer to StreamingResponse (stream_body.finally releases), or
+    # (b) this finally runs after a non-stream return / error / cancellation.
     slot_held = True
+    refund_request = True
     try:
         body, err = await read_bounded_body(
             request,
@@ -193,15 +194,11 @@ async def catch_all(full_path: str, request: Request) -> Response:
             store=store,
         )
         if err is not None:
-            store.end_request(rec, refund_request=True)
-            slot_held = False
             return err
         assert body is not None
 
         byte_err = store.record_bytes_in(rec, len(body))
         if byte_err:
-            store.end_request(rec, refund_request=True)
-            slot_held = False
             metrics.REQUESTS.labels(result=byte_err).inc()
             code = 429 if byte_err == "byte_limit" else 401
             return Response(
@@ -213,8 +210,6 @@ async def catch_all(full_path: str, request: Request) -> Response:
         try:
             upstream_key = settings.upstream_key_for_owner(rec.owner_id)
         except KeyError as exc:
-            store.end_request(rec, refund_request=True)
-            slot_held = False
             metrics.REQUESTS.labels(result="no_upstream_key").inc()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -227,9 +222,9 @@ async def catch_all(full_path: str, request: Request) -> Response:
             rec.owner_id or "-",
             len(body),
         )
-        # forward_responses releases the slot (no refund) on all paths.
-        slot_held = False
-        return await forward_responses(
+        # Committed to upstream: do not refund request count on release.
+        refund_request = False
+        resp = await forward_responses(
             request=request,
             body=body,
             settings=settings,
@@ -239,7 +234,12 @@ async def catch_all(full_path: str, request: Request) -> Response:
             upstream_api_key=upstream_key,
             client=request.app.state.http,
         )
-    except BaseException:
+        # Transfer ownership only after a successful return. StreamingResponse
+        # releases in stream_body.finally; non-stream leaves ownership here.
+        if isinstance(resp, StreamingResponse):
+            slot_held = False
+        return resp
+    finally:
         if slot_held:
-            store.end_request(rec, refund_request=True)
-        raise
+            store.end_request(rec, refund_request=refund_request)
+            metrics.ACTIVE_JOBS.set(store.active_job_count())

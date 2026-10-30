@@ -7,7 +7,7 @@ import logging
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.model_proxy.settings import ProxySettings
 
@@ -28,6 +28,9 @@ class JobTokenRecord:
     bytes_in: int = 0
     bytes_out: int = 0
     active_streams: int = 0
+    # Thread-safe signal: set on revoke / expiry so async waiters wake immediately
+    # even when upstream is silent (ARB32-006).
+    invalidated: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
 
 @dataclass
@@ -47,12 +50,18 @@ class TokenStore:
         self._by_hash: dict[str, JobTokenRecord] = {}
         self._by_job: dict[str, str] = {}  # job_id -> token_hash
 
+    def _drop_record(self, rec: JobTokenRecord) -> None:
+        """Remove ``rec`` and signal waiters. Caller holds ``_lock``."""
+        rec.invalidated.set()
+        self._by_hash.pop(rec.token_hash, None)
+        self._by_job.pop(rec.job_id, None)
+
     def _purge_expired(self, now: float) -> None:
         expired = [h for h, rec in self._by_hash.items() if rec.expires_at <= now]
         for h in expired:
-            rec = self._by_hash.pop(h, None)
+            rec = self._by_hash.get(h)
             if rec is not None:
-                self._by_job.pop(rec.job_id, None)
+                self._drop_record(rec)
 
     @staticmethod
     def hash_token(token: str) -> str:
@@ -85,7 +94,9 @@ class TokenStore:
             self._purge_expired(now)
             old_hash = self._by_job.get(jid)
             if old_hash:
-                self._by_hash.pop(old_hash, None)
+                old = self._by_hash.get(old_hash)
+                if old is not None:
+                    self._drop_record(old)
             rec = JobTokenRecord(
                 token_hash=token_hash,
                 job_id=jid,
@@ -105,10 +116,14 @@ class TokenStore:
     def revoke(self, job_id: str) -> bool:
         jid = (job_id or "").strip()
         with self._lock:
-            h = self._by_job.pop(jid, None)
+            h = self._by_job.get(jid)
             if not h:
                 return False
-            self._by_hash.pop(h, None)
+            rec = self._by_hash.get(h)
+            if rec is None:
+                self._by_job.pop(jid, None)
+                return False
+            self._drop_record(rec)
         logger.info("model_proxy token revoked job_id=%s", jid)
         return True
 
@@ -123,18 +138,21 @@ class TokenStore:
             rec = self._by_hash.get(h)
             if rec is None:
                 return None
-            if rec.expires_at <= now:
-                self._by_hash.pop(h, None)
-                self._by_job.pop(rec.job_id, None)
+            if rec.expires_at <= now or rec.invalidated.is_set():
+                self._drop_record(rec)
                 return None
             return rec
 
     def still_valid(self, rec: JobTokenRecord) -> bool:
         """True if the job token is still present and unexpired."""
+        if rec.invalidated.is_set():
+            return False
         now = time.time()
         with self._lock:
             live = self._by_hash.get(rec.token_hash)
-            return live is not None and live.expires_at > now
+            if live is None or live.expires_at <= now or live.invalidated.is_set():
+                return False
+            return True
 
     def begin_request(self, rec: JobTokenRecord, *, body_len: int = 0) -> str | None:
         """Reserve concurrency + request count before body upload / upstream work.
@@ -146,7 +164,7 @@ class TokenStore:
         inbound = max(0, int(body_len))
         with self._lock:
             live = self._by_hash.get(rec.token_hash)
-            if live is None or live.expires_at <= time.time():
+            if live is None or live.expires_at <= time.time() or live.invalidated.is_set():
                 return "expired"
             if live.req_count >= self._settings.max_requests_per_job:
                 return "request_limit"
@@ -166,7 +184,7 @@ class TokenStore:
             return None
         with self._lock:
             live = self._by_hash.get(rec.token_hash)
-            if live is None or live.expires_at <= time.time():
+            if live is None or live.expires_at <= time.time() or live.invalidated.is_set():
                 return "expired"
             if live.bytes_in + live.bytes_out + inbound > self._settings.max_bytes_per_job:
                 return "byte_limit"
@@ -193,7 +211,11 @@ class TokenStore:
             return take
 
     def end_request(self, rec: JobTokenRecord, *, refund_request: bool = False) -> None:
-        """Release one concurrent slot; optionally refund request count (upload abort)."""
+        """Release one concurrent slot; optionally refund request count (upload abort).
+
+        Safe to call when the record was already dropped (revoke/expiry): no-op.
+        Double-release floors ``active_streams`` at 0.
+        """
         with self._lock:
             live = self._by_hash.get(rec.token_hash)
             if live is None:
