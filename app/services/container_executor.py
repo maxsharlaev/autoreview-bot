@@ -24,7 +24,7 @@ from app.launcher.timeouts import (
 )
 from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
-from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
+from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UPGRADE_REQUIRED
 from app.services.model_proxy_client import (
     ModelProxyIssuerError,
     issue_job_token,
@@ -303,7 +303,19 @@ class ContainerReviewExecutor:
             detail = _safe_detail(response)
             code = detail.get("code") if isinstance(detail, dict) else None
             message = detail.get("message") if isinstance(detail, dict) else None
-            allowed = {CODEX_SANDBOX, CODEX_TIMEOUT}
+            # ARB34-007: surface rolling-upgrade rejects clearly (426 or structured detail).
+            if response.status_code == 426 or code == CODEX_UPGRADE_REQUIRED:
+                raise CodexRunnerError(
+                    CODEX_UPGRADE_REQUIRED,
+                    message or "worker too old: upgrade worker, launcher and model-proxy together",
+                )
+            # Old launcher may answer bare 422 when proxy_token is unknown/required.
+            if response.status_code == 422:
+                raise CodexRunnerError(
+                    CODEX_UPGRADE_REQUIRED,
+                    "launcher rejected review request (422); upgrade worker, launcher and model-proxy together",
+                )
+            allowed = {CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UPGRADE_REQUIRED}
             raise CodexRunnerError(
                 code if code in allowed else CODEX_SANDBOX,
                 message or f"launcher error HTTP {response.status_code}",

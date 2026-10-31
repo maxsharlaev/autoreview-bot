@@ -104,6 +104,7 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `LAUNCHER_CANCEL_DEADLINE_SECONDS` | `4` | launcher | Hard wait bound for DELETE `/v1/jobs/{id}`: cancel work runs in a background worker; the handler waits at most this long then returns `confirmed=false` while Docker cleanup may continue (tombstone already set; duplicate DELETE coalesces; reaper reclaims leftovers). Per Docker call also uses the actual remaining budget (never inflated; under 50ms → skip). Must be ≤ worker DELETE HTTP read timeout (5s) **minus a mandatory 0.5s margin** (max 4.5s; default 4s passes) and above `LAUNCHER_CANCEL_WAIT_SECONDS`. Docker HTTP uses a long-lived async loop + asyncio.timeout (not per-call asyncio.run). |
 | `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | After kill-first cancel, seconds to wait for an in-flight launch before confirming idle (capped by remaining `LAUNCHER_CANCEL_DEADLINE_SECONDS`). |
 | `LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS` | `2` | launcher | Short HTTP timeout for the best-effort background proxy token revoke scheduled after the bounded DELETE cancel response (ARB34-002). Does not extend the cancel deadline; reaper revoke remains the idempotent backstop. |
+| `LAUNCHER_CANCEL_REVOKE_MAX_PENDING` | `32` | launcher | Max in-flight background proxy revokes on the dedicated revoke loop (ARB34-005). When saturated, further schedules are dropped with a warning; reaper is the backstop. `_CANCEL_POOL` stays exclusive to Docker cancel. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Docker Engine endpoint. Compose sets the unix socket; do not point this at a remote daemon from an untrusted network. |
@@ -139,6 +140,9 @@ The proxy sends upstream `Accept-Encoding: identity` and strips representation h
 | `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle bound between chunks for both client upload (`request.stream`) and upstream response (`asyncio.timeout` per next-chunk wait; HTTPX float timeout is only a soft per-phase backstop). |
 | `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock overall deadline for reading the client request body and for the whole upstream request+response (not HTTPX inactivity alone); also stops at job-token expiry and closes the upstream response. |
 | `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` | `2` | worker | Wall-clock bound for best-effort `revoke_job_token` in `ContainerReviewExecutor.run` finally (ARB34-004). Lease cleanup and the review result must not wait on a hung proxy; reaper/launcher revoke remain backstops. |
+
+
+Proxy-only secrets file: copy [`model-proxy.env.example`](../model-proxy.env.example) to `model-proxy.env` (gitignored), restrict permissions (`chmod 600` / Windows ACLs), and put `OPENAI_API_KEY`, `PROXY_OWNER_KEY_ENVS`, and any env vars named by that map there. Compose loads it via `env_file` on **model-proxy only** (never worker/launcher).
 
 Public allowlist on the proxy: **`POST /v1/responses`** only (SSE supported). No WebSocket / CONNECT. Logs never include tokens, keys, or bodies.
 

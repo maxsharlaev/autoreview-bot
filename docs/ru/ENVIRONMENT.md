@@ -104,6 +104,7 @@
 | `LAUNCHER_CANCEL_DEADLINE_SECONDS` | `4` | launcher | Жёсткий предел ожидания DELETE `/v1/jobs/{id}`: cancel выполняется в background-worker; handler ждёт не дольше этого времени и возвращает `confirmed=false`, пока Docker-очистка может продолжаться (tombstone уже выставлен; повторный DELETE coalesces; leftovers забирает reaper). Каждый вызов Docker — только фактический остаток бюджета (не завышается; меньше 50 мс → skip). Должен быть ≤ worker DELETE HTTP read timeout (5s) **минус обязательный запас 0.5 с** (макс. 4.5 с; default 4 с проходит) и больше `LAUNCHER_CANCEL_WAIT_SECONDS`. Docker HTTP — long-lived async loop + asyncio.timeout (не per-call asyncio.run). |
 | `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | После kill-first cancel — секунды ожидания in-flight launch перед confirmed idle (ограничено остатком `LAUNCHER_CANCEL_DEADLINE_SECONDS`). |
 | `LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS` | `2` | launcher | Короткий HTTP-таймаут для best-effort background revoke proxy-токена после bounded DELETE cancel (ARB34-002). Не удлиняет cancel deadline; reaper revoke остаётся idempotent backstop. |
+| `LAUNCHER_CANCEL_REVOKE_MAX_PENDING` | `32` | launcher | Макс. in-flight background proxy revoke на отдельном revoke loop (ARB34-005). При переполнении schedule дропается с warning; reaper — backstop. `_CANCEL_POOL` только для Docker cancel. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
@@ -139,6 +140,9 @@ Proxy отправляет upstream `Accept-Encoding: identity` и снимае�
 | `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle между чанками и для загрузки клиента (`request.stream`), и для ответа upstream (`asyncio.timeout` на ожидание следующего чанка; float-timeout HTTPX — только мягкий per-phase backstop). |
 | `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock общий дедлайн на чтение тела запроса клиента и на весь upstream request+response (не только inactivity HTTPX); также останавливается по expiry job-токена и закрывает upstream-ответ. |
 | `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` | `2` | worker | Wall-clock лимит best-effort `revoke_job_token` в finally `ContainerReviewExecutor.run` (ARB34-004). Cleanup lease и возврат результата не ждут зависший proxy; reaper/launcher revoke — backstop. |
+
+
+Файл секретов только для proxy: скопируйте [`model-proxy.env.example`](../../model-proxy.env.example) в `model-proxy.env` (в gitignore), ограничьте права (`chmod 600` / Windows ACL) и положите туда `OPENAI_API_KEY`, `PROXY_OWNER_KEY_ENVS` и env, на которые ссылается map. Compose подключает его через `env_file` **только** у model-proxy (не worker/launcher).
 
 Публичный allowlist proxy: только **`POST /v1/responses`** (SSE поддерживается). Без WebSocket / CONNECT. Логи не содержат токены, ключи и тела запросов.
 

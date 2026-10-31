@@ -45,6 +45,25 @@
 
 Пошаговое обновление до блока `owners:`, сохранение истории через `aliases: [default]` и откат: [MULTI_OWNER.md](MULTI_OWNER.md#обновление-и-откат).
 
+<!-- section: m3-container-proxy-rolling -->
+## Container backend + model-proxy (M3): без rolling mix
+
+Worker, launcher и model-proxy для `codex.runner_backend: container` **не** совместимы
+по частям на срезе M3 proxy-token. Обновляйте вместе:
+
+1. **Drain:** остановите intake (пауза GitHub Actions / webhook, или scale worker в 0 после
+   завершения текущих ARQ jobs). Дождитесь, пока не останется активных review-контейнеров /
+   launcher jobs (`docker compose ps`, логи launcher/reaper).
+2. **Upgrade вместе:** rebuild и recreate **worker + launcher + model-proxy** из одного
+   checkout (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`
+   или `./scripts/stack.ps1 up -Container`). Перед стартом создайте/обновите `model-proxy.env` из
+   `model-proxy.env.example`; реальные ключи не должны попадать в env worker/launcher.
+3. **Rollback:** симметрично — recreate тех же трёх сервисов с предыдущего commit (и парного
+   `model-proxy.env`). Не запускайте новый worker против старого launcher (и наоборот):
+   launcher отвечает **426** `CODEX_UPGRADE_REQUIRED` с текстом
+   `worker too old: upgrade worker, launcher and model-proxy together`, если нет `proxy_token`
+   или прислан legacy `X-Model-Api-Key` (ключ никогда не форвардится).
+
 <!-- section: worker-metrics-port-no-longer-published -->
 ## Порт метрик worker'а больше не публикуется
 

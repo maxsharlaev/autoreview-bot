@@ -183,6 +183,7 @@ _DOCUMENTED_LAUNCHER_SETTINGS = (
     "LAUNCHER_CANCEL_DEADLINE_SECONDS",
     "LAUNCHER_CANCEL_WAIT_SECONDS",
     "LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS",
+    "LAUNCHER_CANCEL_REVOKE_MAX_PENDING",
     "OPR_CHECKOUT_BASE",
     "OPR_CHECKOUT_VOLUME",
     "OPR_REVIEW_IMAGE",
@@ -262,6 +263,7 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
         "LAUNCHER_CANCEL_DEADLINE_SECONDS": "4",
         "LAUNCHER_CANCEL_WAIT_SECONDS": "3",
         "LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS": "2",
+        "LAUNCHER_CANCEL_REVOKE_MAX_PENDING": "32",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
         "OPR_CLONE_TIMEOUT_SECONDS": "300",
         "OPR_CHECKOUT_ORPHAN_TTL_SECONDS": "900",
@@ -367,7 +369,20 @@ def _docs_model_proxy_table_vars() -> set[str]:
 def test_overlay_lists_model_proxy_service() -> None:
     overlay = _load(CONTAINER)
     proxy = _service(overlay, "model-proxy")
-    assert "env_file" not in proxy, "model-proxy must not use env_file"
+    env_files = proxy.get("env_file") or []
+    assert env_files, "model-proxy must load model-proxy.env via env_file (ARB34-006)"
+    # Normalize compose env_file entries (string or {path, required})
+    paths: list[str] = []
+    for item in env_files if isinstance(env_files, list) else [env_files]:
+        if isinstance(item, str):
+            paths.append(item)
+        elif isinstance(item, dict):
+            paths.append(str(item.get("path") or ""))
+    assert any(p.endswith("model-proxy.env") or p == "model-proxy.env" for p in paths), paths
+    for svc_name in ("worker", "launcher"):
+        svc = _service(overlay, svc_name)
+        other = svc.get("env_file") or []
+        assert not other, f"{svc_name} must not use env_file (secrets stay on model-proxy)"
     volumes = proxy.get("volumes") or []
     assert not any("docker.sock" in str(v) for v in volumes), "model-proxy must not mount Docker socket"
     nets = _network_names(proxy)
@@ -419,3 +434,44 @@ def test_overlay_model_proxy_settings_use_safe_defaults() -> None:
     worker_env = _service(overlay, "worker").get("environment") or {}
     raw_url = str(worker_env["MODEL_PROXY_URL"])
     assert "model-proxy:8081" in raw_url
+
+
+def test_model_proxy_env_file_hyphen_owner_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB34-006: vars named in PROXY_OWNER_KEY_ENVS resolve when loaded like model-proxy.env."""
+    from app.model_proxy.settings import load_settings, resolve_owner_upstream_keys
+
+    env_file = tmp_path / "model-proxy.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=sk-default-from-file",
+                'PROXY_OWNER_KEY_ENVS={"org-a":"ORG_A_HYPHEN_KEY","org_a":"ORG_A_UNDER_KEY"}',
+                "ORG_A_HYPHEN_KEY=sk-hyphen-secret",
+                "ORG_A_UNDER_KEY=sk-under-secret",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # Simulate compose env_file injection into process env for model-proxy only.
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        monkeypatch.setenv(k.strip(), v)
+    monkeypatch.setenv("PROXY_ISSUER_TOKEN", "issuer-token-16chars")
+    resolved = resolve_owner_upstream_keys()
+    assert resolved["org-a"] == "sk-hyphen-secret"
+    assert resolved["org_a"] == "sk-under-secret"
+    settings = load_settings()
+    assert settings.upstream_key_for_owner("org-a") == "sk-hyphen-secret"
+    assert settings.upstream_key_for_owner("org_a") == "sk-under-secret"
+    # Overlay: only model-proxy references the file
+    overlay = _load(CONTAINER)
+    assert any(
+        (isinstance(x, str) and "model-proxy.env" in x)
+        or (isinstance(x, dict) and "model-proxy.env" in str(x.get("path")))
+        for x in (_service(overlay, "model-proxy").get("env_file") or [])
+    )
+    for name in ("worker", "launcher"):
+        assert not _service(overlay, name).get("env_file")

@@ -5,7 +5,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build
 # LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN use non-required interpolation (${VAR:-}) so this file can be
 # parsed without the vars; launcher / model-proxy fail closed if empty when used.
-# model-proxy holds real model keys (OPENAI_API_KEY / PROXY_OWNER_*); no Docker socket, no env_file.
+# model-proxy holds real model keys via model-proxy.env (env_file) + listed knobs; no Docker socket. Worker/launcher must not mount model-proxy.env.
 services:
   worker:
     environment:
@@ -42,6 +42,7 @@ services:
       LAUNCHER_CANCEL_WAIT_SECONDS: "${LAUNCHER_CANCEL_WAIT_SECONDS:-3}"
       LAUNCHER_CANCEL_DEADLINE_SECONDS: "${LAUNCHER_CANCEL_DEADLINE_SECONDS:-4}"
       LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS: "${LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS:-2}"
+      LAUNCHER_CANCEL_REVOKE_MAX_PENDING: "${LAUNCHER_CANCEL_REVOKE_MAX_PENDING:-32}"
       OPR_MAX_REVIEW_TIMEOUT_SECONDS: "${OPR_MAX_REVIEW_TIMEOUT_SECONDS:-600}"
       OPR_CLONE_TIMEOUT_SECONDS: "${OPR_CLONE_TIMEOUT_SECONDS:-300}"
       OPR_CHECKOUT_ORPHAN_TTL_SECONDS: "${OPR_CHECKOUT_ORPHAN_TTL_SECONDS:-900}"
@@ -70,9 +71,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.model-proxy
-    # No env_file / no Docker socket. Real model keys live only here (M3).
-    # Per-owner keys: PROXY_OWNER_KEY_ENVS JSON map and/or PROXY_OWNER_<ID>_OPENAI_API_KEY (legacy, no hyphen) via host env / compose override
-    # (Compose only passes listed keys; OPENAI_API_KEY is the default upstream key).
+    # Real model keys live only here (M3). env_file injects arbitrary names from
+    # PROXY_OWNER_KEY_ENVS (e.g. ORG_A_HYPHEN_KEY) that Compose `environment:` cannot
+    # list ahead of time. Worker/launcher must NOT set env_file to model-proxy.env.
+    # Restrict file perms (chmod 600 / Windows ACLs). Copy from model-proxy.env.example.
+    # `required: false` so CI/parse works before the file exists; create it before up.
+    env_file:
+      - path: model-proxy.env
+        required: false
+    # No Docker socket. Listed keys below remain for non-secret knobs + defaults.
+    # Per-owner secrets: put values in model-proxy.env (and PROXY_OWNER_KEY_ENVS map).
     environment:
       PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"

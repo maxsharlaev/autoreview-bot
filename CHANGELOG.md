@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- **ARB34-005:** launcher proxy revokes use a dedicated asyncio loop with `asyncio.timeout` and a bounded pending queue; `_CANCEL_POOL` is Docker-cancel only so blocked revokes cannot starve DELETE cancel.
+- **ARB34-006:** model-proxy loads `model-proxy.env` via `env_file` (gitignored; example + restricted-perms docs) so env vars named in `PROXY_OWNER_KEY_ENVS` reach the proxy; worker/launcher must not mount that file.
+- **ARB34-007:** no rolling mix for worker+launcher+model-proxy — deploy/upgrade docs (EN/RU); launcher returns **426** `CODEX_UPGRADE_REQUIRED` when `proxy_token` is missing or legacy `X-Model-Api-Key` is present (never forwarded); worker surfaces it clearly (and maps bare 422 to the same upgrade code).
 - **ARB34-004:** `ContainerReviewExecutor.run` bounds finish-path `revoke_job_token` with `asyncio.timeout` / `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` (default 2s) so a slow proxy cannot delay lease cleanup or returning a completed review; reaper/launcher revoke remain backstops.
 - **ARB34-003:** replace hyphen-canonicalization with explicit `PROXY_OWNER_KEY_ENVS` (owner_id → env var *name*; secrets stay in env). Startup fails on duplicate env targets, missing/empty referenced env, or case-variant owners sharing one env; legacy `PROXY_OWNER_<UPPER>_OPENAI_API_KEY` remains only for owner ids without `-`.
 - **ARB34-002:** launcher cancel revokes the proxy token as a best-effort background task on the long-lived cancel pool (short timeout) after the bounded DELETE response, so a slow/unreachable model-proxy cannot delay cancel past the worker's 5s read timeout; reaper revoke remains the idempotent backstop.

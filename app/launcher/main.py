@@ -28,7 +28,9 @@ class RunReviewRequest(BaseModel):
 
     job_id: str = Field(min_length=1, max_length=128)
     checkout_ref: str = Field(min_length=1, max_length=512)
-    proxy_token: str = Field(min_length=1, max_length=512)
+    # Optional at the schema layer so missing token yields a clear upgrade error
+    # (ARB34-007) instead of a bare Pydantic 422.
+    proxy_token: str | None = Field(default=None, max_length=512)
 
 
 class RunReviewResponse(BaseModel):
@@ -117,6 +119,18 @@ def cancel_job(job_id: str) -> CancelJobResponse:
     )
 
 
+_UPGRADE_TOGETHER_MSG = "worker too old: upgrade worker, launcher and model-proxy together"
+
+
+def _upgrade_required_detail(*, reason: str) -> dict[str, str]:
+    # Never include header/body secret values in the detail.
+    return {
+        "code": "CODEX_UPGRADE_REQUIRED",
+        "message": _UPGRADE_TOGETHER_MSG,
+        "reason": reason,
+    }
+
+
 @app.post("/v1/reviews", response_model=RunReviewResponse, dependencies=[Depends(require_launcher_auth)])
 def start_review(
     body: RunReviewRequest,
@@ -125,17 +139,26 @@ def start_review(
     """Start a hard-coded review container.
 
     Body: ``job_id``, ``checkout_ref``, and ``proxy_token`` (short-lived ``opr_job_``
-    bearer from model-proxy). The legacy ``X-Model-Api-Key`` header is ignored
-    when present (M3: real model keys never enter the launcher). Job tunables
+    bearer from model-proxy). Legacy ``X-Model-Api-Key`` is rejected with 426
+    (ARB34-007); the value is never logged or forwarded. Job tunables
     (model, timeout, sandbox) are read from staged ``job.json``.
     """
     try:
         validate_job_id(body.job_id)
     except CheckoutPathError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    # Explicitly ignore legacy model-key header (do not log or forward the value).
-    _ = x_model_api_key
+    # Detect legacy workers that still send a real model key (never forward it).
+    if x_model_api_key is not None and str(x_model_api_key).strip() != "":
+        raise HTTPException(
+            status_code=status.HTTP_426_UPGRADE_REQUIRED,
+            detail=_upgrade_required_detail(reason="legacy_x_model_api_key_header"),
+        )
     token = (body.proxy_token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_426_UPGRADE_REQUIRED,
+            detail=_upgrade_required_detail(reason="missing_proxy_token"),
+        )
     if not token.startswith("opr_job_"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

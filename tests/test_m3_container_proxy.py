@@ -138,20 +138,14 @@ def test_run_review_job_writes_codex_config_and_uses_proxy_token(
     assert created["config"]
 
 
-def test_launcher_ignores_legacy_model_key_header(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Legacy X-Model-Api-Key must not become proxy_token even if sent."""
-    captured: dict = {}
+def test_launcher_rejects_legacy_model_key_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB34-007: legacy X-Model-Api-Key yields 426; value never forwarded."""
+    from fastapi import HTTPException
 
-    def fake_run(**kwargs):
-        captured.update(kwargs)
-        return {
-            "job_id": kwargs["job_id"],
-            "status": "ok",
-            "output": "{}",
-            "duration_seconds": 0.01,
-        }
+    def boom(**kwargs):
+        raise AssertionError("run_review_job must not run when legacy header is present")
 
-    monkeypatch.setattr("app.launcher.main.run_review_job", fake_run)
+    monkeypatch.setattr("app.launcher.main.run_review_job", boom)
     from app.launcher.main import RunReviewRequest, start_review
 
     body = RunReviewRequest(
@@ -159,11 +153,13 @@ def test_launcher_ignores_legacy_model_key_header(monkeypatch: pytest.MonkeyPatc
         checkout_ref=("c" * 32) + "/repo",
         proxy_token=PROXY_TOKEN,
     )
-    resp = start_review(body=body, x_model_api_key=REAL_KEY)
-    assert resp.job_id == "c" * 32
-    assert captured.get("proxy_token") == PROXY_TOKEN
-    assert captured.get("proxy_token") != REAL_KEY
-    assert REAL_KEY not in str(captured)
+    with pytest.raises(HTTPException) as ei:
+        start_review(body=body, x_model_api_key=REAL_KEY)
+    assert ei.value.status_code == 426
+    detail = ei.value.detail
+    assert isinstance(detail, dict)
+    assert detail["code"] == "CODEX_UPGRADE_REQUIRED"
+    assert REAL_KEY not in str(detail)
 
 
 @pytest.mark.asyncio

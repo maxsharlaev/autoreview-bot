@@ -45,6 +45,25 @@ Always back up the Postgres volume before a downgrade.
 
 Step-by-step upgrade to an `owners:` block, keeping history with `aliases: [default]`, and rollback: [MULTI_OWNER.md](MULTI_OWNER.md#upgrade-and-rollback).
 
+<!-- section: m3-container-proxy-rolling -->
+## Container backend + model-proxy (M3): no rolling mix
+
+Worker, launcher, and model-proxy for `codex.runner_backend: container` are **not**
+rolling-compatible across the M3 proxy-token cut. Upgrade them together:
+
+1. **Drain:** stop intake (pause GitHub Actions / webhook delivery, or scale worker to 0 after
+   the current ARQ jobs finish). Wait until no review containers / launcher jobs are active
+   (`docker compose ps`, launcher/reaper logs).
+2. **Upgrade together:** rebuild and recreate **worker + launcher + model-proxy** from the same
+   checkout (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`
+   or `./scripts/stack.ps1 up -Container`). Create/update `model-proxy.env` from
+   `model-proxy.env.example` before start; keep real keys out of worker/launcher env.
+3. **Rollback:** symmetric — recreate the same three services from the previous commit (and the
+   matching `model-proxy.env`). Do not run a new worker against an old launcher (or the reverse):
+   the launcher returns **426** `CODEX_UPGRADE_REQUIRED` with
+   `worker too old: upgrade worker, launcher and model-proxy together` when `proxy_token` is
+   missing or a legacy `X-Model-Api-Key` header is present (the key is never forwarded).
+
 <!-- section: worker-metrics-port-no-longer-published -->
 ## Worker metrics port no longer published
 

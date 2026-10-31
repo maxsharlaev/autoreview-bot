@@ -74,7 +74,8 @@ def test_reviews_requires_proxy_token(client: TestClient, launcher_env) -> None:
         headers={"Authorization": f"Bearer {token}"},
         json={"job_id": "abc", "checkout_ref": "abc/repo"},
     )
-    assert r.status_code == 422  # pydantic missing proxy_token
+    assert r.status_code == 426  # ARB34-007: clear upgrade-required, not bare 422
+    assert r.json()["detail"]["code"] == "CODEX_UPGRADE_REQUIRED"
 
 
 def test_reviews_fail_closed_on_docker_error(client: TestClient, launcher_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,7 +93,7 @@ def test_reviews_fail_closed_on_docker_error(client: TestClient, launcher_env, m
     monkeypatch.setattr("app.launcher.main.run_review_job", boom)
     r = client.post(
         "/v1/reviews",
-        headers={"Authorization": f"Bearer {token}", "X-Model-Api-Key": "sk-real-key-must-be-ignored"},
+        headers={"Authorization": f"Bearer {token}"},
         json={
             "job_id": "abc",
             "checkout_ref": "abc/repo",
