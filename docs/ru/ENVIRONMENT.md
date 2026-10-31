@@ -125,9 +125,9 @@ Proxy отправляет upstream `Accept-Encoding: identity` и снимае�
 | `PROXY_ISSUER_TOKEN` | (нужен для старта model-proxy) | model-proxy, worker, launcher | Общий bearer для `POST/DELETE /internal/jobs/{job_id}/token`. Сгенерируйте `openssl rand -hex 32` (>= 16 символов). |
 | `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
-| `OPENAI_API_KEY` | `""` | model-proxy (и api/worker как сейчас) | Upstream-ключ модели по умолчанию внутри proxy. |
+| `OPENAI_API_KEY` | `""` | model-proxy (через `model-proxy.env`; также api/worker) | Upstream-ключ модели по умолчанию внутри proxy. В container-runner overlay задавайте только в `model-proxy.env` (не в Compose `environment:`, иначе перетрёт/обнулит `env_file`). |
 | `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Legacy upstream-ключ на владельца (`<ID>` = `[A-Z0-9_]+`). Fallback только для owner id **без** `-`: lookup = `PROXY_OWNER_<OWNER_ID.upper()>_OPENAI_API_KEY`. Hyphenated id (`org-a`) требуют `PROXY_OWNER_KEY_ENVS` (no hyphen→underscore remap). Иначе `OPENAI_API_KEY`, если нет ключа владельца. |
-| `PROXY_OWNER_KEY_ENVS` | `{}` | model-proxy | JSON-объект: точный `owner_id` → **имя** env-переменной с upstream-ключом (секреты только в env). Обязателен для id с дефисом (`org-a`). Старт падает, если два owner указывают на один env, env пуст/отсутствует, или case-варианты делят один env. Пример: `{"org-a":"ORG_A_HYPHEN_KEY","org_a":"ORG_A_UNDER_KEY"}`. |
+| `PROXY_OWNER_KEY_ENVS` | `{}` | model-proxy | JSON-объект: точный `owner_id` → **имя** env-переменной с upstream-ключом (секреты только в env). Обязателен для id с дефисом (`org-a`). Старт падает, если два owner указывают на один env, env пуст/отсутствует, или case-варианты делят один env. Пример: `{"org-a":"ORG_A_HYPHEN_KEY","org_a":"ORG_A_UNDER_KEY"}`. Для container-runner overlay задавайте только в `model-proxy.env` (не в Compose `environment:`). |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Id провайдера (в M3 PR2 только `openai`; позже расширим). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Фиксированный upstream host (клиент не переопределяет). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` или `http` (тесты). |

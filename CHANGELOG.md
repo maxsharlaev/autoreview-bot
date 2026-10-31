@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- **ARB34-008:** launcher reaper schedules proxy revokes via the bounded revoke scheduler (wall-clock timeout) instead of inline `revoke_job_token_sync`, so a slow-dripping proxy cannot stall container/checkout cleanup.
+- **ARB34-006 (follow-up):** container-runner Compose no longer sets `OPENAI_API_KEY` / `PROXY_OWNER_KEY_ENVS` in `environment:` (those overrode `model-proxy.env`); secrets come from `model-proxy.env` only.
 - **ARB34-005:** launcher proxy revokes use a dedicated asyncio loop with `asyncio.timeout` and a bounded pending queue; `_CANCEL_POOL` is Docker-cancel only so blocked revokes cannot starve DELETE cancel.
 - **ARB34-006:** model-proxy loads `model-proxy.env` via `env_file` (gitignored; example + restricted-perms docs) so env vars named in `PROXY_OWNER_KEY_ENVS` reach the proxy; worker/launcher must not mount that file.
 - **ARB34-007:** no rolling mix for worker+launcher+model-proxy — deploy/upgrade docs (EN/RU); launcher returns **426** `CODEX_UPGRADE_REQUIRED` when `proxy_token` is missing or legacy `X-Model-Api-Key` is present (never forwarded); worker surfaces it clearly (and maps bare 422 to the same upgrade code).

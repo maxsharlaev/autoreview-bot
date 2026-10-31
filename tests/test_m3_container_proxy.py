@@ -225,11 +225,10 @@ def test_reaper_revokes_on_container_remove(monkeypatch: pytest.MonkeyPatch) -> 
 
     revoked: list[str] = []
 
-    def fake_revoke(*, job_id: str, **kwargs):
+    def fake_schedule(job_id: str) -> None:
         revoked.append(job_id)
-        return True
 
-    monkeypatch.setattr(reaper_mod, "revoke_job_token_sync", fake_revoke)
+    monkeypatch.setattr(reaper_mod, "schedule_proxy_token_revoke", fake_schedule)
     monkeypatch.setattr(reaper_mod, "orphan_ttl_seconds", lambda: 1)
     monkeypatch.setattr(reaper_mod.lifecycle, "launch_active", lambda jid: False)
 

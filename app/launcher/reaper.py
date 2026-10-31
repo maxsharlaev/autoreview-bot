@@ -14,9 +14,9 @@ from pathlib import Path
 from app.launcher.docker_api import DockerApiError, DockerClient
 from app.launcher.job_lifecycle import lifecycle
 from app.launcher.lease import directory_is_lease_stale, remove_directory_lease_file
+from app.launcher.revoke_scheduler import schedule_proxy_token_revoke
 from app.launcher.spec import REVIEW_LABEL, REVIEW_LABEL_VALUE
 from app.launcher.timeouts import review_orphan_ttl_seconds
-from app.services.model_proxy_client import revoke_job_token_sync
 
 logger = logging.getLogger(__name__)
 
@@ -192,9 +192,10 @@ def reap_checkout_orphans(
             _safe_rmtree(path)
             remove_directory_lease_file(path)
             removed += 1
-            # UUID job staging dirs: revoke any leftover proxy token (idempotent).
+            # UUID job staging dirs: best-effort revoke via bounded scheduler
+            # (ARB34-008); never block the reaper on a slow proxy.
             if is_uuid_job_dirname(name):
-                revoke_job_token_sync(job_id=name)
+                schedule_proxy_token_revoke(name)
         elif stat.S_ISREG(st.st_mode):
             logger.warning("reaping orphan checkout file name=%s", name)
             _safe_unlink(path)
@@ -272,8 +273,9 @@ def reap_once(client: DockerClient | None = None) -> int:
                 removed += 1
                 live_ids.discard(job_id)
                 if job_id:
-                    # Idempotent: worker may already have revoked on finish/cancel.
-                    revoke_job_token_sync(job_id=job_id)
+                    # Idempotent best-effort: bounded revoke scheduler (ARB34-008).
+                    # Worker/cancel may already have revoked; reaper must not stall.
+                    schedule_proxy_token_revoke(job_id)
             except DockerApiError as exc:
                 logger.warning("reaper remove failed %s: %s", cid[:12], exc)
 

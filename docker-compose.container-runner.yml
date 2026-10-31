@@ -79,12 +79,12 @@ services:
     env_file:
       - path: model-proxy.env
         required: false
-    # No Docker socket. Listed keys below remain for non-secret knobs + defaults.
-    # Per-owner secrets: put values in model-proxy.env (and PROXY_OWNER_KEY_ENVS map).
+    # No Docker socket. Listed keys below are non-secret knobs only.
+    # Do NOT list OPENAI_API_KEY / PROXY_OWNER_KEY_ENVS here: Compose `environment`
+    # overrides `env_file`, which would empty them when host env is unset (ARB34-006).
+    # Put those (and any PROXY_OWNER_KEY_ENVS-named vars) only in model-proxy.env.
     environment:
       PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
-      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
-      PROXY_OWNER_KEY_ENVS: "${PROXY_OWNER_KEY_ENVS:-}"
       PROXY_PROVIDER: "${PROXY_PROVIDER:-openai}"
       PROXY_UPSTREAM_HOST: "${PROXY_UPSTREAM_HOST:-api.openai.com}"
       PROXY_UPSTREAM_SCHEME: "${PROXY_UPSTREAM_SCHEME:-https}"

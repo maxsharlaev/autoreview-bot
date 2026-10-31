@@ -313,10 +313,10 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
 
 
 # Model-proxy settings documented in docs/ENVIRONMENT.md (M3 PR2).
+# Secrets OPENAI_API_KEY / PROXY_OWNER_KEY_ENVS come from model-proxy.env (env_file),
+# not Compose environment: (ARB34-006 follow-up).
 _DOCUMENTED_MODEL_PROXY_SETTINGS = (
     "PROXY_ISSUER_TOKEN",
-    "OPENAI_API_KEY",
-    "PROXY_OWNER_KEY_ENVS",
     "PROXY_PROVIDER",
     "PROXY_UPSTREAM_HOST",
     "PROXY_UPSTREAM_SCHEME",
@@ -397,13 +397,24 @@ def test_overlay_lists_model_proxy_service() -> None:
     keys = _env_keys(proxy)
     for name in _DOCUMENTED_MODEL_PROXY_SETTINGS:
         assert name in keys, f"model-proxy missing {name}"
+    for secret_name in ("OPENAI_API_KEY", "PROXY_OWNER_KEY_ENVS"):
+        assert secret_name not in keys, f"{secret_name} must not be in Compose environment: (overrides env_file)"
     worker_keys = _env_keys(_service(overlay, "worker"))
     for name in _WORKER_PROXY_SETTINGS:
         assert name in worker_keys, f"worker missing {name}"
     docs_names = _docs_model_proxy_table_vars()
     # MODEL_PROXY_URL is worker-only; PROXY_OWNER_* pattern is override-only
     missing = (
-        docs_names - keys - {"MODEL_PROXY_URL", "OPR_MODEL_PROXY_BASE_URL", "OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS"}
+        docs_names
+        - keys
+        - {
+            "MODEL_PROXY_URL",
+            "OPR_MODEL_PROXY_BASE_URL",
+            "OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS",
+            # env_file-only secrets (must not appear in Compose environment:)
+            "OPENAI_API_KEY",
+            "PROXY_OWNER_KEY_ENVS",
+        }
     )
     assert not missing, f"docs model-proxy vars missing from compose: {sorted(missing)}"
 
@@ -475,3 +486,72 @@ def test_model_proxy_env_file_hyphen_owner_map(tmp_path: Path, monkeypatch: pyte
     )
     for name in ("worker", "launcher"):
         assert not _service(overlay, name).get("env_file")
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker not available")
+def test_rendered_compose_model_proxy_env_file_wins() -> None:
+    """ARB34-006: secrets from model-proxy.env reach model-proxy; not worker/launcher.
+
+    Host env must not set OPENAI_API_KEY / PROXY_OWNER_KEY_ENVS so empty Compose
+    `environment:` interpolation cannot override env_file (regression guard).
+    """
+    env_path = ROOT / "model-proxy.env"
+    created = False
+    previous: str | None = None
+    if env_path.exists():
+        previous = env_path.read_text(encoding="utf-8")
+    else:
+        created = True
+    env_path.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=sk-dummy-from-env-file-not-a-secret",
+                'PROXY_OWNER_KEY_ENVS={"org-a":"ORG_A_HYPHEN_KEY"}',
+                "ORG_A_HYPHEN_KEY=sk-dummy-org-a-hyphen-not-a-secret",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    try:
+        env = {
+            **os.environ,
+            "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
+            "PROXY_ISSUER_TOKEN": "test-issuer-token-32chars-ok!!",
+            "POSTGRES_PASSWORD": os.environ.get("POSTGRES_PASSWORD") or "test-postgres-password",
+        }
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("PROXY_OWNER_KEY_ENVS", None)
+        env.pop("ORG_A_HYPHEN_KEY", None)
+
+        rendered = subprocess.run(
+            ["docker", "compose", "-f", str(BASE), "-f", str(CONTAINER), "config"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        if rendered.returncode != 0:
+            pytest.skip(f"docker compose config failed: {rendered.stderr[-500:]}")
+        data = yaml.safe_load(rendered.stdout)
+        proxy_env = _service(data, "model-proxy").get("environment") or {}
+        if isinstance(proxy_env, list):
+            proxy_env = dict(item.split("=", 1) for item in proxy_env if isinstance(item, str) and "=" in item)
+        assert proxy_env.get("OPENAI_API_KEY") == "sk-dummy-from-env-file-not-a-secret"
+        assert "org-a" in str(proxy_env.get("PROXY_OWNER_KEY_ENVS") or "")
+        assert proxy_env.get("ORG_A_HYPHEN_KEY") == "sk-dummy-org-a-hyphen-not-a-secret"
+        for svc_name in ("worker", "launcher"):
+            other = _service(data, svc_name).get("environment") or {}
+            if isinstance(other, list):
+                other = dict(item.split("=", 1) for item in other if isinstance(item, str) and "=" in item)
+            # Proxy-only env_file secrets must not leak to worker/launcher.
+            # (Worker may still have OPENAI_API_KEY from the base stack .env.)
+            assert other.get("PROXY_OWNER_KEY_ENVS") in (None, "")
+            assert other.get("ORG_A_HYPHEN_KEY") in (None, "")
+            assert other.get("OPENAI_API_KEY") != "sk-dummy-from-env-file-not-a-secret"
+    finally:
+        if created:
+            env_path.unlink(missing_ok=True)
+        elif previous is not None:
+            env_path.write_text(previous, encoding="utf-8")
