@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- **ARB34-009/010/011:** uniform remove-after-confirm: finish/cancel only **stop** containers; `job_dir`/container removed only when revoke is confirmed (2xx/404) or the retry window since creation elapses. Config errors (missing issuer, 401/403/other 4xx) keep evidence until the window with low-frequency retry; finish-path False/timeout keeps staging for the reaper.
 - **ARB34-009 (reopen):** reaper **stops** orphans immediately but removes container/checkout only after revoke **confirmed** or `LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS` since job creation; scheduler exposes pending/confirmed/window_expired; cancel leaves stopped containers for the reaper (restart-safe without persistent tombstones).
 - **ARB34-009:** revoke scheduler returns accepted/rejected, dedupes by `job_id`, retries transient failures with exponential backoff until max token TTL, and keeps a bounded in-memory retry set; reaper schedules before delete and retains container/checkout when the queue rejects (no persistent tombstones — restart worst case is token TTL).
 - **ARB34-008:** launcher reaper schedules proxy revokes via the bounded revoke scheduler (wall-clock timeout) instead of inline `revoke_job_token_sync`, so a slow-dripping proxy cannot stall container/checkout cleanup.

@@ -46,10 +46,12 @@ async def test_slow_staging_keeps_job_dir_under_concurrent_reaper(
         return "opr_job_test_token_ok"
 
     async def _revoke(*, job_id: str, **kwargs):
-        return True
+        from app.services.model_proxy_client import RevokeAttemptOutcome
+
+        return RevokeAttemptOutcome.DONE
 
     monkeypatch.setattr(ce, "issue_job_token", _issue)
-    monkeypatch.setattr(ce, "revoke_job_token", _revoke)
+    monkeypatch.setattr(ce, "revoke_job_token_attempt", _revoke)
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json

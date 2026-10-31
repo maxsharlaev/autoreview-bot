@@ -98,7 +98,7 @@ def run_review_job(
     proxy_token: str,
     client: DockerClient | None = None,
 ) -> dict:
-    """Create, start, wait, remove a review container. Returns result metadata."""
+    """Create, start, wait; stop (do not remove) the review container. Returns result metadata."""
     if not (proxy_token or "").strip():
         raise LauncherJobError("CODEX_SANDBOX", "proxy token missing")
     if not str(proxy_token).strip().startswith("opr_job_"):
@@ -230,11 +230,14 @@ def run_review_job(
             "duration_seconds": round(time.monotonic() - started, 3),
         }
     finally:
+        # ARB34-009/011: stop only ? never remove here. Removal is gated on
+        # may_delete_after_revoke (confirmed or window_expired) in the reaper so
+        # cancel/finish cannot drop evidence while a proxy token may still be live.
         if container_id:
             try:
-                docker.remove_container(container_id, force=True)
+                docker.kill_container(container_id)
             except DockerApiError as exc:
-                logger.warning("failed to remove review container %s: %s", container_id[:12], exc)
+                logger.warning("failed to stop review container %s: %s", container_id[:12], exc)
         lifecycle.mark_finished(job_id, cancelled=cancelled or lifecycle.is_cancelled(job_id))
         if owns:
             docker.close()

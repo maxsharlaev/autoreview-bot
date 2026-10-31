@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -68,6 +69,22 @@ def job_created_unix_from_container(item: dict) -> float:
     try:
         return float(item.get("Created") or 0)
     except (TypeError, ValueError):
+        return 0.0
+
+
+def job_created_unix_from_checkout(path: Path) -> float:
+    """Creation time from job.json ``created_unix`` or directory mtime."""
+    meta = path / "job.json"
+    if meta.is_file():
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("created_unix") is not None:
+                return float(data["created_unix"])
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    try:
+        return float(path.lstat().st_mtime)
+    except OSError:
         return 0.0
 
 
@@ -220,7 +237,7 @@ def reap_checkout_orphans(
             # or retry window since creation elapsed (ARB34-009). Never block
             # the reaper on a slow proxy (ARB34-008). After launcher restart the
             # dir itself is the durable signal to re-schedule.
-            created_at = float(st.st_mtime)
+            created_at = job_created_unix_from_checkout(path) if stat.S_ISDIR(st.st_mode) else float(st.st_mtime)
             if is_uuid_job_dirname(name):
                 if not schedule_proxy_token_revoke(name, created_at=created_at):
                     note_revoke_needed(name)

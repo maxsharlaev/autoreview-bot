@@ -74,7 +74,7 @@ def test_cancel_during_create(
 
     entered = threading.Event()
     release = threading.Event()
-    removed: list[str] = []
+    stopped: list[str] = []
 
     class SlowCreateDocker:
         def create_container(self, name: str, config: dict[str, Any]) -> str:
@@ -92,13 +92,13 @@ def test_cancel_during_create(
             return ""
 
         def remove_container(self, container_id: str, *, force: bool = True, timeout: float | None = None) -> None:
-            removed.append(container_id)
+            raise AssertionError("run_review_job finally must not remove_container")
 
         def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
             return []
 
         def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
-            return None
+            stopped.append(cid)
 
         def close(self) -> None:
             return None
@@ -135,7 +135,7 @@ def test_cancel_during_create(
     assert not thread.is_alive()
     assert not cancel_thread.is_alive()
     assert errors and "cancelled" in str(errors[0]).lower()
-    assert "cid-during-create" in removed
+    assert "cid-during-create" in stopped
     assert cancel_result.get("confirmed") is True
     assert isolated_lifecycle.is_cancelled(jid)
 

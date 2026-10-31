@@ -27,11 +27,13 @@ def _stub_proxy_issuer(monkeypatch: pytest.MonkeyPatch, *, token: str = PROXY_TO
         return token
 
     async def _revoke(*, job_id: str, **kwargs):
+        from app.services.model_proxy_client import RevokeAttemptOutcome
+
         revoked.append(job_id)
-        return True
+        return RevokeAttemptOutcome.DONE
 
     monkeypatch.setattr("app.services.container_executor.issue_job_token", _issue)
-    monkeypatch.setattr("app.services.container_executor.revoke_job_token", _revoke)
+    monkeypatch.setattr("app.services.container_executor.revoke_job_token_attempt", _revoke)
     return revoked
 
 

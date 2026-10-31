@@ -115,6 +115,9 @@ def test_run_review_job_writes_codex_config_and_uses_proxy_token(
         def logs(self, cid):
             return ""
 
+        def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
+            return None
+
         def remove_container(self, cid, force=False):
             return None
 
@@ -177,11 +180,13 @@ async def test_revoke_on_finish_and_cancel_paths(monkeypatch: pytest.MonkeyPatch
         return PROXY_TOKEN
 
     async def _revoke(*, job_id: str, **kwargs):
+        from app.services.model_proxy_client import RevokeAttemptOutcome
+
         events.append(f"revoke:{job_id}")
-        return True
+        return RevokeAttemptOutcome.DONE
 
     monkeypatch.setattr("app.services.container_executor.issue_job_token", _issue)
-    monkeypatch.setattr("app.services.container_executor.revoke_job_token", _revoke)
+    monkeypatch.setattr("app.services.container_executor.revoke_job_token_attempt", _revoke)
 
     checkout = tmp_path / "co"
     checkout.mkdir()

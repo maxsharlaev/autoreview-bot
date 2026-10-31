@@ -40,11 +40,13 @@ async def test_slow_finish_revoke_does_not_delay_return(
     async def fake_issue(**_kwargs: Any) -> str:
         return "opr_job_test_token_ok"
 
-    async def hanging_revoke(*, job_id: str, **_kwargs: Any) -> bool:
+    async def hanging_revoke(*, job_id: str, **_kwargs: Any):
+        from app.services.model_proxy_client import RevokeAttemptOutcome
+
         calls.append(job_id)
         revoke_started.set()
         await revoke_released.wait()
-        return True
+        return RevokeAttemptOutcome.DONE
 
     async def fake_launcher(self, **_kwargs: Any) -> str:  # noqa: ANN001
         return '{"findings":[]}'
@@ -54,7 +56,7 @@ async def test_slow_finish_revoke_does_not_delay_return(
         fake_issue,
     )
     monkeypatch.setattr(
-        "app.services.container_executor.revoke_job_token",
+        "app.services.container_executor.revoke_job_token_attempt",
         hanging_revoke,
     )
     monkeypatch.setattr(
@@ -113,9 +115,11 @@ async def test_finish_revoke_timeout_still_cleans_lease(
     async def fake_issue(**_kwargs: Any) -> str:
         return "opr_job_test_token_ok"
 
-    async def hanging_revoke(**_kwargs: Any) -> bool:
+    async def hanging_revoke(**_kwargs: Any):
+        from app.services.model_proxy_client import RevokeAttemptOutcome
+
         await asyncio.sleep(30)
-        return True
+        return RevokeAttemptOutcome.DONE
 
     async def boom_launcher(self, **_kwargs: Any) -> str:  # noqa: ANN001
         from app.services.codex_runner import CodexRunnerError
@@ -123,7 +127,7 @@ async def test_finish_revoke_timeout_still_cleans_lease(
         raise CodexRunnerError(CODEX_SANDBOX, "launcher failed")
 
     monkeypatch.setattr("app.services.container_executor.issue_job_token", fake_issue)
-    monkeypatch.setattr("app.services.container_executor.revoke_job_token", hanging_revoke)
+    monkeypatch.setattr("app.services.container_executor.revoke_job_token_attempt", hanging_revoke)
     monkeypatch.setattr(ContainerReviewExecutor, "_call_launcher", boom_launcher)
     monkeypatch.setattr(
         "app.services.container_executor.safe_copytree",

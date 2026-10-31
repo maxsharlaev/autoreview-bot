@@ -36,6 +36,9 @@ class FakeDocker:
     def logs(self, container_id: str, *, tail: int = 200) -> str:
         return "ok"
 
+    def kill_container(self, container_id: str, *, timeout: float | None = None) -> None:
+        self.removed.append(container_id)
+
     def remove_container(self, container_id: str, *, force: bool = True) -> None:
         self.removed.append(container_id)
 

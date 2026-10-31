@@ -10,7 +10,8 @@ time (container ``opr.created_unix`` / Docker Created, or checkout mtime).
 
 There are **no persistent tombstones**. Restart safety comes from leaving
 stopped containers and checkout dirs in place until ``revoke_status`` is
-``confirmed`` or ``window_expired``; the next reaper pass re-schedules. Stopped
+`confirmed` or `window_expired` (config errors retain evidence
+until the window); the next reaper pass re-schedules. Stopped
 orphans may linger up to the retry window when the proxy is down.
 ``_CANCEL_POOL`` stays exclusive to Docker cancellation.
 """
@@ -36,14 +37,16 @@ DEFAULT_RETRY_MAX_BACKOFF_SECONDS = 30.0
 DEFAULT_RETRY_SET_MAX = 256
 DEFAULT_STATUS_MAX = 512
 DEFAULT_CONFIRMED_PRUNE_SECONDS = 600.0
+DEFAULT_CONFIG_ERROR_BACKOFF_SECONDS = 60.0
 
 
 class RevokeJobStatus(StrEnum):
-    """Non-blocking per-job revoke status for the reaper (ARB34-009)."""
+    """Non-blocking per-job revoke status for the reaper (ARB34-009/010)."""
 
     PENDING = "pending"
     CONFIRMED = "confirmed"
     WINDOW_EXPIRED = "window_expired"
+    CONFIG_ERROR = "config_error"  # 401/403/4xx/missing issuer; keep until window
 
 
 def _cancel_revoke_timeout_seconds() -> float:
@@ -105,6 +108,16 @@ def _retry_max_backoff_seconds() -> float:
         return max(0.1, float(raw))
     except ValueError:
         return float(DEFAULT_RETRY_MAX_BACKOFF_SECONDS)
+
+
+def _config_error_backoff_seconds() -> float:
+    raw = os.environ.get("LAUNCHER_REVOKE_CONFIG_ERROR_BACKOFF_SECONDS", "").strip()
+    if not raw:
+        return float(DEFAULT_CONFIG_ERROR_BACKOFF_SECONDS)
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return float(DEFAULT_CONFIG_ERROR_BACKOFF_SECONDS)
 
 
 def _retry_set_max() -> int:
@@ -253,6 +266,8 @@ def revoke_status(
             return RevokeJobStatus.WINDOW_EXPIRED
         if st is RevokeJobStatus.WINDOW_EXPIRED:
             return RevokeJobStatus.WINDOW_EXPIRED
+        if st is RevokeJobStatus.CONFIG_ERROR:
+            return RevokeJobStatus.CONFIG_ERROR
         if st is RevokeJobStatus.PENDING or jid in _ACTIVE_JOBS:
             return RevokeJobStatus.PENDING
         return RevokeJobStatus.PENDING
@@ -357,10 +372,21 @@ async def _revoke_with_retries(
                 _set_status(job_id, RevokeJobStatus.WINDOW_EXPIRED)
                 return
 
-            sleep_for = min(backoff, max(0.0, retry_deadline - now))
+            if outcome is RevokeAttemptOutcome.CONFIG_ERROR:
+                _set_status(job_id, RevokeJobStatus.CONFIG_ERROR)
+                logger.error(
+                    "proxy revoke config error job=%s; retaining evidence, low-frequency retry until window",
+                    job_id,
+                )
+                sleep_for = min(
+                    _config_error_backoff_seconds(),
+                    max(0.0, retry_deadline - now),
+                )
+            else:
+                sleep_for = min(backoff, max(0.0, retry_deadline - now))
+                backoff = min(max_backoff, backoff * 2.0)
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
-            backoff = min(max_backoff, backoff * 2.0)
     finally:
         _clear_active(job_id)
         _dec_pending()
