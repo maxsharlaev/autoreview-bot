@@ -15,7 +15,7 @@ ARB34-002 / ARB34-005: after the bounded wait returns (confirmed or not), schedu
 best-effort proxy token revoke on the *separate* revoke scheduler (dedicated asyncio
 loop + wall-clock ``asyncio.timeout``, bounded pending queue). ``_CANCEL_POOL`` is
 exclusive to Docker cancellation so blocked revokes cannot starve cancels. Reaper
-revoke remains the idempotent backstop.
+stopped containers remain for the reaper until revoke confirms or the retry window elapses.
 """
 
 from __future__ import annotations

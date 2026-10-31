@@ -1,17 +1,17 @@
-"""Bounded proxy token revoke scheduler with retry until token TTL (ARB34-005/009).
+"""Bounded proxy token revoke scheduler with durable orphan evidence (ARB34-005/009).
 
 Revocations run on a dedicated long-lived asyncio loop with ``asyncio.timeout``
-around the async HTTP client (same wall-clock pattern as AR-030 / #30). Pending
-work is bounded; ``schedule_proxy_token_revoke`` returns whether the job was
-accepted. Same ``job_id`` is deduped (one in-flight/queued revoke). Transient
-failures (timeout, connection, 5xx) retry with exponential backoff until success
-or the max token TTL window elapses (``OPR_MAX_REVIEW_TIMEOUT_SECONDS`` +
-``PROXY_TOKEN_GRACE_SECONDS`` from first attempt; issue time is not known here).
+around the async HTTP client. Pending work is bounded; ``schedule_proxy_token_revoke``
+returns whether the job was accepted. Same ``job_id`` is deduped.
 
-There are **no persistent tombstones**: a launcher restart loses the in-memory
-retry set and in-flight work; worst case a token remains valid until its TTL.
-Callers that must not lose revoke evidence (reaper) must keep the
-container/checkout when schedule is rejected and retry next pass.
+Transient failures retry with exponential backoff until the revoke is confirmed
+or ``LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS`` elapses since the job **creation**
+time (container ``opr.created_unix`` / Docker Created, or checkout mtime).
+
+There are **no persistent tombstones**. Restart safety comes from leaving
+stopped containers and checkout dirs in place until ``revoke_status`` is
+``confirmed`` or ``window_expired``; the next reaper pass re-schedules. Stopped
+orphans may linger up to the retry window when the proxy is down.
 ``_CANCEL_POOL`` stays exclusive to Docker cancellation.
 """
 
@@ -22,6 +22,7 @@ import logging
 import os
 import threading
 import time
+from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,16 @@ DEFAULT_TOKEN_GRACE_SECONDS = 60
 DEFAULT_RETRY_INITIAL_BACKOFF_SECONDS = 0.5
 DEFAULT_RETRY_MAX_BACKOFF_SECONDS = 30.0
 DEFAULT_RETRY_SET_MAX = 256
+DEFAULT_STATUS_MAX = 512
+DEFAULT_CONFIRMED_PRUNE_SECONDS = 600.0
+
+
+class RevokeJobStatus(StrEnum):
+    """Non-blocking per-job revoke status for the reaper (ARB34-009)."""
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    WINDOW_EXPIRED = "window_expired"
 
 
 def _cancel_revoke_timeout_seconds() -> float:
@@ -55,14 +66,8 @@ def _revoke_max_pending() -> int:
         return int(DEFAULT_REVOKE_MAX_PENDING)
 
 
-def _max_token_ttl_seconds() -> float:
-    """Retry window upper bound (matches model-proxy max token TTL by default).
-
-    Explicit ``LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS`` wins. Otherwise
-    ``OPR_MAX_REVIEW_TIMEOUT_SECONDS`` + ``PROXY_TOKEN_GRACE_SECONDS`` (defaults
-    600 + 60) — grace may come from the process env without being listed in the
-    launcher Compose ``environment`` (TOKEN-named keys are forbidden there).
-    """
+def revoke_retry_window_seconds() -> float:
+    """Wall-clock window from job creation for revoke retries / deferred delete."""
     raw_window = os.environ.get("LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS", "").strip()
     if raw_window:
         try:
@@ -145,7 +150,6 @@ class _RevokeAsyncLoop:
         return self._loop
 
     def submit(self, coro: Any) -> None:
-        """Fire-and-forget on the revoke loop (errors logged inside the coro)."""
         loop = self.ensure_started()
         asyncio.run_coroutine_threadsafe(coro, loop)
 
@@ -153,10 +157,11 @@ class _RevokeAsyncLoop:
 _REVOKE_LOOP = _RevokeAsyncLoop()
 _PENDING = 0
 _PENDING_LOCK = threading.Lock()
-# job_ids with an accepted in-flight/queued revoke coroutine (dedup).
 _ACTIVE_JOBS: set[str] = set()
-# job_id -> unix deadline: keep trying to schedule until then (size+TTL bounded).
 _RETRY_NEEDED: dict[str, float] = {}
+_STATUS: dict[str, RevokeJobStatus] = {}
+_CREATED_AT: dict[str, float] = {}
+_CONFIRMED_AT: dict[str, float] = {}
 
 
 def _dec_pending() -> None:
@@ -166,19 +171,16 @@ def _dec_pending() -> None:
 
 
 def pending_revoke_count() -> int:
-    """Test helper: in-flight + queued revoke coroutines that hold a slot."""
     with _PENDING_LOCK:
         return int(_PENDING)
 
 
 def active_revoke_job_ids() -> set[str]:
-    """Test helper: job ids currently covered by an accepted revoke worker."""
     with _PENDING_LOCK:
         return set(_ACTIVE_JOBS)
 
 
 def retry_needed_job_ids() -> set[str]:
-    """Test helper: job ids waiting for a later schedule attempt."""
     with _PENDING_LOCK:
         return set(_RETRY_NEEDED)
 
@@ -188,19 +190,93 @@ def _clear_active(job_id: str) -> None:
         _ACTIVE_JOBS.discard(job_id)
 
 
-def note_revoke_needed(job_id: str, *, deadline: float | None = None) -> None:
-    """Record that ``job_id`` still needs a revoke (queue full or cancel reject).
+def _remember_created(job_id: str, created_at: float | None) -> float | None:
+    if created_at is None:
+        return _CREATED_AT.get(job_id)
+    cat = float(created_at)
+    prev = _CREATED_AT.get(job_id)
+    if prev is None or cat < prev:
+        _CREATED_AT[job_id] = cat
+        return cat
+    return prev
 
-    Bounded by ``LAUNCHER_REVOKE_RETRY_SET_MAX`` and per-entry TTL (max token TTL).
-    No disk persistence — lost on launcher restart (token TTL is the outer bound).
-    """
+
+def _prune_status_locked(now_mono: float) -> None:
+    stale = [jid for jid, when in _CONFIRMED_AT.items() if (now_mono - when) >= DEFAULT_CONFIRMED_PRUNE_SECONDS]
+    for jid in stale:
+        _CONFIRMED_AT.pop(jid, None)
+        if _STATUS.get(jid) is RevokeJobStatus.CONFIRMED:
+            _STATUS.pop(jid, None)
+            _CREATED_AT.pop(jid, None)
+    while len(_STATUS) > DEFAULT_STATUS_MAX:
+        confirmed = [j for j, s in _STATUS.items() if s is RevokeJobStatus.CONFIRMED]
+        if confirmed:
+            victim = confirmed[0]
+        elif _CREATED_AT:
+            victim = min(_CREATED_AT, key=_CREATED_AT.get)  # type: ignore[arg-type]
+        else:
+            victim = next(iter(_STATUS))
+        _STATUS.pop(victim, None)
+        _CONFIRMED_AT.pop(victim, None)
+        _CREATED_AT.pop(victim, None)
+
+
+def _set_status(job_id: str, status: RevokeJobStatus) -> None:
+    with _PENDING_LOCK:
+        _STATUS[job_id] = status
+        if status is RevokeJobStatus.CONFIRMED:
+            _CONFIRMED_AT[job_id] = time.monotonic()
+        _prune_status_locked(time.monotonic())
+
+
+def revoke_status(
+    job_id: str,
+    *,
+    created_at: float | None = None,
+    now: float | None = None,
+) -> RevokeJobStatus:
+    """Non-blocking revoke status for ``job_id`` (reaper polls each pass)."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return RevokeJobStatus.CONFIRMED
+    clock = time.time() if now is None else float(now)
+    window = revoke_retry_window_seconds()
+    with _PENDING_LOCK:
+        if created_at is not None:
+            _remember_created(jid, created_at)
+        cat = _CREATED_AT.get(jid, created_at)
+        st = _STATUS.get(jid)
+        if st is RevokeJobStatus.CONFIRMED:
+            return RevokeJobStatus.CONFIRMED
+        if cat is not None and clock >= float(cat) + window:
+            _STATUS[jid] = RevokeJobStatus.WINDOW_EXPIRED
+            return RevokeJobStatus.WINDOW_EXPIRED
+        if st is RevokeJobStatus.WINDOW_EXPIRED:
+            return RevokeJobStatus.WINDOW_EXPIRED
+        if st is RevokeJobStatus.PENDING or jid in _ACTIVE_JOBS:
+            return RevokeJobStatus.PENDING
+        return RevokeJobStatus.PENDING
+
+
+def may_delete_after_revoke(
+    job_id: str,
+    *,
+    created_at: float | None = None,
+    now: float | None = None,
+) -> bool:
+    """True when reaper may remove container/checkout for ``job_id``."""
+    st = revoke_status(job_id, created_at=created_at, now=now)
+    return st in (RevokeJobStatus.CONFIRMED, RevokeJobStatus.WINDOW_EXPIRED)
+
+
+def note_revoke_needed(job_id: str, *, deadline: float | None = None) -> None:
+    """In-memory schedule hint; durable signal is the stopped orphan itself."""
     jid = (job_id or "").strip()
     if not jid:
         return
     now = time.time()
-    until = float(deadline) if deadline is not None else now + _max_token_ttl_seconds()
+    until = float(deadline) if deadline is not None else now + revoke_retry_window_seconds()
     with _PENDING_LOCK:
-        # Drop expired entries first.
         expired = [k for k, d in _RETRY_NEEDED.items() if d <= now]
         for k in expired:
             _RETRY_NEEDED.pop(k, None)
@@ -208,7 +284,6 @@ def note_revoke_needed(job_id: str, *, deadline: float | None = None) -> None:
             _RETRY_NEEDED[jid] = max(_RETRY_NEEDED[jid], until)
             return
         if len(_RETRY_NEEDED) >= _retry_set_max():
-            # Evict soonest-expiring entry to keep the set bounded.
             victim = min(_RETRY_NEEDED, key=_RETRY_NEEDED.get)  # type: ignore[arg-type]
             _RETRY_NEEDED.pop(victim, None)
             logger.warning(
@@ -226,25 +301,26 @@ def clear_revoke_needed(job_id: str) -> None:
 
 
 def drain_revoke_retries() -> int:
-    """Try to schedule every still-needed revoke. Returns newly accepted count.
-
-    Safe to call from the reaper (non-blocking). Expired entries are dropped.
-    """
     now = time.time()
     with _PENDING_LOCK:
         items = list(_RETRY_NEEDED.items())
+        created = dict(_CREATED_AT)
     accepted = 0
     for jid, deadline in items:
         if deadline <= now:
             clear_revoke_needed(jid)
             continue
-        if schedule_proxy_token_revoke(jid):
+        if schedule_proxy_token_revoke(jid, created_at=created.get(jid)):
             clear_revoke_needed(jid)
             accepted += 1
     return accepted
 
 
-async def _revoke_with_retries(job_id: str, budget: float, retry_deadline: float) -> None:
+async def _revoke_with_retries(
+    job_id: str,
+    budget: float,
+    retry_deadline: float,
+) -> None:
     from app.services.model_proxy_client import RevokeAttemptOutcome, revoke_job_token_attempt
 
     backoff = _retry_initial_backoff_seconds()
@@ -268,16 +344,17 @@ async def _revoke_with_retries(job_id: str, budget: float, retry_deadline: float
 
             if outcome is RevokeAttemptOutcome.DONE:
                 clear_revoke_needed(job_id)
+                _set_status(job_id, RevokeJobStatus.CONFIRMED)
                 return
 
             now = time.time()
             if now >= retry_deadline:
                 logger.warning(
-                    "background proxy revoke giving up job=%s after token TTL window",
+                    "background proxy revoke giving up job=%s after retry window",
                     job_id,
                 )
-                # Past TTL the token is dead anyway; drop retry marker.
                 clear_revoke_needed(job_id)
+                _set_status(job_id, RevokeJobStatus.WINDOW_EXPIRED)
                 return
 
             sleep_for = min(backoff, max(0.0, retry_deadline - now))
@@ -289,12 +366,16 @@ async def _revoke_with_retries(job_id: str, budget: float, retry_deadline: float
         _dec_pending()
 
 
-def schedule_proxy_token_revoke(job_id: str) -> bool:
-    """Best-effort background revoke; never blocks the cancel/reaper path.
+def schedule_proxy_token_revoke(
+    job_id: str,
+    *,
+    created_at: float | None = None,
+) -> bool:
+    """Best-effort background revoke; never blocks cancel/reaper.
 
-    Returns True if accepted (queued, or already in-flight for this job_id).
-    Returns False if the pending queue is saturated — caller (reaper) must keep
-    evidence and retry later; cancel should ``note_revoke_needed``.
+    Returns True if accepted (queued, in-flight, already confirmed, or window
+    already expired). Returns False if the pending queue is saturated.
+    ``created_at`` is the job creation unix time used for the retry window.
     """
     global _PENDING
     jid = (job_id or "").strip()
@@ -302,16 +383,25 @@ def schedule_proxy_token_revoke(job_id: str) -> bool:
         return True
     budget = _cancel_revoke_timeout_seconds()
     max_pending = _revoke_max_pending()
-    retry_deadline = time.time() + _max_token_ttl_seconds()
+    window = revoke_retry_window_seconds()
+    now = time.time()
     with _PENDING_LOCK:
+        cat = _remember_created(jid, created_at)
+        if cat is None:
+            cat = now
+            _CREATED_AT[jid] = cat
+        if _STATUS.get(jid) is RevokeJobStatus.CONFIRMED:
+            return True
+        if now >= float(cat) + window:
+            _STATUS[jid] = RevokeJobStatus.WINDOW_EXPIRED
+            return True
         if jid in _ACTIVE_JOBS:
-            # Already covered — treat as accepted (no double concurrent revoke).
+            _STATUS[jid] = RevokeJobStatus.PENDING
             return True
         if _PENDING >= max_pending:
             logger.warning(
                 "proxy revoke queue saturated pending=%s max=%s; rejecting job=%s "
-                "(caller must retain evidence / retry; no persistent tombstone — "
-                "launcher restart worst case is token TTL)",
+                "(keep stopped orphan; reaper will retry)",
                 _PENDING,
                 max_pending,
                 jid,
@@ -319,6 +409,8 @@ def schedule_proxy_token_revoke(job_id: str) -> bool:
             return False
         _PENDING += 1
         _ACTIVE_JOBS.add(jid)
+        _STATUS[jid] = RevokeJobStatus.PENDING
+        retry_deadline = float(cat) + window
     try:
         _REVOKE_LOOP.submit(_revoke_with_retries(jid, budget, retry_deadline))
     except Exception:  # noqa: BLE001
@@ -330,9 +422,12 @@ def schedule_proxy_token_revoke(job_id: str) -> bool:
 
 
 def _reset_for_tests() -> None:
-    """Test helper: clear counters / sets (does not stop the async loop)."""
+    """Clear in-memory state (tests use this to simulate launcher restart)."""
     global _PENDING
     with _PENDING_LOCK:
         _PENDING = 0
         _ACTIVE_JOBS.clear()
         _RETRY_NEEDED.clear()
+        _STATUS.clear()
+        _CREATED_AT.clear()
+        _CONFIRMED_AT.clear()

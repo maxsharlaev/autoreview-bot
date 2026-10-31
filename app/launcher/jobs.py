@@ -262,19 +262,30 @@ def _remaining_cancel_budget(
     return float(left)
 
 
-def _force_remove_job_containers(
+def _container_is_running(item: dict) -> bool:
+    """True if Docker list entry is not yet a stopped/dead orphan."""
+    state = str(item.get("State") or "").lower()
+    if not state:
+        # Missing state: treat as running so cancel still tries kill.
+        return True
+    return state in {"created", "running", "paused", "restarting"}
+
+
+def _force_stop_job_containers(
     docker: DockerClient,
     jid: str,
     *,
     deadline_monotonic: float,
 ) -> int:
-    """Kill + force-remove all containers labeled for ``jid``. Returns removals count.
+    """Kill/stop all containers labeled for ``jid``. Returns stop attempts count.
 
-    Each Docker call uses only the remaining overall cancel budget as a *wall-clock*
-    deadline (see ``DockerClient`` cancel-path requests). On deadline the loop stops
-    early so ``cancel_review_job`` can return ``confirmed=False`` (worker keeps staging).
+    Does **not** remove containers (ARB34-009): stopped orphans stay for the reaper
+    until proxy revoke is confirmed or the retry window since creation elapses.
+    Each Docker call uses only the remaining overall cancel budget as a wall-clock
+    deadline. On deadline the loop stops early so ``cancel_review_job`` can return
+    ``confirmed=False`` (worker keeps staging).
     """
-    removed = 0
+    stopped = 0
     budget = _remaining_cancel_budget(deadline_monotonic)
     if budget <= 0:
         return 0
@@ -289,37 +300,30 @@ def _force_remove_job_containers(
         cid = str(item.get("Id") or "")
         if not cid:
             continue
+        if not _container_is_running(item):
+            continue
         budget = _remaining_cancel_budget(deadline_monotonic)
         if budget <= 0:
             break
         try:
             docker.kill_container(cid, timeout=budget)
+            stopped += 1
         except DockerDeadlineExceeded:
             logger.warning("cancel kill hit wall-clock deadline job=%s cid=%s", jid, cid[:12])
             break
         except DockerApiError:
             pass
-        budget = _remaining_cancel_budget(deadline_monotonic)
-        if budget <= 0:
-            break
-        try:
-            docker.remove_container(cid, force=True, timeout=budget)
-            removed += 1
-        except DockerDeadlineExceeded:
-            logger.warning("cancel remove hit wall-clock deadline job=%s cid=%s", jid, cid[:12])
-            break
-        except DockerApiError as exc:
-            logger.warning("cancel remove failed job=%s cid=%s: %s", jid, cid[:12], exc)
-    return removed
+    return stopped
 
 
 def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dict:
-    """Force-remove review containers for ``job_id`` and coordinate with in-flight launches.
+    """Stop review containers for ``job_id`` and coordinate with in-flight launches.
 
     Marks the job cancelled (tombstone if unknown), **immediately** kills any visible
-    containers, then waits briefly for an in-flight launch to reach a terminal state,
-    and removes again. ``confirmed`` is True only when no container remains and no
-    launch is active.
+    running containers, then waits briefly for an in-flight launch to reach a terminal
+    state, and stops again. Containers are left in place (stopped) for the reaper to
+    remove after proxy revoke confirmation (ARB34-009). ``confirmed`` is True when no
+    *running* container remains and no launch is active.
 
     The whole operation (Docker list/kill/remove + lifecycle wait) shares one deadline
     ``LAUNCHER_CANCEL_DEADLINE_SECONDS`` (< worker DELETE read timeout). Each Docker
@@ -338,27 +342,28 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
     deadline = time.monotonic() + launcher_cancel_deadline_seconds()
     try:
         # Kill first so a blocked wait_container can finish and mark_finished promptly.
-        removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
+        removed += _force_stop_job_containers(docker, jid, deadline_monotonic=deadline)
         wait_budget = min(launcher_cancel_wait_seconds(), _remaining_cancel_budget(deadline, min_usable=0.0))
         if wait_budget > 0:
             lifecycle.wait_until_launch_idle(jid, timeout=wait_budget)
-        removed += _force_remove_job_containers(docker, jid, deadline_monotonic=deadline)
+        removed += _force_stop_job_containers(docker, jid, deadline_monotonic=deadline)
 
-        leftover: list = ["?"]
+        running_left: list = ["?"]
         budget = _remaining_cancel_budget(deadline)
         if budget > 0:
             try:
-                leftover = docker.list_containers_for_job(jid, timeout=budget)
+                listed = docker.list_containers_for_job(jid, timeout=budget)
+                running_left = [c for c in listed if _container_is_running(c)]
             except DockerDeadlineExceeded:
-                leftover = ["?"]
+                running_left = ["?"]
             except DockerApiError:
-                leftover = ["?"]
+                running_left = ["?"]
         else:
-            leftover = ["?"]
-        confirmed = (not leftover) and (not lifecycle.launch_active(jid))
+            running_left = ["?"]
+        confirmed = (not running_left) and (not lifecycle.launch_active(jid))
         # Proxy token revoke is scheduled by cancel_review_job_bounded (best-effort
-        # background, ARB34-002) so a slow proxy cannot delay the DELETE response.
-        # Reaper + worker finally remain idempotent backstops.
+        # background, ARB34-002/009). Stopped containers remain for the reaper until
+        # revoke is confirmed or the retry window since creation elapses.
         return {"job_id": jid, "removed": removed, "confirmed": confirmed}
     finally:
         if owns:

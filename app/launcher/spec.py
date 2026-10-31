@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,9 @@ def build_container_config(
         "Labels": {
             REVIEW_LABEL: REVIEW_LABEL_VALUE,
             "opr.job_id": job_id,
+            # Unix creation time for revoke retry window (ARB34-009); Docker
+            # Created is also used as a fallback by the reaper.
+            "opr.created_unix": str(int(time.time())),
         },
         "HostConfig": host_config,
         "User": "1000:1000",
