@@ -58,6 +58,8 @@ def test_ensure_launcher_orphan_ttl_config_fail_closed(monkeypatch: pytest.Monke
 def test_ensure_launcher_orphan_ttl_config_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
     monkeypatch.delenv("OPR_REVIEW_ORPHAN_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS", raising=False)
+    monkeypatch.setenv("PROXY_TOKEN_GRACE_SECONDS", "60")
     ensure_launcher_orphan_ttl_config()
 
 

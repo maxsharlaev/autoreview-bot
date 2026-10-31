@@ -110,6 +110,7 @@ def run_review_job(
 
     cancelled = False
     container_id = ""
+    created_at_unix: float | None = None
     owns = client is None
     docker = client or DockerClient()
     started = time.monotonic()
@@ -121,6 +122,10 @@ def run_review_job(
 
         job_dir = prompt.parent
         meta = read_job_meta(job_dir)
+        try:
+            created_at_unix = float(meta["created_unix"]) if meta.get("created_unix") is not None else time.time()
+        except (TypeError, ValueError):
+            created_at_unix = time.time()
         model = str(meta.get("model") or os.environ.get("OPR_DEFAULT_MODEL") or "gpt-5.6-sol")
         timeout_seconds = int(meta.get("timeout_seconds") or 600)
         max_timeout = max_review_timeout_seconds()
@@ -230,14 +235,25 @@ def run_review_job(
             "duration_seconds": round(time.monotonic() - started, 3),
         }
     finally:
-        # ARB34-009/011: stop only ? never remove here. Removal is gated on
-        # may_delete_after_revoke (confirmed or window_expired) in the reaper so
-        # cancel/finish cannot drop evidence while a proxy token may still be live.
+        # ARB34-009/011/012: stop only — never remove here. Schedule revoke so the
+        # reaper can delete once confirmed (or window expired). Removal is gated on
+        # may_delete_after_revoke; exited containers skip the orphan TTL gate.
         if container_id:
             try:
                 docker.kill_container(container_id)
             except DockerApiError as exc:
                 logger.warning("failed to stop review container %s: %s", container_id[:12], exc)
+        try:
+            from app.launcher.revoke_scheduler import note_revoke_needed, schedule_proxy_token_revoke
+
+            cat = created_at_unix
+            if cat is None:
+                cat = time.time()
+            if not schedule_proxy_token_revoke(job_id, created_at=float(cat)):
+                note_revoke_needed(job_id)
+                logger.warning("finish revoke schedule rejected job=%s (queue full)", job_id)
+        except Exception:  # noqa: BLE001 — never fail the job response on revoke schedule
+            logger.exception("finish revoke schedule failed job=%s", job_id)
         lifecycle.mark_finished(job_id, cancelled=cancelled or lifecycle.is_cancelled(job_id))
         if owns:
             docker.close()

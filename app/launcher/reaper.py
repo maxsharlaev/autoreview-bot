@@ -88,6 +88,15 @@ def job_created_unix_from_checkout(path: Path) -> float:
         return 0.0
 
 
+def _container_still_running(item: dict) -> bool:
+    """True if Docker list entry is not yet a stopped/dead finished review."""
+    state = str(item.get("State") or "").lower()
+    if not state:
+        # Missing state: treat as running so the orphan TTL gate still applies.
+        return True
+    return state in {"created", "running", "paused", "restarting"}
+
+
 def _stop_review_container(docker: DockerClient, cid: str) -> None:
     """Stop an orphan so it can do nothing; leave it for later remove."""
     try:
@@ -287,7 +296,7 @@ def reap_checkout_orphans(
 
 
 def reap_once(client: DockerClient | None = None) -> int:
-    """Stop stale review containers; remove after revoke confirm or window."""
+    """Stop/remove review containers; finished (exited) skip orphan TTL (ARB34-012)."""
     ttl = orphan_ttl_seconds()
     owns = client is None
     docker = client or DockerClient()
@@ -321,18 +330,31 @@ def reap_once(client: DockerClient | None = None) -> int:
             except (TypeError, ValueError):
                 age = ttl + 1
             cid = item.get("Id") or ""
-            if age < ttl:
+            # ARB34-012: exited/stopped review containers are launch-finished evidence
+            # (survives launcher restart via Docker state). Process every pass without
+            # the orphan TTL gate. True running orphans still wait for TTL.
+            still_running = _container_still_running(item)
+            if still_running and age < ttl:
                 continue
             created_at = job_created_unix_from_container(item)
-            logger.warning(
-                "stopping orphan review container id=%s age_s=%s names=%s",
-                cid[:12],
-                int(age),
-                item.get("Names"),
-            )
-            # Stop immediately so the orphan can do nothing; remove only after
-            # revoke confirmed or retry window since creation (ARB34-009).
-            _stop_review_container(docker, cid)
+            if still_running:
+                logger.warning(
+                    "stopping orphan review container id=%s age_s=%s names=%s",
+                    cid[:12],
+                    int(age),
+                    item.get("Names"),
+                )
+                # Stop immediately so the orphan can do nothing; remove only after
+                # revoke confirmed or retry window since creation (ARB34-009).
+                _stop_review_container(docker, cid)
+            else:
+                logger.warning(
+                    "reaping finished review container id=%s age_s=%s state=%s names=%s",
+                    cid[:12],
+                    int(age),
+                    item.get("State"),
+                    item.get("Names"),
+                )
             if job_id:
                 if not schedule_proxy_token_revoke(job_id, created_at=created_at):
                     note_revoke_needed(job_id)

@@ -66,11 +66,12 @@ def test_launcher_has_no_env_file_and_no_secret_env_names() -> None:
     launcher = _service(overlay, "launcher")
     assert "env_file" not in launcher, "launcher must not use env_file (would ingest .env secrets)"
     for name in sorted(_env_keys(launcher)):
-        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN"}:
+        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN", "PROXY_TOKEN_GRACE_SECONDS"}:
             continue
         assert _SECRETISH.search(name) is None, (
             f"launcher environment must not include secret-like name {name!r} "
-            "(only LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN among KEY/TOKEN/SECRET/PASSWORD/PRIVATE)"
+            "(only LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN / PROXY_TOKEN_GRACE_SECONDS "
+            "among KEY/TOKEN/SECRET/PASSWORD/PRIVATE)"
         )
 
 
@@ -132,7 +133,7 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
     launcher = _service(data, "launcher")
     assert not launcher.get("env_file"), "rendered launcher must not carry env_file"
     for name in sorted(_env_keys(launcher)):
-        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN"}:
+        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN", "PROXY_TOKEN_GRACE_SECONDS"}:
             continue
         assert _SECRETISH.search(name) is None, name
     # Host env supplies LAUNCHER_TOKEN for interpolation; api must not receive it
@@ -173,7 +174,8 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
 
 
 # Launcher settings documented in docs/ENVIRONMENT.md that must appear in the overlay
-# with host-interpolated defaults (ARB-27-020). Secrets except LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN are forbidden.
+# with host-interpolated defaults (ARB-27-020). Secrets except LAUNCHER_TOKEN /
+# PROXY_ISSUER_TOKEN (and non-secret PROXY_TOKEN_GRACE_SECONDS) are forbidden.
 _DOCUMENTED_LAUNCHER_SETTINGS = (
     "LAUNCHER_TOKEN",
     "PROXY_ISSUER_TOKEN",
@@ -189,6 +191,7 @@ _DOCUMENTED_LAUNCHER_SETTINGS = (
     "LAUNCHER_REVOKE_RETRY_MAX_BACKOFF_SECONDS",
     "LAUNCHER_REVOKE_RETRY_SET_MAX",
     "LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS",
+    "PROXY_TOKEN_GRACE_SECONDS",
     "OPR_CHECKOUT_BASE",
     "OPR_CHECKOUT_VOLUME",
     "OPR_REVIEW_IMAGE",
@@ -273,8 +276,8 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
         "LAUNCHER_REVOKE_CONFIG_ERROR_BACKOFF_SECONDS": "60",
         "LAUNCHER_REVOKE_RETRY_MAX_BACKOFF_SECONDS": "30",
         "LAUNCHER_REVOKE_RETRY_SET_MAX": "256",
-        "LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS": "660",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
+        "PROXY_TOKEN_GRACE_SECONDS": "60",
         "OPR_CLONE_TIMEOUT_SECONDS": "300",
         "OPR_CHECKOUT_ORPHAN_TTL_SECONDS": "900",
         "OPR_LEASE_HEARTBEAT_SECONDS": "30",
@@ -284,6 +287,12 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
     for key, default in expected_defaults.items():
         raw = str(env[key])
         assert f":-{default}" in raw or raw == default, f"{key} should default to {default}, got {raw}"
+    # ARB34-013: window has empty default so launcher derives timeout+grace.
+    window_raw = str(env["LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS"])
+    assert ":-}" in window_raw or window_raw == "", (
+        f"LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS should default empty for derive, got {window_raw}"
+    )
+    assert ":-660" not in window_raw
 
 
 @pytest.mark.skipif(not _compose_available(), reason="docker not available")
@@ -317,7 +326,7 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
     assert str(launcher_env.get("LAUNCHER_CANCEL_WAIT_SECONDS")) in {"2.5", "2.50"}
     assert str(launcher_env.get("OPR_CHECKOUT_ORPHAN_TTL_SECONDS")) == "1200"
     for name in sorted(_env_keys(_service(data, "launcher"))):
-        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN"}:
+        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN", "PROXY_TOKEN_GRACE_SECONDS"}:
             continue
         assert _SECRETISH.search(name) is None, name
 

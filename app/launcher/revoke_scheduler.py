@@ -5,8 +5,10 @@ around the async HTTP client. Pending work is bounded; ``schedule_proxy_token_re
 returns whether the job was accepted. Same ``job_id`` is deduped.
 
 Transient failures retry with exponential backoff until the revoke is confirmed
-or ``LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS`` elapses since the job **creation**
+or the revoke retry window elapses since the job **creation**
 time (container ``opr.created_unix`` / Docker Created, or checkout mtime).
+The window defaults to ``OPR_MAX_REVIEW_TIMEOUT_SECONDS + PROXY_TOKEN_GRACE_SECONDS``
+(ARB34-013); an explicit ``LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS`` may only raise it.
 
 There are **no persistent tombstones**. Restart safety comes from leaving
 stopped containers and checkout dirs in place until ``revoke_status`` is
@@ -69,25 +71,67 @@ def _revoke_max_pending() -> int:
         return int(DEFAULT_REVOKE_MAX_PENDING)
 
 
+def proxy_token_grace_seconds() -> int:
+    """``PROXY_TOKEN_GRACE_SECONDS`` (shared with model-proxy token TTL grace)."""
+    raw = os.environ.get("PROXY_TOKEN_GRACE_SECONDS", "").strip()
+    if not raw:
+        return int(DEFAULT_TOKEN_GRACE_SECONDS)
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return int(DEFAULT_TOKEN_GRACE_SECONDS)
+
+
+def max_review_timeout_seconds_for_revoke() -> int:
+    """``OPR_MAX_REVIEW_TIMEOUT_SECONDS`` used when deriving the revoke retry window."""
+    raw = os.environ.get("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return int(DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS)
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return int(DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS)
+
+
+def derived_revoke_retry_window_seconds() -> float:
+    """Default revoke evidence window: max review timeout + proxy token grace (ARB34-013)."""
+    return float(max_review_timeout_seconds_for_revoke() + proxy_token_grace_seconds())
+
+
 def revoke_retry_window_seconds() -> float:
-    """Wall-clock window from job creation for revoke retries / deferred delete."""
+    """Wall-clock window from job creation for revoke retries / deferred delete.
+
+    Defaults to ``OPR_MAX_REVIEW_TIMEOUT_SECONDS + PROXY_TOKEN_GRACE_SECONDS`` so the
+    launcher matches model-proxy job-token lifetime. An explicit
+    ``LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS`` overrides when set (startup rejects
+    values smaller than the derived sum — see ``ensure_revoke_retry_window_config``).
+    """
     raw_window = os.environ.get("LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS", "").strip()
     if raw_window:
         try:
             return max(1.0, float(raw_window))
         except ValueError:
             pass
-    raw_max = os.environ.get("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "").strip()
-    raw_grace = os.environ.get("PROXY_TOKEN_GRACE_SECONDS", "").strip()
+    return derived_revoke_retry_window_seconds()
+
+
+def ensure_revoke_retry_window_config() -> None:
+    """Fail closed when an explicit revoke window is shorter than token lifetime."""
+    raw_window = os.environ.get("LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS", "").strip()
+    if not raw_window:
+        return
     try:
-        max_review = max(1, int(raw_max)) if raw_max else DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS
-    except ValueError:
-        max_review = DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS
-    try:
-        grace = max(0, int(raw_grace)) if raw_grace else DEFAULT_TOKEN_GRACE_SECONDS
-    except ValueError:
-        grace = DEFAULT_TOKEN_GRACE_SECONDS
-    return float(max_review + grace)
+        explicit = float(raw_window)
+    except ValueError as exc:
+        raise RuntimeError(f"LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS ({raw_window!r}) must be a number") from exc
+    derived = derived_revoke_retry_window_seconds()
+    if explicit < derived:
+        raise RuntimeError(
+            f"LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS ({explicit}) must be >= "
+            f"OPR_MAX_REVIEW_TIMEOUT_SECONDS ({max_review_timeout_seconds_for_revoke()}) + "
+            f"PROXY_TOKEN_GRACE_SECONDS ({proxy_token_grace_seconds()}) = {derived}; "
+            "raise the window or lower timeout/grace"
+        )
 
 
 def _retry_initial_backoff_seconds() -> float:
