@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -14,6 +15,12 @@ from pathlib import Path
 from app.launcher.docker_api import DockerApiError, DockerClient
 from app.launcher.job_lifecycle import lifecycle
 from app.launcher.lease import directory_is_lease_stale, remove_directory_lease_file
+from app.launcher.revoke_scheduler import (
+    drain_revoke_retries,
+    may_delete_after_revoke,
+    note_revoke_needed,
+    schedule_proxy_token_revoke,
+)
 from app.launcher.spec import REVIEW_LABEL, REVIEW_LABEL_VALUE
 from app.launcher.timeouts import review_orphan_ttl_seconds
 
@@ -48,6 +55,45 @@ def reaper_interval_seconds() -> int:
 def checkout_base_path() -> Path:
     raw = os.environ.get("OPR_CHECKOUT_BASE", "/var/opr/checkouts").strip()
     return Path(raw)
+
+
+def job_created_unix_from_container(item: dict) -> float:
+    """Reliable job creation unix time from labels or Docker Created."""
+    labels = item.get("Labels") or {}
+    raw = str(labels.get("opr.created_unix") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    try:
+        return float(item.get("Created") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def job_created_unix_from_checkout(path: Path) -> float:
+    """Creation time from job.json ``created_unix`` or directory mtime."""
+    meta = path / "job.json"
+    if meta.is_file():
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("created_unix") is not None:
+                return float(data["created_unix"])
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    try:
+        return float(path.lstat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+def _stop_review_container(docker: DockerClient, cid: str) -> None:
+    """Stop an orphan so it can do nothing; leave it for later remove."""
+    try:
+        docker.kill_container(cid)
+    except DockerApiError:
+        pass
 
 
 def is_uuid_job_dirname(name: str) -> bool:
@@ -187,6 +233,25 @@ def reap_checkout_orphans(
             continue
 
         if stat.S_ISDIR(st.st_mode):
+            # UUID job staging dirs: schedule revoke; delete only when confirmed
+            # or retry window since creation elapsed (ARB34-009). Never block
+            # the reaper on a slow proxy (ARB34-008). After launcher restart the
+            # dir itself is the durable signal to re-schedule.
+            created_at = job_created_unix_from_checkout(path) if stat.S_ISDIR(st.st_mode) else float(st.st_mtime)
+            if is_uuid_job_dirname(name):
+                if not schedule_proxy_token_revoke(name, created_at=created_at):
+                    note_revoke_needed(name)
+                    logger.warning(
+                        "deferring checkout reap name=%s: revoke queue full",
+                        name,
+                    )
+                    continue
+                if not may_delete_after_revoke(name, created_at=created_at, now=clock):
+                    logger.warning(
+                        "deferring checkout reap name=%s: revoke pending",
+                        name,
+                    )
+                    continue
             logger.warning("reaping orphan checkout dir name=%s", name)
             _safe_rmtree(path)
             remove_directory_lease_file(path)
@@ -222,12 +287,17 @@ def reap_checkout_orphans(
 
 
 def reap_once(client: DockerClient | None = None) -> int:
-    """Force-remove stale review containers; then stale checkout dirs."""
+    """Stop stale review containers; remove after revoke confirm or window."""
     ttl = orphan_ttl_seconds()
     owns = client is None
     docker = client or DockerClient()
     removed = 0
     try:
+        # Retry previously rejected schedules (hint only; stopped orphans are durable).
+        try:
+            drain_revoke_retries()
+        except Exception:  # noqa: BLE001
+            logger.warning("drain_revoke_retries failed", exc_info=True)
         try:
             containers = docker.list_review_containers()
         except DockerApiError as exc:
@@ -253,16 +323,32 @@ def reap_once(client: DockerClient | None = None) -> int:
             cid = item.get("Id") or ""
             if age < ttl:
                 continue
+            created_at = job_created_unix_from_container(item)
             logger.warning(
-                "reaping orphan review container id=%s age_s=%s names=%s",
+                "stopping orphan review container id=%s age_s=%s names=%s",
                 cid[:12],
                 int(age),
                 item.get("Names"),
             )
-            try:
-                docker.kill_container(cid)
-            except DockerApiError:
-                pass
+            # Stop immediately so the orphan can do nothing; remove only after
+            # revoke confirmed or retry window since creation (ARB34-009).
+            _stop_review_container(docker, cid)
+            if job_id:
+                if not schedule_proxy_token_revoke(job_id, created_at=created_at):
+                    note_revoke_needed(job_id)
+                    logger.warning(
+                        "deferring container remove id=%s job=%s: revoke queue full",
+                        cid[:12],
+                        job_id,
+                    )
+                    continue
+                if not may_delete_after_revoke(job_id, created_at=created_at, now=now):
+                    logger.warning(
+                        "deferring container remove id=%s job=%s: revoke pending",
+                        cid[:12],
+                        job_id,
+                    )
+                    continue
             try:
                 docker.remove_container(cid, force=True)
                 removed += 1

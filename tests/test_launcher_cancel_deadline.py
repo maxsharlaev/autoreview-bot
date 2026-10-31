@@ -198,9 +198,9 @@ def test_cancel_skips_docker_when_remaining_below_min_usable(
     assert calls == []
 
 
-def test_force_remove_skips_docker_near_deadline() -> None:
-    """Direct: deadline only 20ms away → list/kill/remove never run."""
-    from app.launcher.jobs import _force_remove_job_containers
+def test_force_stop_skips_docker_near_deadline() -> None:
+    """Direct: deadline only 20ms away → list/kill never run."""
+    from app.launcher.jobs import _force_stop_job_containers
 
     jid = "e" * 32
     calls: list[str] = []
@@ -216,7 +216,7 @@ def test_force_remove_skips_docker_near_deadline() -> None:
         def remove_container(self, cid: str, *, force: bool = True, timeout: float | None = None) -> None:
             calls.append("remove")
 
-    removed = _force_remove_job_containers(
+    removed = _force_stop_job_containers(
         TrackingDocker(),  # type: ignore[arg-type]
         jid,
         deadline_monotonic=time.monotonic() + 0.02,

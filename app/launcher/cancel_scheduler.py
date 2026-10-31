@@ -10,6 +10,12 @@ cancels coalesce; the reaper still reclaims leftovers.
 AR-030-005: ``add_done_callback`` must run *outside* ``_INFLIGHT_LOCK``. A non-reentrant
 ``threading.Lock`` deadlocks when the future is already done and the callback runs
 synchronously (``_clear_inflight`` would re-acquire the same lock).
+
+ARB34-002 / ARB34-005: after the bounded wait returns (confirmed or not), schedule a
+best-effort proxy token revoke on the *separate* revoke scheduler (dedicated asyncio
+loop + wall-clock ``asyncio.timeout``, bounded pending queue). ``_CANCEL_POOL`` is
+exclusive to Docker cancellation so blocked revokes cannot starve cancels. Reaper
+stopped containers remain for the reaper until revoke confirms or the retry window elapses.
 """
 
 from __future__ import annotations
@@ -21,11 +27,12 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from app.launcher.job_lifecycle import lifecycle
+from app.launcher.revoke_scheduler import note_revoke_needed, schedule_proxy_token_revoke
 from app.launcher.timeouts import launcher_cancel_deadline_seconds
 
 logger = logging.getLogger(__name__)
 
-# Long-lived pool — never created per-request (avoids executor shutdown joins).
+# Long-lived pool — Docker cancel only (ARB34-005); never schedule proxy revoke here.
 _CANCEL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="opr-cancel")
 _INFLIGHT: dict[str, Future] = {}
 _INFLIGHT_LOCK = threading.Lock()  # non-reentrant; never call callbacks while held
@@ -73,11 +80,16 @@ def cancel_review_job_bounded(*, job_id: str, client: Any | None = None) -> dict
     wait_s = float(launcher_cancel_deadline_seconds())
     fut = _submit_cancel(jid, client=client)
     try:
-        return fut.result(timeout=wait_s)
+        result = fut.result(timeout=wait_s)
     except FuturesTimeoutError:
         logger.warning(
             "cancel still running after deadline job=%s wait_s=%s; returning unconfirmed",
             jid,
             wait_s,
         )
-        return {"job_id": jid, "removed": 0, "confirmed": False}
+        result = {"job_id": jid, "removed": 0, "confirmed": False}
+    # After the bounded response path — never wait on proxy I/O here (ARB34-002/005).
+    # If the revoke queue rejects, note for reaper retry (ARB34-009); no disk tombstone.
+    if not schedule_proxy_token_revoke(jid):
+        note_revoke_needed(jid)
+    return result

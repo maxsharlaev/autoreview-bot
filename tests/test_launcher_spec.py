@@ -178,11 +178,13 @@ def test_container_config_labels_and_env(tmp_path: Path) -> None:
         sandbox="read-only",
         approval_policy="never",
         allow_unsandboxed=False,
-        model_api_key="sk-test",
+        proxy_token="opr_job_test_token_ok",
     )
     assert cfg["Labels"]["opr.review"] == "1"
     assert cfg["Labels"]["opr.job_id"] == "abc"
-    assert "CODEX_API_KEY=sk-test" in cfg["Env"]
+    assert "CODEX_API_KEY=opr_job_test_token_ok" in cfg["Env"]
+    assert not any(e.startswith("OPENAI_API_KEY=") for e in cfg["Env"])
+    assert not any("sk-" in e for e in cfg["Env"])
     assert cfg["User"] == "1000:1000"
 
 

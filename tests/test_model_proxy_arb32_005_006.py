@@ -512,6 +512,7 @@ async def test_next_chunk_unit_bounds_by_token_ttl(monkeypatch: pytest.MonkeyPat
         issuer_token="x" * 32,
         default_upstream_key="sk",
         owner_upstream_keys={},
+        legacy_owner_upstream_keys={},
         upstream_host="api.openai.com",
         upstream_scheme="https",
         provider="openai",

@@ -103,25 +103,36 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | How often the reaper scans for orphan review containers and stale checkout dirs. |
 | `LAUNCHER_CANCEL_DEADLINE_SECONDS` | `4` | launcher | Hard wait bound for DELETE `/v1/jobs/{id}`: cancel work runs in a background worker; the handler waits at most this long then returns `confirmed=false` while Docker cleanup may continue (tombstone already set; duplicate DELETE coalesces; reaper reclaims leftovers). Per Docker call also uses the actual remaining budget (never inflated; under 50ms → skip). Must be ≤ worker DELETE HTTP read timeout (5s) **minus a mandatory 0.5s margin** (max 4.5s; default 4s passes) and above `LAUNCHER_CANCEL_WAIT_SECONDS`. Docker HTTP uses a long-lived async loop + asyncio.timeout (not per-call asyncio.run). |
 | `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | After kill-first cancel, seconds to wait for an in-flight launch before confirming idle (capped by remaining `LAUNCHER_CANCEL_DEADLINE_SECONDS`). |
+| `LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS` | `2` | launcher | Short HTTP timeout per background proxy token revoke attempt (cancel + reaper; ARB34-002/008/009). Does not extend the cancel deadline. Transient failures retry with backoff until the token TTL window elapses. |
+| `LAUNCHER_CANCEL_REVOKE_MAX_PENDING` | `32` | launcher | Max in-flight background proxy revokes (ARB34-005/009/010/011). Uniform rule on **finish, cancel, and reaper**: remove container/`job_dir` only when revoke is **confirmed** (HTTP 2xx/404) or `LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS` since job creation has elapsed. Finish/cancel **stop** containers and keep staging when revoke is not confirmed; the reaper re-schedules. Config errors (missing issuer, 401/403/other 4xx) keep evidence until the window with low-frequency retry. `_CANCEL_POOL` is Docker-cancel only. |
+| `LAUNCHER_REVOKE_RETRY_INITIAL_BACKOFF_SECONDS` | `0.5` | launcher | Initial backoff between transient revoke retries (ARB34-009). |
+| `LAUNCHER_REVOKE_CONFIG_ERROR_BACKOFF_SECONDS` | `60` | launcher | Low-frequency backoff between config-error revoke retries (missing issuer / 401/403/other 4xx; ARB34-010). Evidence is retained until the retry window. |
+| `LAUNCHER_REVOKE_RETRY_MAX_BACKOFF_SECONDS` | `30` | launcher | Cap for exponential backoff between transient revoke retries (ARB34-009). |
+| `LAUNCHER_REVOKE_RETRY_SET_MAX` | `256` | launcher | Max in-memory job ids waiting for a later revoke schedule after queue reject (ARB34-009; size + TTL bounded). Durable signal is the stopped orphan itself. |
+| `LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS` | `660` (`OPR_MAX_REVIEW_TIMEOUT_SECONDS` + 60) | launcher | Wall-clock bound from **job creation** for revoke retries and deferred orphan deletion (ARB34-009/010/011). Stopped containers and kept `job_dir`s may linger up to this window when the proxy is down or misconfigured; after it elapses the reaper removes them. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Docker Engine endpoint. Compose sets the unix socket; do not point this at a remote daemon from an untrusted network. |
-| `X-Model-Api-Key` (HTTP header) | — | launcher ← worker | M2 only: per-run model key for the Codex process env. Removed once the M3 model-API proxy lands. |
+| `PROXY_ISSUER_TOKEN` | (required for container backend) | worker, launcher, model-proxy | Shared issuer bearer; launcher reaper/cancel revoke leftover job tokens. |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Issuer base URL (worker issues; launcher revokes on cancel/reaper). |
+| `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | Written into review `CODEX_HOME/config.toml` as the custom provider `base_url`. |
 
 <!-- section: model-proxy-m3 -->
 ## Model proxy (M3)
 
-Used when the container-runner overlay includes `model-proxy` (opt-in Compose). The proxy holds real model keys; review containers will use short-lived job tokens (wiring in a follow-up PR). The **worker** is the issuer (`PROXY_ISSUER_TOKEN`). `in_process` does **not** use the proxy in M3.
+Used when the container-runner overlay includes `model-proxy` (opt-in Compose). The proxy holds real model keys; the worker issues short-lived `opr_job_` tokens and the launcher injects only that token as `CODEX_API_KEY` plus a generated `config.toml` (`model_provider = "opr_proxy"`). Review containers attach only to the internal `review_egress` network (no internet); `model-proxy` reaches the upstream API via `proxy_egress`. `in_process` does **not** use the proxy in M3. Codex 0.164.0: no separate reliable knob was found to disable the built-in chatgpt.com model-catalog fetch beyond using a custom provider (which avoided that path in the spike); network isolation is the backstop.
 
 The proxy sends upstream `Accept-Encoding: identity` and strips representation headers `content-encoding` / `content-length` / `transfer-encoding` from the client response (so a decoded body is never forwarded with a stale encoding).
 
 
 | Variable | Default | Read by | Notes |
 | --- | --- | --- | --- |
-| `PROXY_ISSUER_TOKEN` | (required to start model-proxy) | model-proxy, worker | Shared bearer for `POST/DELETE /internal/jobs/{job_id}/token`. Generate with `openssl rand -hex 32` (>= 16 chars). |
-| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker | Base URL for issuer calls (and later for review wiring). |
-| `OPENAI_API_KEY` | `""` | model-proxy (and api/worker as today) | Default upstream model key inside the proxy. |
-| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Per-owner upstream key; falls back to `OPENAI_API_KEY`. |
+| `PROXY_ISSUER_TOKEN` | (required to start model-proxy / container backend) | model-proxy, worker, launcher | Shared bearer for `POST/DELETE /internal/jobs/{job_id}/token`. Generate with `openssl rand -hex 32` (>= 16 chars). |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Base URL for issuer/revoke calls. |
+| `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
+| `OPENAI_API_KEY` | `""` | model-proxy (via `model-proxy.env`; also api/worker as today) | Default upstream model key inside the proxy. For the container-runner overlay, set it only in `model-proxy.env` (not Compose `environment:`, which would override/empty `env_file`). |
+| `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Legacy per-owner upstream key (`<ID>` = `[A-Z0-9_]+`). Used only as a fallback for owner ids that do **not** contain `-`: lookup uses `PROXY_OWNER_<OWNER_ID.upper()>_OPENAI_API_KEY`. Hyphenated owner ids (`org-a`) must use `PROXY_OWNER_KEY_ENVS` (no hyphen→underscore remap). Falls back to `OPENAI_API_KEY` when no owner key matches. |
+| `PROXY_OWNER_KEY_ENVS` | `{}` | model-proxy | JSON object mapping exact `owner_id` → **name** of the env var that holds that owner's upstream key (secrets stay in env). Required for hyphenated ids (`org-a`). Startup fails if two owners map to the same env var, a referenced env is missing/empty, or case-variant owners share one env. Example: `{"org-a":"ORG_A_HYPHEN_KEY","org_a":"ORG_A_UNDER_KEY"}`. Set only in `model-proxy.env` for the container-runner overlay (not Compose `environment:`). |
 | `PROXY_PROVIDER` | `openai` | model-proxy | Upstream provider id (only `openai` in M3 PR2; extensible later). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Fixed upstream host (callers cannot override). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` or `http` (tests). |
@@ -133,6 +144,10 @@ The proxy sends upstream `Accept-Encoding: identity` and strips representation h
 | `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Max concurrent in-flight proxied requests per job (slot reserved before reading the client body; released on upload failure/timeout/413). |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle bound between chunks for both client upload (`request.stream`) and upstream response (`asyncio.timeout` per next-chunk wait; HTTPX float timeout is only a soft per-phase backstop). |
 | `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock overall deadline for reading the client request body and for the whole upstream request+response (not HTTPX inactivity alone); also stops at job-token expiry and closes the upstream response. |
+| `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` | `2` | worker | Wall-clock bound for finish-path revoke in `ContainerReviewExecutor.run` finally (ARB34-004/011). Only HTTP 2xx/404 confirm removal of `job_dir`; on False/timeout/config-error the worker keeps staging for the reaper. |
+
+
+Proxy-only secrets file: copy [`model-proxy.env.example`](../model-proxy.env.example) to `model-proxy.env` (gitignored), restrict permissions (`chmod 600` / Windows ACLs), and put `OPENAI_API_KEY`, `PROXY_OWNER_KEY_ENVS`, and any env vars named by that map there. Compose loads it via `env_file` on **model-proxy only** (never worker/launcher).
 
 Public allowlist on the proxy: **`POST /v1/responses`** only (SSE supported). No WebSocket / CONNECT. Logs never include tokens, keys, or bodies.
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -24,9 +25,29 @@ from app.launcher.timeouts import (
 )
 from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
-from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
+from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UPGRADE_REQUIRED
+from app.services.model_proxy_client import (
+    ModelProxyIssuerError,
+    RevokeAttemptOutcome,
+    issue_job_token,
+    revoke_job_token_attempt,
+)
 
 logger = logging.getLogger(__name__)
+
+# Finish-path proxy revoke budget (ARB34-004/011); reaper deletes after confirm.
+DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS = 2.0
+
+
+def finish_revoke_timeout_seconds() -> float:
+    raw = os.environ.get("OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return float(DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS)
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return float(DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS)
+
 
 # Short timeout for cancel DELETE so it can run under asyncio.shield.
 _CANCEL_HTTP_TIMEOUT = httpx.Timeout(
@@ -75,6 +96,7 @@ class ContainerReviewExecutor:
         model: str,
         timeout_seconds: int,
         openai_api_key: str,
+        owner_id: str = "",
         reasoning_effort: str = "medium",
         sandbox: str = "read-only",
         approval_policy: str = "never",
@@ -84,8 +106,8 @@ class ContainerReviewExecutor:
 
         if not launcher_token_is_configured(self._launcher_token):
             raise CodexRunnerError(CODEX_SANDBOX, "LAUNCHER_TOKEN missing or too short (fail closed)")
-        if not (openai_api_key or "").strip():
-            raise CodexRunnerError(CODEX_SANDBOX, "model api key empty for container backend (fail closed)")
+        # Real model keys stay on model-proxy; container path must not require/forward them.
+        _ = openai_api_key  # protocol compat; unused for container (M3)
 
         job_id = uuid.uuid4().hex
         base = self._checkout_base
@@ -93,6 +115,7 @@ class ContainerReviewExecutor:
         job_dir = base / job_id
         repo_dir = job_dir / "repo"
         remove_job_dir = True
+        proxy_token: str | None = None
         try:
             job_dir.mkdir(parents=True, exist_ok=False)
             await start_directory_lease(job_dir)
@@ -111,12 +134,21 @@ class ContainerReviewExecutor:
                 approval_policy,
                 allow_unsandboxed,
             )
+            try:
+                proxy_token = await issue_job_token(
+                    job_id=job_id,
+                    timeout_seconds=timeout_seconds,
+                    owner_id=owner_id or "",
+                    client=self._http_client,
+                )
+            except ModelProxyIssuerError as exc:
+                raise CodexRunnerError(CODEX_SANDBOX, f"model-proxy token issue failed: {exc}") from exc
             checkout_ref = f"{job_id}/repo"
             try:
                 text = await self._call_launcher(
                     job_id=job_id,
                     checkout_ref=checkout_ref,
-                    model_api_key=openai_api_key,
+                    proxy_token=proxy_token,
                     timeout_seconds=timeout_seconds,
                 )
             except asyncio.CancelledError:
@@ -142,8 +174,41 @@ class ContainerReviewExecutor:
         except Exception as exc:  # noqa: BLE001 - map unexpected staging/HTTP errors to fail-closed
             raise CodexRunnerError(CODEX_SANDBOX, f"container executor failed: {exc}") from exc
         finally:
+            revoke_confirmed = False
+            if proxy_token is not None:
+                # Fast bounded revoke (ARB34-004). Only DONE (2xx/404) confirms;
+                # False/timeout/config-error ? keep job_dir for the reaper (ARB34-011).
+                revoke_budget = finish_revoke_timeout_seconds()
+                try:
+                    async with asyncio.timeout(revoke_budget):
+                        outcome = await revoke_job_token_attempt(
+                            job_id=job_id,
+                            client=self._http_client,
+                            timeout_seconds=revoke_budget,
+                        )
+                    revoke_confirmed = outcome is RevokeAttemptOutcome.DONE
+                    if not revoke_confirmed:
+                        logger.warning(
+                            "model-proxy revoke not confirmed job_id=%s outcome=%s; keeping job_dir for reaper",
+                            job_id,
+                            outcome.value,
+                        )
+                except TimeoutError:
+                    logger.warning(
+                        "model-proxy revoke timed out job_id=%s budget_s=%s; keeping job_dir for reaper",
+                        job_id,
+                        revoke_budget,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "model-proxy revoke failed job_id=%s; keeping job_dir for reaper",
+                        job_id,
+                        exc_info=True,
+                    )
             await stop_directory_lease(job_dir)
-            # Keep checkout for orchestrator cleanup; remove only our staging copy when safe.
+            # Uniform rule (ARB34-009/011): remove staging only after revoke confirmed.
+            if proxy_token is not None and not revoke_confirmed:
+                remove_job_dir = False
             if remove_job_dir and job_dir.exists() and repo_dir.resolve() != checkout.resolve():
                 await asyncio.to_thread(_remove_job_dir, job_dir)
 
@@ -181,6 +246,7 @@ class ContainerReviewExecutor:
                     "sandbox": sandbox,
                     "approval_policy": approval_policy,
                     "allow_unsandboxed": allow_unsandboxed,
+                    "created_unix": int(time.time()),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -227,13 +293,12 @@ class ContainerReviewExecutor:
         # Staging may be removed only when the launcher confirms nothing remains.
         return bool(isinstance(data, dict) and data.get("confirmed") is True)
 
-    async def _call_launcher(self, *, job_id: str, checkout_ref: str, model_api_key: str, timeout_seconds: int) -> str:
+    async def _call_launcher(self, *, job_id: str, checkout_ref: str, proxy_token: str, timeout_seconds: int) -> str:
         headers = {
             "Authorization": f"Bearer {self._launcher_token}",
-            "X-Model-Api-Key": model_api_key,
             "Content-Type": "application/json",
         }
-        payload = {"job_id": job_id, "checkout_ref": checkout_ref}
+        payload = {"job_id": job_id, "checkout_ref": checkout_ref, "proxy_token": proxy_token}
         owns = self._http_client is None
         read_timeout = launcher_http_timeout_seconds(timeout_seconds)
         client = self._http_client or httpx.AsyncClient(
@@ -255,7 +320,19 @@ class ContainerReviewExecutor:
             detail = _safe_detail(response)
             code = detail.get("code") if isinstance(detail, dict) else None
             message = detail.get("message") if isinstance(detail, dict) else None
-            allowed = {CODEX_SANDBOX, CODEX_TIMEOUT}
+            # ARB34-007: surface rolling-upgrade rejects clearly (426 or structured detail).
+            if response.status_code == 426 or code == CODEX_UPGRADE_REQUIRED:
+                raise CodexRunnerError(
+                    CODEX_UPGRADE_REQUIRED,
+                    message or "worker too old: upgrade worker, launcher and model-proxy together",
+                )
+            # Old launcher may answer bare 422 when proxy_token is unknown/required.
+            if response.status_code == 422:
+                raise CodexRunnerError(
+                    CODEX_UPGRADE_REQUIRED,
+                    "launcher rejected review request (422); upgrade worker, launcher and model-proxy together",
+                )
+            allowed = {CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UPGRADE_REQUIRED}
             raise CodexRunnerError(
                 code if code in allowed else CODEX_SANDBOX,
                 message or f"launcher error HTTP {response.status_code}",

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -190,12 +191,15 @@ def build_container_config(
     sandbox: str,
     approval_policy: str,
     allow_unsandboxed: bool,
-    model_api_key: str,
+    proxy_token: str,
 ) -> dict[str, Any]:
-    """Full ContainerCreate body. Command/entrypoint come from the image."""
+    """Full ContainerCreate body. Command/entrypoint come from the image.
+
+    ``proxy_token`` is the short-lived ``opr_job_`` bearer (never a real model key).
+    Only ``CODEX_API_KEY`` is set; entrypoint may mirror it to ``OPENAI_API_KEY``.
+    """
     env = [
-        f"CODEX_API_KEY={model_api_key}",
-        f"OPENAI_API_KEY={model_api_key}",
+        f"CODEX_API_KEY={proxy_token}",
         f"OPR_MODEL={model}",
         f"OPR_TIMEOUT_SECONDS={int(timeout_seconds)}",
         f"OPR_REASONING_EFFORT={reasoning_effort}",
@@ -212,6 +216,9 @@ def build_container_config(
         "Labels": {
             REVIEW_LABEL: REVIEW_LABEL_VALUE,
             "opr.job_id": job_id,
+            # Unix creation time for revoke retry window (ARB34-009); Docker
+            # Created is also used as a fallback by the reaper.
+            "opr.created_unix": str(int(time.time())),
         },
         "HostConfig": host_config,
         "User": "1000:1000",
