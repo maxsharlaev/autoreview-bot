@@ -14,7 +14,11 @@ from pathlib import Path
 from app.launcher.docker_api import DockerApiError, DockerClient
 from app.launcher.job_lifecycle import lifecycle
 from app.launcher.lease import directory_is_lease_stale, remove_directory_lease_file
-from app.launcher.revoke_scheduler import schedule_proxy_token_revoke
+from app.launcher.revoke_scheduler import (
+    drain_revoke_retries,
+    note_revoke_needed,
+    schedule_proxy_token_revoke,
+)
 from app.launcher.spec import REVIEW_LABEL, REVIEW_LABEL_VALUE
 from app.launcher.timeouts import review_orphan_ttl_seconds
 
@@ -188,14 +192,21 @@ def reap_checkout_orphans(
             continue
 
         if stat.S_ISDIR(st.st_mode):
+            # UUID job staging dirs: schedule revoke BEFORE delete (ARB34-009).
+            # If the queue rejects, keep the dir as evidence for the next pass.
+            # Never block the reaper on a slow proxy (ARB34-008).
+            if is_uuid_job_dirname(name):
+                if not schedule_proxy_token_revoke(name):
+                    note_revoke_needed(name)
+                    logger.warning(
+                        "deferring checkout reap name=%s: revoke queue full",
+                        name,
+                    )
+                    continue
             logger.warning("reaping orphan checkout dir name=%s", name)
             _safe_rmtree(path)
             remove_directory_lease_file(path)
             removed += 1
-            # UUID job staging dirs: best-effort revoke via bounded scheduler
-            # (ARB34-008); never block the reaper on a slow proxy.
-            if is_uuid_job_dirname(name):
-                schedule_proxy_token_revoke(name)
         elif stat.S_ISREG(st.st_mode):
             logger.warning("reaping orphan checkout file name=%s", name)
             _safe_unlink(path)
@@ -233,6 +244,11 @@ def reap_once(client: DockerClient | None = None) -> int:
     docker = client or DockerClient()
     removed = 0
     try:
+        # Retry previously rejected / needed revokes (in-memory only; lost on restart).
+        try:
+            drain_revoke_retries()
+        except Exception:  # noqa: BLE001
+            logger.warning("drain_revoke_retries failed", exc_info=True)
         try:
             containers = docker.list_review_containers()
         except DockerApiError as exc:
@@ -268,14 +284,21 @@ def reap_once(client: DockerClient | None = None) -> int:
                 docker.kill_container(cid)
             except DockerApiError:
                 pass
+            # Schedule revoke before remove (ARB34-009). Queue reject => keep
+            # the (stopped) container as evidence; no persistent tombstone —
+            # launcher restart worst case is bounded by proxy token TTL.
+            if job_id and not schedule_proxy_token_revoke(job_id):
+                note_revoke_needed(job_id)
+                logger.warning(
+                    "deferring container remove id=%s job=%s: revoke queue full",
+                    cid[:12],
+                    job_id,
+                )
+                continue
             try:
                 docker.remove_container(cid, force=True)
                 removed += 1
                 live_ids.discard(job_id)
-                if job_id:
-                    # Idempotent best-effort: bounded revoke scheduler (ARB34-008).
-                    # Worker/cancel may already have revoked; reaper must not stall.
-                    schedule_proxy_token_revoke(job_id)
             except DockerApiError as exc:
                 logger.warning("reaper remove failed %s: %s", cid[:12], exc)
 

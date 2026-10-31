@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import logging
 import os
+from enum import StrEnum
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+class RevokeAttemptOutcome(StrEnum):
+    """Classify one proxy revoke HTTP attempt for scheduler retry (ARB34-009)."""
+
+    DONE = "done"  # revoked, already missing, or non-retryable client/auth error
+    TRANSIENT = "transient"  # timeout, connection error, or 5xx
+
 
 DEFAULT_MODEL_PROXY_URL = "http://model-proxy:8081"
 
@@ -120,6 +129,67 @@ async def revoke_job_token(
     if isinstance(data, dict) and "revoked" in data:
         return bool(data.get("revoked"))
     return True
+
+
+async def revoke_job_token_attempt(
+    *,
+    job_id: str,
+    base_url: str | None = None,
+    issuer_token: str | None = None,
+    client: httpx.AsyncClient | None = None,
+    timeout_seconds: float | None = None,
+) -> RevokeAttemptOutcome:
+    """One revoke attempt with DONE vs TRANSIENT classification (ARB34-009).
+
+    DONE covers success, already-missing (200 revoked=false / 404), and
+    non-retryable 4xx/auth/config gaps. TRANSIENT covers network errors and 5xx.
+    """
+    token = (issuer_token if issuer_token is not None else proxy_issuer_token()).strip()
+    if len(token) < 16:
+        logger.warning("proxy revoke skipped job_id=%s: PROXY_ISSUER_TOKEN not configured", job_id)
+        return RevokeAttemptOutcome.DONE
+    url = f"{(base_url or model_proxy_url()).rstrip('/')}/internal/jobs/{job_id}/token"
+    headers = {"Authorization": f"Bearer {token}"}
+    owns = client is None
+    if timeout_seconds is None:
+        timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
+    else:
+        budget = max(0.1, float(timeout_seconds))
+        timeout = httpx.Timeout(connect=budget, read=budget, write=budget, pool=budget)
+    http = client or httpx.AsyncClient(timeout=timeout)
+    try:
+        try:
+            response = await http.delete(url, headers=headers)
+        except httpx.HTTPError as exc:
+            logger.warning("model-proxy revoke unreachable job_id=%s: %s", job_id, exc)
+            return RevokeAttemptOutcome.TRANSIENT
+    finally:
+        if owns:
+            await http.aclose()
+    if response.status_code == 401:
+        logger.warning("model-proxy revoke auth failed job_id=%s", job_id)
+        return RevokeAttemptOutcome.DONE
+    if response.status_code == 404:
+        return RevokeAttemptOutcome.DONE
+    if response.status_code in (200, 204):
+        # revoked true/false both mean the token is gone or never existed.
+        return RevokeAttemptOutcome.DONE
+    if response.status_code >= 500:
+        logger.warning(
+            "model-proxy revoke HTTP %s job_id=%s body=%s",
+            response.status_code,
+            job_id,
+            response.text[:200],
+        )
+        return RevokeAttemptOutcome.TRANSIENT
+    # Other 4xx: not retryable
+    logger.warning(
+        "model-proxy revoke HTTP %s job_id=%s body=%s",
+        response.status_code,
+        job_id,
+        response.text[:200],
+    )
+    return RevokeAttemptOutcome.DONE
 
 
 def revoke_job_token_sync(

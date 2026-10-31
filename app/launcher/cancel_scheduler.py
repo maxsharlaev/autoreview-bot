@@ -27,7 +27,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from app.launcher.job_lifecycle import lifecycle
-from app.launcher.revoke_scheduler import schedule_proxy_token_revoke
+from app.launcher.revoke_scheduler import note_revoke_needed, schedule_proxy_token_revoke
 from app.launcher.timeouts import launcher_cancel_deadline_seconds
 
 logger = logging.getLogger(__name__)
@@ -89,5 +89,7 @@ def cancel_review_job_bounded(*, job_id: str, client: Any | None = None) -> dict
         )
         result = {"job_id": jid, "removed": 0, "confirmed": False}
     # After the bounded response path — never wait on proxy I/O here (ARB34-002/005).
-    schedule_proxy_token_revoke(jid)
+    # If the revoke queue rejects, note for reaper retry (ARB34-009); no disk tombstone.
+    if not schedule_proxy_token_revoke(jid):
+        note_revoke_needed(jid)
     return result

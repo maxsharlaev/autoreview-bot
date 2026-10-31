@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- **ARB34-009:** revoke scheduler returns accepted/rejected, dedupes by `job_id`, retries transient failures with exponential backoff until max token TTL, and keeps a bounded in-memory retry set; reaper schedules before delete and retains container/checkout when the queue rejects (no persistent tombstones — restart worst case is token TTL).
 - **ARB34-008:** launcher reaper schedules proxy revokes via the bounded revoke scheduler (wall-clock timeout) instead of inline `revoke_job_token_sync`, so a slow-dripping proxy cannot stall container/checkout cleanup.
 - **ARB34-006 (follow-up):** container-runner Compose no longer sets `OPENAI_API_KEY` / `PROXY_OWNER_KEY_ENVS` in `environment:` (those overrode `model-proxy.env`); secrets come from `model-proxy.env` only.
 - **ARB34-005:** launcher proxy revokes use a dedicated asyncio loop with `asyncio.timeout` and a bounded pending queue; `_CANCEL_POOL` is Docker-cancel only so blocked revokes cannot starve DELETE cancel.

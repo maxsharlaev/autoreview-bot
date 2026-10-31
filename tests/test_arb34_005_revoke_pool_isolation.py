@@ -53,7 +53,9 @@ def test_blocked_revokes_do_not_starve_cancel(
     revoke_holds = 0
     lock = threading.Lock()
 
-    async def hanging_revoke(*, job_id: str, **_kwargs: Any) -> bool:
+    async def hanging_revoke(*, job_id: str, **_kwargs: Any):
+        from app.services.model_proxy_client import RevokeAttemptOutcome
+
         nonlocal revoke_holds
         with lock:
             revoke_holds += 1
@@ -61,14 +63,14 @@ def test_blocked_revokes_do_not_starve_cancel(
                 started.set()
         # Block until test releases (longer than cancel deadline).
         await asyncio.get_event_loop().run_in_executor(None, release.wait)
-        return True
+        return RevokeAttemptOutcome.DONE
 
     def fast_cancel(*, job_id: str, client: Any | None = None) -> dict:
         return {"job_id": job_id, "removed": 1, "confirmed": True}
 
     monkeypatch.setattr("app.launcher.jobs.cancel_review_job", fast_cancel)
     monkeypatch.setattr(
-        "app.services.model_proxy_client.revoke_job_token",
+        "app.services.model_proxy_client.revoke_job_token_attempt",
         hanging_revoke,
     )
 
@@ -103,22 +105,22 @@ def test_revoke_queue_saturation_drops(monkeypatch: pytest.MonkeyPatch) -> None:
 
     release = threading.Event()
 
-    async def hang(*, job_id: str, **_kwargs: Any) -> bool:
+    async def hang(*, job_id: str, **_kwargs: Any):
+        from app.services.model_proxy_client import RevokeAttemptOutcome
+
         await asyncio.get_event_loop().run_in_executor(None, release.wait)
-        return True
+        return RevokeAttemptOutcome.DONE
 
-    monkeypatch.setattr("app.services.model_proxy_client.revoke_job_token", hang)
+    monkeypatch.setattr("app.services.model_proxy_client.revoke_job_token_attempt", hang)
 
-    # Reset pending counter for isolation
-    with rs._PENDING_LOCK:
-        rs._PENDING = 0
+    rs._reset_for_tests()
 
-    rs.schedule_proxy_token_revoke("1" * 32)
-    rs.schedule_proxy_token_revoke("2" * 32)
-    # Third should be dropped when pending >= 2
+    assert rs.schedule_proxy_token_revoke("1" * 32) is True
+    assert rs.schedule_proxy_token_revoke("2" * 32) is True
+    # Third should be rejected when pending >= 2
     time.sleep(0.05)
     before = rs.pending_revoke_count()
-    rs.schedule_proxy_token_revoke("3" * 32)
+    assert rs.schedule_proxy_token_revoke("3" * 32) is False
     # pending should not grow past max
     assert rs.pending_revoke_count() <= 2
     assert before <= 2

@@ -54,18 +54,20 @@ def test_slow_proxy_revoke_does_not_delay_cancel_response(
     def fast_cancel(*, job_id: str, client: Any | None = None) -> dict:
         return {"job_id": job_id, "removed": 1, "confirmed": True}
 
-    async def hanging_revoke(*, job_id: str, **_kwargs: Any) -> bool:
+    async def hanging_revoke(*, job_id: str, **_kwargs: Any):
         import asyncio
+
+        from app.services.model_proxy_client import RevokeAttemptOutcome
 
         revoke_calls.append(job_id)
         revoke_started.set()
         # Hang longer than the cancel deadline + worker margin.
         await asyncio.get_event_loop().run_in_executor(None, lambda: revoke_released.wait(timeout=30))
-        return True
+        return RevokeAttemptOutcome.DONE
 
     monkeypatch.setattr("app.launcher.jobs.cancel_review_job", fast_cancel)
     monkeypatch.setattr(
-        "app.services.model_proxy_client.revoke_job_token",
+        "app.services.model_proxy_client.revoke_job_token_attempt",
         hanging_revoke,
     )
 

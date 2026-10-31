@@ -23,7 +23,11 @@ def test_reaper_continues_when_one_revoke_hangs(
     monkeypatch.setattr(reaper_mod, "directory_is_lease_stale", lambda path, now=None: True)
 
     scheduled: list[str] = []
-    monkeypatch.setattr(reaper_mod, "schedule_proxy_token_revoke", lambda jid: scheduled.append(jid))
+    monkeypatch.setattr(
+        reaper_mod,
+        "schedule_proxy_token_revoke",
+        lambda jid: (scheduled.append(jid), True)[1],
+    )
 
     sync_called = {"n": 0}
 
