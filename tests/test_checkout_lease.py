@@ -77,11 +77,7 @@ def test_no_lease_old_dir_removed(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     # UUID dirs require revoke confirm before delete (ARB34-009); this test covers lease/TTL only.
     monkeypatch.setattr(
         "app.launcher.reaper.schedule_proxy_token_revoke",
-        lambda jid, created_at=None, expires_at=None, issued_at=None: True,
-    )
-    monkeypatch.setattr(
-        "app.launcher.reaper.may_delete_after_revoke",
-        lambda jid, created_at=None, expires_at=None, issued_at=None, orphan_ttl_elapsed=False, now=None: True,
+        lambda jid: None,
     )
     name = uuid.uuid4().hex
     d = tmp_path / name

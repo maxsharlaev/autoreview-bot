@@ -9,7 +9,6 @@ import httpx
 import pytest
 from app.launcher.codex_config import render_opr_proxy_config
 from app.launcher.spec import build_container_config, build_host_config
-from app.services.model_proxy_client import IssuedJobToken
 
 REAL_KEY = "sk-proj-REAL-SECRET-MUST-NEVER-APPEAR"
 PROXY_TOKEN = "opr_job_deadbeefcafebabe0123456789abcdef"
@@ -178,7 +177,7 @@ async def test_revoke_on_finish_and_cancel_paths(monkeypatch: pytest.MonkeyPatch
 
     async def _issue(*, job_id: str, timeout_seconds: int, owner_id: str = "", **kwargs):
         events.append(f"issue:{job_id}:{owner_id}")
-        return IssuedJobToken(token=PROXY_TOKEN, expires_at=__import__("time").time() + 600)
+        return PROXY_TOKEN
 
     async def _revoke(*, job_id: str, **kwargs):
         from app.services.model_proxy_client import RevokeAttemptOutcome
@@ -231,18 +230,10 @@ def test_reaper_revokes_on_container_remove(monkeypatch: pytest.MonkeyPatch) -> 
 
     revoked: list[str] = []
 
-    def fake_schedule(
-        job_id: str, *, created_at: float | None = None, expires_at: float | None = None, issued_at: float | None = None
-    ) -> bool:
+    def fake_schedule(job_id: str) -> None:
         revoked.append(job_id)
-        return True
 
     monkeypatch.setattr(reaper_mod, "schedule_proxy_token_revoke", fake_schedule)
-    monkeypatch.setattr(
-        reaper_mod,
-        "may_delete_after_revoke",
-        lambda jid, created_at=None, expires_at=None, issued_at=None, orphan_ttl_elapsed=False, now=None: True,
-    )
     monkeypatch.setattr(reaper_mod, "orphan_ttl_seconds", lambda: 1)
     monkeypatch.setattr(reaper_mod.lifecycle, "launch_active", lambda jid: False)
 

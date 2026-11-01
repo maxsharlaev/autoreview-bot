@@ -13,7 +13,6 @@ from app.services.container_executor import (
     ContainerReviewExecutor,
     finish_revoke_timeout_seconds,
 )
-from app.services.model_proxy_client import IssuedJobToken
 
 
 @pytest.mark.asyncio
@@ -39,7 +38,7 @@ async def test_slow_finish_revoke_does_not_delay_return(
     calls: list[str] = []
 
     async def fake_issue(**_kwargs: Any):
-        return IssuedJobToken(token="opr_job_test_token_ok", expires_at=time.time() + 600)
+        return "opr_job_test_token_ok"
 
     async def hanging_revoke(*, job_id: str, **_kwargs: Any):
         from app.services.model_proxy_client import RevokeAttemptOutcome
@@ -114,7 +113,7 @@ async def test_finish_revoke_timeout_still_cleans_lease(
     output = tmp_path / "out.json"
 
     async def fake_issue(**_kwargs: Any):
-        return IssuedJobToken(token="opr_job_test_token_ok", expires_at=time.time() + 600)
+        return "opr_job_test_token_ok"
 
     async def hanging_revoke(**_kwargs: Any):
         from app.services.model_proxy_client import RevokeAttemptOutcome

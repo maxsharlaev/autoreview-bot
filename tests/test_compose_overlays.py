@@ -186,12 +186,6 @@ _DOCUMENTED_LAUNCHER_SETTINGS = (
     "LAUNCHER_CANCEL_WAIT_SECONDS",
     "LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS",
     "LAUNCHER_CANCEL_REVOKE_MAX_PENDING",
-    "LAUNCHER_REVOKE_RETRY_INITIAL_BACKOFF_SECONDS",
-    "LAUNCHER_REVOKE_CONFIG_ERROR_BACKOFF_SECONDS",
-    "LAUNCHER_REVOKE_RETRY_MAX_BACKOFF_SECONDS",
-    "LAUNCHER_REVOKE_RETRY_SET_MAX",
-    "LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS",
-    "LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS",
     "PROXY_TOKEN_GRACE_SECONDS",
     "OPR_CHECKOUT_BASE",
     "OPR_CHECKOUT_VOLUME",
@@ -273,13 +267,8 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
         "LAUNCHER_CANCEL_WAIT_SECONDS": "3",
         "LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS": "2",
         "LAUNCHER_CANCEL_REVOKE_MAX_PENDING": "32",
-        "LAUNCHER_REVOKE_RETRY_INITIAL_BACKOFF_SECONDS": "0.5",
-        "LAUNCHER_REVOKE_CONFIG_ERROR_BACKOFF_SECONDS": "60",
-        "LAUNCHER_REVOKE_RETRY_MAX_BACKOFF_SECONDS": "30",
-        "LAUNCHER_REVOKE_RETRY_SET_MAX": "256",
-        "LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS": "30",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
-        "PROXY_TOKEN_GRACE_SECONDS": "60",
+        "PROXY_TOKEN_GRACE_SECONDS": "30",
         "OPR_CLONE_TIMEOUT_SECONDS": "300",
         "OPR_CHECKOUT_ORPHAN_TTL_SECONDS": "900",
         "OPR_LEASE_HEARTBEAT_SECONDS": "30",
@@ -289,12 +278,6 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
     for key, default in expected_defaults.items():
         raw = str(env[key])
         assert f":-{default}" in raw or raw == default, f"{key} should default to {default}, got {raw}"
-    # ARB34-013: window has empty default so launcher derives timeout+grace.
-    window_raw = str(env["LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS"])
-    assert ":-}" in window_raw or window_raw == "", (
-        f"LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS should default empty for derive, got {window_raw}"
-    )
-    assert ":-660" not in window_raw
 
 
 @pytest.mark.skipif(not _compose_available(), reason="docker not available")
@@ -449,7 +432,7 @@ def test_overlay_model_proxy_settings_use_safe_defaults() -> None:
         "PROXY_UPSTREAM_HOST": "api.openai.com",
         "PROXY_UPSTREAM_SCHEME": "https",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
-        "PROXY_TOKEN_GRACE_SECONDS": "60",
+        "PROXY_TOKEN_GRACE_SECONDS": "30",
         "PROXY_MAX_BODY_BYTES": "4194304",
         "PROXY_MAX_REQUESTS_PER_JOB": "50",
         "PROXY_MAX_BYTES_PER_JOB": "16777216",

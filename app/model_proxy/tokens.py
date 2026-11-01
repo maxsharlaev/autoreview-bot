@@ -38,7 +38,7 @@ class IssuedToken:
     job_id: str
     token: str
     expires_in: int
-    expires_at: float  # absolute unix seconds (ARB34-014)
+    expires_at: float
     owner_id: str
 
 

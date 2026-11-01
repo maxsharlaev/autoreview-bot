@@ -190,9 +190,6 @@ def validate_cancel_timeouts() -> None:
 
 
 def ensure_launcher_orphan_ttl_config() -> None:
-    """Launcher startup: container orphan TTL + cancel timeout ordering + revoke window."""
+    """Launcher startup: container orphan TTL + cancel timeout ordering."""
     validate_review_container_orphan_ttl()
     validate_cancel_timeouts()
-    from app.launcher.revoke_scheduler import ensure_revoke_retry_window_config
-
-    ensure_revoke_retry_window_config()

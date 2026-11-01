@@ -115,14 +115,15 @@ def test_revoke_queue_saturation_drops(monkeypatch: pytest.MonkeyPatch) -> None:
 
     rs._reset_for_tests()
 
-    assert rs.schedule_proxy_token_revoke("1" * 32) is True
-    assert rs.schedule_proxy_token_revoke("2" * 32) is True
-    # Third should be rejected when pending >= 2
+    rs.schedule_proxy_token_revoke("1" * 32)
+    rs.schedule_proxy_token_revoke("2" * 32)
     time.sleep(0.05)
     before = rs.pending_revoke_count()
-    assert rs.schedule_proxy_token_revoke("3" * 32) is False
-    # pending should not grow past max
-    assert rs.pending_revoke_count() <= 2
     assert before <= 2
+    # Third is dropped when saturated (best-effort; TTL covers leftovers).
+    rs.schedule_proxy_token_revoke("3" * 32)
+    assert rs.pending_revoke_count() <= 2
     release.set()
-    time.sleep(0.1)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and rs.pending_revoke_count() > 0:
+        time.sleep(0.05)

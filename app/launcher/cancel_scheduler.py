@@ -15,10 +15,7 @@ ARB34-002 / ARB34-005: after the bounded wait returns (confirmed or not), schedu
 best-effort proxy token revoke on the *separate* revoke scheduler (dedicated asyncio
 loop + wall-clock ``asyncio.timeout``, bounded pending queue). ``_CANCEL_POOL`` is
 exclusive to Docker cancellation so blocked revokes cannot starve cancels. Reaper
-stopped containers remain for the reaper until revoke confirms or the retry window elapses.
-
-ARB34-015: cancel passes ``expires_at`` from job.json / ``opr.token_expires_unix`` when
-known so a short attempt bound cannot mark ``WINDOW_EXPIRED`` and drop evidence early.
+revoke remains the idempotent backstop.
 """
 
 from __future__ import annotations
@@ -30,58 +27,15 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from app.launcher.job_lifecycle import lifecycle
-from app.launcher.revoke_scheduler import note_revoke_needed, schedule_proxy_token_revoke
+from app.launcher.revoke_scheduler import schedule_proxy_token_revoke
 from app.launcher.timeouts import launcher_cancel_deadline_seconds
 
 logger = logging.getLogger(__name__)
 
-# Long-lived pool — Docker cancel only (ARB34-005); never schedule proxy revoke here.
+# Long-lived pool ??? Docker cancel only (ARB34-005); never schedule proxy revoke here.
 _CANCEL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="opr-cancel")
 _INFLIGHT: dict[str, Future] = {}
 _INFLIGHT_LOCK = threading.Lock()  # non-reentrant; never call callbacks while held
-
-
-def _lookup_token_expires_unix(job_id: str, *, client: Any | None = None) -> float | None:
-    """Best-effort absolute token expiry for cancel-path revoke (ARB34-015).
-
-    Prefers staged ``job.json`` ``token_expires_unix``, then the review container
-    label ``opr.token_expires_unix``. Never blocks cancel on lookup failure.
-    """
-    from app.launcher.reaper import (
-        checkout_base_path,
-        job_token_expires_unix_from_checkout,
-        job_token_expires_unix_from_container,
-    )
-
-    try:
-        path = checkout_base_path() / job_id
-        exp = job_token_expires_unix_from_checkout(path)
-        if exp is not None:
-            return float(exp)
-    except Exception:  # noqa: BLE001 - cancel must not fail on lookup
-        logger.debug("cancel expires_at checkout lookup failed job=%s", job_id, exc_info=True)
-
-    owns = client is None
-    docker = client
-    try:
-        if docker is None:
-            from app.launcher.docker_api import DockerClient
-
-            docker = DockerClient()
-        listed = docker.list_containers_for_job(job_id, timeout=0.5)
-        for item in listed or []:
-            exp = job_token_expires_unix_from_container(item)
-            if exp is not None:
-                return float(exp)
-    except Exception:  # noqa: BLE001
-        logger.debug("cancel expires_at container lookup failed job=%s", job_id, exc_info=True)
-    finally:
-        if owns and docker is not None:
-            try:
-                docker.close()
-            except Exception:  # noqa: BLE001
-                pass
-    return None
 
 
 def _clear_inflight(job_id: str, fut: Future) -> None:
@@ -106,7 +60,7 @@ def _submit_cancel(job_id: str, *, client: Any | None) -> Future:
         fut = _CANCEL_POOL.submit(_run)
         _INFLIGHT[job_id] = fut
     # Register callback *after* releasing the lock (AR-030-005).
-    # If ``fut`` is already done, the callback runs synchronously here — safe.
+    # If ``fut`` is already done, the callback runs synchronously here ??? safe.
     fut.add_done_callback(lambda f, jid=job_id: _clear_inflight(jid, f))
     return fut
 
@@ -134,9 +88,12 @@ def cancel_review_job_bounded(*, job_id: str, client: Any | None = None) -> dict
             wait_s,
         )
         result = {"job_id": jid, "removed": 0, "confirmed": False}
-    # After the bounded response path — never wait on proxy I/O here (ARB34-002/005).
-    # Pass known expires_at so attempt bounds cannot mark WINDOW_EXPIRED (ARB34-015).
-    expires_at = _lookup_token_expires_unix(jid, client=client)
-    if not schedule_proxy_token_revoke(jid, expires_at=expires_at):
-        note_revoke_needed(jid)
+    # After the bounded response path ??? never wait on proxy I/O here (ARB34-002/005).
+    schedule_proxy_token_revoke(jid)
     return result
+
+
+def _reset_for_tests() -> None:
+    """Drop in-flight cancel map (tests only; does not shut down the pool)."""
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.clear()

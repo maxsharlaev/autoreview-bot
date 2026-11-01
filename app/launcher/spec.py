@@ -1,6 +1,6 @@
 """Hard-coded review container create specification (M2).
 
-Workers cannot pass mounts, network, image, or command — only job_id + checkout_ref.
+Workers cannot pass mounts, network, image, or command ??? only job_id + checkout_ref.
 Any change to this module is a security-sensitive review.
 """
 
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -192,7 +191,6 @@ def build_container_config(
     approval_policy: str,
     allow_unsandboxed: bool,
     proxy_token: str,
-    token_expires_unix: float | None = None,
 ) -> dict[str, Any]:
     """Full ContainerCreate body. Command/entrypoint come from the image.
 
@@ -211,18 +209,13 @@ def build_container_config(
         "TERM=dumb",
         "HOME=/home/review",
     ]
-    labels = {
-        REVIEW_LABEL: REVIEW_LABEL_VALUE,
-        "opr.job_id": job_id,
-        # Diagnostics / old-job fallback; revoke window prefers opr.token_expires_unix (ARB34-014).
-        "opr.created_unix": str(int(time.time())),
-    }
-    if token_expires_unix is not None:
-        labels["opr.token_expires_unix"] = str(int(float(token_expires_unix)))
     return {
         "Image": review_image(),
         "Env": env,
-        "Labels": labels,
+        "Labels": {
+            REVIEW_LABEL: REVIEW_LABEL_VALUE,
+            "opr.job_id": job_id,
+        },
         "HostConfig": host_config,
         "User": "1000:1000",
         "WorkingDir": "/checkout",

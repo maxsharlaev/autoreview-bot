@@ -31,8 +31,6 @@ class RunReviewRequest(BaseModel):
     # Optional at the schema layer so missing token yields a clear upgrade error
     # (ARB34-007) instead of a bare Pydantic 422.
     proxy_token: str | None = Field(default=None, max_length=512)
-    # Absolute unix expiry of the proxy job token (ARB34-014); optional for old workers.
-    token_expires_unix: float | None = Field(default=None, ge=0)
 
 
 class RunReviewResponse(BaseModel):
@@ -98,7 +96,7 @@ def cancel_job(job_id: str) -> CancelJobResponse:
     the ARQ job. Strict UUID validation only (same as staged job dirs).
 
     The handler waits at most ``LAUNCHER_CANCEL_DEADLINE_SECONDS`` for cancel work.
-    If Docker I/O is still stuck (DNS stall, trickling daemon, …), returns
+    If Docker I/O is still stuck (DNS stall, trickling daemon, ???), returns
     ``confirmed=false`` immediately while cleanup continues in a background worker;
     lifecycle tombstone is set before the wait. Duplicate DELETE for the same job
     coalesces onto the in-flight work.
@@ -171,7 +169,6 @@ def start_review(
             job_id=body.job_id,
             checkout_ref=body.checkout_ref,
             proxy_token=token,
-            token_expires_unix=body.token_expires_unix,
         )
     except LauncherJobError as exc:
         # Map all launcher/container failures to a fail-closed sandbox signal for the worker.

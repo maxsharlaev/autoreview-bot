@@ -34,11 +34,11 @@ def test_cancel_review_job_idempotent_when_empty() -> None:
     assert result["confirmed"] is True
 
 
-def test_cancel_review_job_kills_leaves_stopped_for_reaper() -> None:
-    """ARB34-009: cancel stops containers but does not remove them."""
+def test_cancel_review_job_kills_and_removes() -> None:
+    """Cancel kills and removes containers (reaper remains backstop)."""
     killed: list[str] = []
     removed: list[str] = []
-    alive = [{"Id": "cidabcdef1234", "State": "running", "Labels": {"opr.job_id": "c" * 32}}]
+    alive = [{"Id": "cidabcdef1234", "Labels": {"opr.job_id": "c" * 32}}]
 
     class FakeDocker:
         def list_containers_for_job(self, job_id: str, *, timeout: float | None = None) -> list[dict[str, Any]]:
@@ -46,9 +46,6 @@ def test_cancel_review_job_kills_leaves_stopped_for_reaper() -> None:
 
         def kill_container(self, cid: str, *, timeout: float | None = None) -> None:
             killed.append(cid)
-            for item in alive:
-                if item.get("Id") == cid:
-                    item["State"] = "exited"
 
         def remove_container(self, cid: str, *, force: bool = True, timeout: float | None = None) -> None:
             removed.append(cid)
@@ -58,11 +55,10 @@ def test_cancel_review_job_kills_leaves_stopped_for_reaper() -> None:
             return None
 
     result = cancel_review_job(job_id="c" * 32, client=FakeDocker())  # type: ignore[arg-type]
-    assert result["removed"] == 1  # stop count
-    assert result["confirmed"] is True  # no *running* left
+    assert result["removed"] == 1
+    assert result["confirmed"] is True
     assert killed == ["cidabcdef1234"]
-    assert removed == []  # left for reaper
-    assert alive and alive[0]["State"] == "exited"
+    assert removed == ["cidabcdef1234"]
 
 
 @pytest.fixture()
