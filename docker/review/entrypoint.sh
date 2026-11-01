@@ -20,7 +20,12 @@ mkdir -p "$WORK"
 CODEX_HOME="$WORK/codex-home"
 rm -rf "$CODEX_HOME"
 mkdir -p "$CODEX_HOME/rules"
-cp /opt/opr-policy/config.toml "$CODEX_HOME/config.toml"
+# M3: launcher seeds /work/codex-config.toml with model-proxy provider; fall back to image policy.
+if [[ -f "$WORK/codex-config.toml" ]]; then
+  cp "$WORK/codex-config.toml" "$CODEX_HOME/config.toml"
+else
+  cp /opt/opr-policy/config.toml "$CODEX_HOME/config.toml"
+fi
 cp /opt/opr-policy/rules/review.rules "$CODEX_HOME/rules/review.rules"
 export CODEX_HOME
 export HOME="${HOME:-/home/review}"

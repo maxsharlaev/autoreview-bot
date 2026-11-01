@@ -12,10 +12,22 @@ from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
 from app.services.container_executor import ContainerReviewExecutor
 from app.services.review_executor import CONTAINER_BACKEND, get_review_executor
 
+PROXY_TOKEN = "opr_job_test_proxy_token_value_ok"
+
+
+def _stub_proxy_issuer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub model-proxy issue (tokens are not revoked)."""
+
+    async def _issue(**kwargs):
+        return "opr_job_test_proxy_token_value_ok"
+
+    monkeypatch.setattr("app.services.container_executor.issue_job_token", _issue)
+
 
 @pytest.mark.asyncio
 async def test_container_executor_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    _stub_proxy_issuer(monkeypatch)
     checkout = tmp_path / "co"
     checkout.mkdir()
     (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
@@ -23,12 +35,16 @@ async def test_container_executor_success(tmp_path: Path, monkeypatch: pytest.Mo
     schema.write_text("{}", encoding="utf-8")
     out = tmp_path / "out.json"
 
+    _stub_proxy_issuer(monkeypatch)
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer test-launcher-token-32chars-ok"
-        assert request.headers["X-Model-Api-Key"] == "sk-test"
+        assert "X-Model-Api-Key" not in request.headers
         body = json_body(request)
-        assert set(body) == {"job_id", "checkout_ref"}
+        assert set(body) == {"job_id", "checkout_ref", "proxy_token"}
         assert body["checkout_ref"].endswith("/repo")
+        assert body["proxy_token"] == PROXY_TOKEN
+        assert not str(body["proxy_token"]).startswith("sk-")
         return httpx.Response(
             200, json={"job_id": body["job_id"], "status": "ok", "output": '{"ok":true}', "duration_seconds": 0.1}
         )
@@ -48,14 +64,17 @@ async def test_container_executor_success(tmp_path: Path, monkeypatch: pytest.Mo
             output_path=out,
             model="gpt-test",
             timeout_seconds=30,
-            openai_api_key="sk-test",
+            openai_api_key="sk-real-must-not-be-sent",
+            owner_id="acme",
         )
     assert text == '{"ok":true}'
     assert out.read_text(encoding="utf-8") == '{"ok":true}'
 
 
 @pytest.mark.asyncio
-async def test_container_executor_fail_closed_http(tmp_path: Path) -> None:
+async def test_container_executor_fail_closed_http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_proxy_issuer(monkeypatch)
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, json={"detail": {"code": "CODEX_SANDBOX", "message": "boom"}})
 
@@ -114,9 +133,11 @@ def _touch(path: Path, text: str) -> Path:
 @pytest.mark.asyncio
 async def test_container_executor_http_timeout_derived(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When no http_client is injected, read timeout follows timeout_seconds + overhead."""
+    _stub_proxy_issuer(monkeypatch)
     from app.launcher.timeouts import launcher_http_timeout_seconds
 
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    _stub_proxy_issuer(monkeypatch)
     captured: dict = {}
 
     class FakeResponse:
@@ -163,6 +184,7 @@ async def test_container_executor_cancel_deletes_job_and_removes_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    _stub_proxy_issuer(monkeypatch)
     checkout = tmp_path / "co"
     checkout.mkdir()
     (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
@@ -220,6 +242,7 @@ async def test_container_executor_leaves_job_dir_when_cancel_not_confirmed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    _stub_proxy_issuer(monkeypatch)
     checkout = tmp_path / "co"
     checkout.mkdir()
     (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
@@ -268,7 +291,9 @@ async def test_container_executor_leaves_job_dir_when_cancel_not_confirmed(
 
 @pytest.mark.asyncio
 async def test_container_executor_timeout_triggers_cancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_proxy_issuer(monkeypatch)
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    _stub_proxy_issuer(monkeypatch)
     checkout = tmp_path / "co"
     checkout.mkdir()
     (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
@@ -311,6 +336,7 @@ async def test_container_executor_propagates_codex_timeout_from_launcher(
 ) -> None:
     """ARB-27-022: launcher detail code CODEX_TIMEOUT must surface (not remapped to SANDBOX)."""
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    _stub_proxy_issuer(monkeypatch)
     checkout = tmp_path / "co"
     checkout.mkdir()
     (checkout / "file.py").write_text("x=1\n", encoding="utf-8")

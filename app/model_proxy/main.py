@@ -32,11 +32,6 @@ class IssueTokenResponse(BaseModel):
     owner_id: str
 
 
-class RevokeTokenResponse(BaseModel):
-    job_id: str
-    revoked: bool
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = validate_settings()
@@ -117,25 +112,6 @@ def issue_token(
         expires_in=issued.expires_in,
         owner_id=issued.owner_id,
     )
-
-
-@app.delete("/internal/jobs/{job_id}/token", response_model=RevokeTokenResponse)
-def revoke_token(
-    job_id: str,
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> RevokeTokenResponse:
-    settings = _settings(request)
-    try:
-        require_issuer_auth(settings, authorization)
-    except HTTPException:
-        metrics.AUTH_FAIL.labels(kind="issuer").inc()
-        metrics.TOKEN_REVOKE.labels(result="auth_fail").inc()
-        raise
-    revoked = _store(request).revoke(job_id)
-    metrics.TOKEN_REVOKE.labels(result="ok" if revoked else "missing").inc()
-    metrics.ACTIVE_JOBS.set(_store(request).active_job_count())
-    return RevokeTokenResponse(job_id=job_id, revoked=revoked)
 
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])

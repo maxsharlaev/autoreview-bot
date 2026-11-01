@@ -477,7 +477,13 @@ async def _run_review(
     budget_notes: list[str] = []
     runner_backend = (config.codex.runner_backend or "").strip()
     if codex_fn is None:
-        codex_fn = get_review_executor(runner_backend).run
+        _executor = get_review_executor(runner_backend)
+        _owner_id = owner_id
+
+        async def _codex_with_owner(**kwargs):
+            return await _executor.run(owner_id=_owner_id, **kwargs)
+
+        codex_fn = _codex_with_owner
     if github is None:
         # M2: Only trust comment authors recorded for this owner
         previous_authors = tuple(

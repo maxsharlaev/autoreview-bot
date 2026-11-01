@@ -5,7 +5,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build
 # LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN use non-required interpolation (${VAR:-}) so this file can be
 # parsed without the vars; launcher / model-proxy fail closed if empty when used.
-# model-proxy holds real model keys (OPENAI_API_KEY / PROXY_OWNER_*); no Docker socket, no env_file.
+# model-proxy holds real model keys via model-proxy.env (env_file) + listed knobs; no Docker socket. Worker/launcher must not mount model-proxy.env.
 services:
   worker:
     environment:
@@ -46,6 +46,7 @@ services:
       OPR_LEASE_HEARTBEAT_SECONDS: "${OPR_LEASE_HEARTBEAT_SECONDS:-30}"
       OPR_REVIEW_ORPHAN_TTL_SECONDS: "${OPR_REVIEW_ORPHAN_TTL_SECONDS:-7200}"
       OPR_REVIEW_REAPER_INTERVAL_SECONDS: "${OPR_REVIEW_REAPER_INTERVAL_SECONDS:-300}"
+      OPR_MODEL_PROXY_BASE_URL: "${OPR_MODEL_PROXY_BASE_URL:-http://model-proxy:8081/v1}"
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       # High trust: this is the only service that mounts the Docker socket.
@@ -58,22 +59,33 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      model-proxy:
+        condition: service_started
 
   model-proxy:
     build:
       context: .
       dockerfile: Dockerfile.model-proxy
-    # No env_file / no Docker socket. Real model keys live only here (M3).
-    # Per-owner keys: add PROXY_OWNER_<ID>_OPENAI_API_KEY via host env / compose override
-    # (Compose only passes listed keys; OPENAI_API_KEY is the default upstream key).
+    # Real model keys live only here (M3). env_file injects arbitrary names from
+    # PROXY_OWNER_KEY_ENVS (e.g. ORG_A_HYPHEN_KEY) that Compose `environment:` cannot
+    # list ahead of time. Worker/launcher must NOT set env_file to model-proxy.env.
+    # Restrict file perms (chmod 600 / Windows ACLs). Copy from model-proxy.env.example.
+    # `required: false` so CI/parse works before the file exists; create it before up.
+    env_file:
+      - path: model-proxy.env
+        required: false
+    # No Docker socket. Listed keys below are non-secret knobs only.
+    # Do NOT list OPENAI_API_KEY / PROXY_OWNER_KEY_ENVS here: Compose `environment`
+    # overrides `env_file`, which would empty them when host env is unset (ARB34-006).
+    # Put those (and any PROXY_OWNER_KEY_ENVS-named vars) only in model-proxy.env.
     environment:
       PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
-      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       PROXY_PROVIDER: "${PROXY_PROVIDER:-openai}"
       PROXY_UPSTREAM_HOST: "${PROXY_UPSTREAM_HOST:-api.openai.com}"
       PROXY_UPSTREAM_SCHEME: "${PROXY_UPSTREAM_SCHEME:-https}"
       OPR_MAX_REVIEW_TIMEOUT_SECONDS: "${OPR_MAX_REVIEW_TIMEOUT_SECONDS:-600}"
-      PROXY_TOKEN_GRACE_SECONDS: "${PROXY_TOKEN_GRACE_SECONDS:-60}"
+      PROXY_TOKEN_GRACE_SECONDS: "${PROXY_TOKEN_GRACE_SECONDS:-30}"
+      PROXY_TOKEN_FIRST_USE_TTL_SECONDS: "${PROXY_TOKEN_FIRST_USE_TTL_SECONDS:-120}"
       PROXY_MAX_BODY_BYTES: "${PROXY_MAX_BODY_BYTES:-4194304}"
       PROXY_MAX_REQUESTS_PER_JOB: "${PROXY_MAX_REQUESTS_PER_JOB:-50}"
       PROXY_MAX_BYTES_PER_JOB: "${PROXY_MAX_BYTES_PER_JOB:-16777216}"
@@ -85,6 +97,7 @@ services:
     networks:
       - internal
       - review_egress
+      - proxy_egress
 
 volumes:
   opr_checkouts:
@@ -93,7 +106,10 @@ volumes:
 networks:
   review_egress:
     name: autoreview_review_egress
-    # Review containers join this network to reach model-proxy only (PR3 wiring).
-    # model-proxy also joins internal + review_egress; it alone reaches the upstream API.
-    # Host firewall / cloud SG should still restrict egress from review containers to the
-    # proxy (and from the proxy to the upstream model host).
+    # Review containers + model-proxy only (no external routes). Containers cannot
+    # reach the public internet; they talk to model-proxy by Compose DNS.
+    internal: true
+  proxy_egress:
+    name: autoreview_proxy_egress
+    # model-proxy alone uses this network to reach the upstream model API.
+    # Host firewall / cloud SG should still restrict egress to the upstream host.

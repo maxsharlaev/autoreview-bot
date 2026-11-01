@@ -148,6 +148,8 @@ features:
 1. Склонируйте репозиторий на хост; создайте `.env` и `config.yaml`, как описано выше.
 2. Проверьте, что Postgres/Redis не опубликованы на хосте, `8000` доступен reverse proxy через loopback, а `9100` — только внутри Docker-сети.
 3. `./scripts/stack.ps1 up` (или `./scripts/stack.sh up`). Дождитесь `migrate` (exit 0), затем `api` и `worker` в состоянии Up. Для `codex.runner_backend: container`: задайте `LAUNCHER_TOKEN` в `.env`, соберите review-образ (`docker build -f Dockerfile.review -t opr-review:local .`), затем `./scripts/stack.ps1 up -Container` (или `./scripts/stack.sh up --container`). Альтернатива: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`.
+Для `container` + model-proxy (M3): создайте `model-proxy.env` из `model-proxy.env.example` (ограниченные права; не монтировать на worker/launcher). Worker, launcher и model-proxy обновляйте после drain вместе — см. [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-без-rolling-mix).
+
 4. Проверки с хоста или из внутренней сети:
 
    ```bash

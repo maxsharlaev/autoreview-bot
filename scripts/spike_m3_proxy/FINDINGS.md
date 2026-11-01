@@ -47,6 +47,7 @@ supports_websockets = false               # explicit; avoid WS upgrade noise
 
 - Fake proxy responses were deliberately incomplete; Codex exited 0 with empty agent message after SSE deltas — enough to prove routing/auth/stream shape, not full protocol compatibility. Next PR needs a Responses-shaped stream that Codex accepts end-to-end.
 - Built-in provider may still attempt ChatGPT catalog refresh unless overridden; custom provider avoided that in this run.
+- **PR3:** No reliable Codex 0.164.0 config knob found to disable the chatgpt.com model-catalog fetch beyond using a custom `model_providers.*` entry (which avoided catalog hits here). Container wiring relies on that custom provider plus the internal-only `review_egress` network (no internet).
 - Re-run: start `fake_proxy.py` on Docker network, run `opr-review` with configs under `workspace/home_*` (see comments in `fake_proxy.py`).
 
 ## Experiments

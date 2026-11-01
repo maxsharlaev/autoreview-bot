@@ -153,14 +153,17 @@ async def test_e2e_volume_subpath_staging_to_output(e2e_stack) -> None:
     # because the shared volume lives in Docker, not on the Windows host path).
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Model-Api-Key": "sk-e2e-not-a-real-secret",
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{e2e_stack['url']}/v1/reviews",
             headers=headers,
-            json={"job_id": job_id, "checkout_ref": f"{job_id}/repo"},
+            json={
+                "job_id": job_id,
+                "checkout_ref": f"{job_id}/repo",
+                "proxy_token": "opr_job_e2e_stub_token_not_a_secret",
+            },
         )
     assert response.status_code == 200, response.text[:500]
     data = response.json()

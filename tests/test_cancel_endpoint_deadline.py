@@ -44,8 +44,11 @@ def test_delete_returns_unconfirmed_when_cancel_work_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Endpoint must not wait forever for stuck cancel work (AR-030-004)."""
+    from app.launcher import cancel_scheduler as cs
+
     client, token = cancel_app
-    jid = "a" * 32
+    cs._reset_for_tests()
+    jid = "dd01" + ("a" * 28)
     started_work = threading.Event()
     release_work = threading.Event()
 
@@ -56,22 +59,25 @@ def test_delete_returns_unconfirmed_when_cancel_work_blocks(
 
     monkeypatch.setattr("app.launcher.jobs.cancel_review_job", blocking_cancel)
 
-    started = time.monotonic()
-    response = client.delete(f"/v1/jobs/{jid}", headers={"Authorization": f"Bearer {token}"})
-    elapsed = time.monotonic() - started
+    try:
+        started = time.monotonic()
+        response = client.delete(f"/v1/jobs/{jid}", headers={"Authorization": f"Bearer {token}"})
+        elapsed = time.monotonic() - started
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["job_id"] == jid
-    assert body["confirmed"] is False
-    assert body["removed"] == 0
-    assert elapsed < launcher_cancel_deadline_seconds() + 0.75
-    assert elapsed < WORKER_CANCEL_HTTP_READ_SECONDS
-    assert started_work.wait(timeout=2)
-    assert lifecycle.is_cancelled(jid)
-    release_work.set()
-    # Give the pool thread a moment to finish after release.
-    time.sleep(0.05)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["job_id"] == jid
+        assert body["confirmed"] is False
+        assert body["removed"] == 0
+        assert elapsed < launcher_cancel_deadline_seconds() + 0.75
+        assert elapsed < WORKER_CANCEL_HTTP_READ_SECONDS
+        assert started_work.wait(timeout=2)
+        assert lifecycle.is_cancelled(jid)
+    finally:
+        release_work.set()
+        cs._reset_for_tests()
+        # Give the pool thread a moment to finish after release.
+        time.sleep(0.05)
 
 
 def test_delete_returns_before_worker_timeout_on_blocked_dns(

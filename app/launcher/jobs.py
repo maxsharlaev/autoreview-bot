@@ -95,12 +95,14 @@ def run_review_job(
     *,
     job_id: str,
     checkout_ref: str,
-    model_api_key: str,
+    proxy_token: str,
     client: DockerClient | None = None,
 ) -> dict:
     """Create, start, wait, remove a review container. Returns result metadata."""
-    if not (model_api_key or "").strip():
-        raise LauncherJobError("CODEX_SANDBOX", "model api key missing")
+    if not (proxy_token or "").strip():
+        raise LauncherJobError("CODEX_SANDBOX", "proxy token missing")
+    if not str(proxy_token).strip().startswith("opr_job_"):
+        raise LauncherJobError("CODEX_SANDBOX", "proxy token must be an opr_job_ bearer")
     try:
         lifecycle.accept(job_id)
     except RuntimeError as exc:
@@ -145,6 +147,15 @@ def run_review_job(
             schema_subpath=_volume_subpath(base, schema),
         )
         assert_safe_host_config(host_config)
+        from app.launcher.codex_config import render_opr_proxy_config
+
+        # Seed CODEX_HOME config on the RW /work mount (entrypoint prefers this file).
+        codex_cfg = work / "codex-config.toml"
+        codex_cfg.write_text(render_opr_proxy_config(), encoding="utf-8")
+        try:
+            os.chmod(codex_cfg, 0o644)
+        except OSError:
+            pass
         config = build_container_config(
             job_id=job_id,
             host_config=host_config,
@@ -154,7 +165,7 @@ def run_review_job(
             sandbox=sandbox,
             approval_policy=approval_policy,
             allow_unsandboxed=allow_unsandboxed,
-            model_api_key=model_api_key.strip(),
+            proxy_token=proxy_token.strip(),
         )
         assert_safe_host_config(config["HostConfig"])
 
@@ -179,7 +190,7 @@ def run_review_job(
                 ) from exc
             raise LauncherJobError("CODEX_SANDBOX", f"docker error: {exc}") from exc
         except RuntimeError as exc:
-            # Lifecycle cancel signals (DockerApiError is also a RuntimeError — handled above).
+            # Lifecycle cancel signals (DockerApiError is also a RuntimeError ??? handled above).
             cancelled = "cancelled" in str(exc).lower()
             if cancelled:
                 raise LauncherJobError("CODEX_SANDBOX", f"review cancelled: {exc}") from exc
@@ -345,6 +356,8 @@ def cancel_review_job(*, job_id: str, client: DockerClient | None = None) -> dic
         else:
             leftover = ["?"]
         confirmed = (not leftover) and (not lifecycle.launch_active(jid))
+        # Tokens are not revoked; TTL covers residual.
+        # Reaper + worker finally remain idempotent backstops.
         return {"job_id": jid, "removed": removed, "confirmed": confirmed}
     finally:
         if owns:

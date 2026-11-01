@@ -10,6 +10,8 @@ cancels coalesce; the reaper still reclaims leftovers.
 AR-030-005: ``add_done_callback`` must run *outside* ``_INFLIGHT_LOCK``. A non-reentrant
 ``threading.Lock`` deadlocks when the future is already done and the callback runs
 synchronously (``_clear_inflight`` would re-acquire the same lock).
+
+``_CANCEL_POOL`` is exclusive to Docker cancellation.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from app.launcher.timeouts import launcher_cancel_deadline_seconds
 
 logger = logging.getLogger(__name__)
 
-# Long-lived pool — never created per-request (avoids executor shutdown joins).
+# Long-lived pool: Docker cancel only.
 _CANCEL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="opr-cancel")
 _INFLIGHT: dict[str, Future] = {}
 _INFLIGHT_LOCK = threading.Lock()  # non-reentrant; never call callbacks while held
@@ -53,7 +55,7 @@ def _submit_cancel(job_id: str, *, client: Any | None) -> Future:
         fut = _CANCEL_POOL.submit(_run)
         _INFLIGHT[job_id] = fut
     # Register callback *after* releasing the lock (AR-030-005).
-    # If ``fut`` is already done, the callback runs synchronously here — safe.
+    # If ``fut`` is already done, the callback runs synchronously here ??? safe.
     fut.add_done_callback(lambda f, jid=job_id: _clear_inflight(jid, f))
     return fut
 
@@ -73,11 +75,18 @@ def cancel_review_job_bounded(*, job_id: str, client: Any | None = None) -> dict
     wait_s = float(launcher_cancel_deadline_seconds())
     fut = _submit_cancel(jid, client=client)
     try:
-        return fut.result(timeout=wait_s)
+        result = fut.result(timeout=wait_s)
     except FuturesTimeoutError:
         logger.warning(
             "cancel still running after deadline job=%s wait_s=%s; returning unconfirmed",
             jid,
             wait_s,
         )
-        return {"job_id": jid, "removed": 0, "confirmed": False}
+        result = {"job_id": jid, "removed": 0, "confirmed": False}
+    return result
+
+
+def _reset_for_tests() -> None:
+    """Drop in-flight cancel map (tests only; does not shut down the pool)."""
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.clear()

@@ -36,6 +36,9 @@ class FakeDocker:
     def logs(self, container_id: str, *, tail: int = 200) -> str:
         return "ok"
 
+    def kill_container(self, container_id: str, *, timeout: float | None = None) -> None:
+        self.removed.append(container_id)
+
     def remove_container(self, container_id: str, *, force: bool = True) -> None:
         self.removed.append(container_id)
 
@@ -84,7 +87,7 @@ def test_run_review_job_create_spec(staged, monkeypatch: pytest.MonkeyPatch) -> 
     result = run_review_job(
         job_id=job_id,
         checkout_ref=ref,
-        model_api_key="sk-test",
+        proxy_token="opr_job_test_token_ok",
         client=fake,  # type: ignore[arg-type]
     )
     assert result["status"] == "ok"
@@ -112,14 +115,14 @@ def test_run_review_job_fail_closed_on_docker_error(staged) -> None:
             raise DockerApiError("nope", status_code=500)
 
     with pytest.raises(LauncherJobError, match="docker error") as excinfo:
-        run_review_job(job_id=job_id, checkout_ref=ref, model_api_key="sk", client=Boom())  # type: ignore[arg-type]
+        run_review_job(job_id=job_id, checkout_ref=ref, proxy_token="opr_job_test_token_ok", client=Boom())  # type: ignore[arg-type]
     assert excinfo.value.code == "CODEX_SANDBOX"
 
 
 def test_run_review_job_rejects_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
     with pytest.raises(LauncherJobError):
-        run_review_job(job_id="abc", checkout_ref="../etc", model_api_key="sk", client=FakeDocker())  # type: ignore[arg-type]
+        run_review_job(job_id="abc", checkout_ref="../etc", proxy_token="opr_job_test_token_ok", client=FakeDocker())  # type: ignore[arg-type]
 
 
 def test_run_review_job_allows_short_checkout_ttl_with_leases(staged, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,7 +146,7 @@ def test_run_review_job_allows_short_checkout_ttl_with_leases(staged, monkeypatc
     result = run_review_job(
         job_id=job_id,
         checkout_ref=ref,
-        model_api_key="sk-test",
+        proxy_token="opr_job_test_token_ok",
         client=fake,  # type: ignore[arg-type]
     )
     assert result["status"] == "ok"
@@ -161,7 +164,7 @@ def test_run_review_job_rejects_timeout_above_max(staged, monkeypatch: pytest.Mo
         run_review_job(
             job_id=job_id,
             checkout_ref=ref,
-            model_api_key="sk-test",
+            proxy_token="opr_job_test_token_ok",
             client=FakeDocker(),
         )
 
@@ -174,5 +177,5 @@ def test_run_review_job_maps_exit_44_to_codex_timeout(staged) -> None:
     fake.logs = lambda container_id, tail=200: "opr-review: timed out after 30s"  # type: ignore[method-assign]
 
     with pytest.raises(LauncherJobError, match="timed out") as excinfo:
-        run_review_job(job_id=job_id, checkout_ref=ref, model_api_key="sk", client=fake)  # type: ignore[arg-type]
+        run_review_job(job_id=job_id, checkout_ref=ref, proxy_token="opr_job_test_token_ok", client=fake)  # type: ignore[arg-type]
     assert excinfo.value.code == "CODEX_TIMEOUT"

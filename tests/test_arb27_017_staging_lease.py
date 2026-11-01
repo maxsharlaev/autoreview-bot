@@ -42,6 +42,11 @@ async def test_slow_staging_keeps_job_dir_under_concurrent_reaper(
 
     monkeypatch.setattr(ce, "safe_copytree", slow_copy)
 
+    async def _issue(*, job_id: str, timeout_seconds: int, owner_id: str = "", **kwargs):
+        return "opr_job_test_token_ok"
+
+    monkeypatch.setattr(ce, "issue_job_token", _issue)
+
     def handler(request: httpx.Request) -> httpx.Response:
         import json
 

@@ -35,6 +35,7 @@ def test_cancel_review_job_idempotent_when_empty() -> None:
 
 
 def test_cancel_review_job_kills_and_removes() -> None:
+    """Cancel kills and removes containers (reaper remains backstop)."""
     killed: list[str] = []
     removed: list[str] = []
     alive = [{"Id": "cidabcdef1234", "Labels": {"opr.job_id": "c" * 32}}]

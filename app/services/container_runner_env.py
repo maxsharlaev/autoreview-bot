@@ -35,6 +35,17 @@ def ensure_container_runner_env(
             "codex.runner_backend=container requires LAUNCHER_TOKEN "
             "(>= 16 chars) shared with the launcher service; refusing to start"
         )
+    issuer = os.environ.get("PROXY_ISSUER_TOKEN", "").strip()
+    if len(issuer) < 16:
+        raise RuntimeError(
+            "codex.runner_backend=container requires PROXY_ISSUER_TOKEN "
+            "(>= 16 chars) shared with model-proxy; refusing to start"
+        )
+    proxy_url = os.environ.get("MODEL_PROXY_URL", "").strip()
+    if not proxy_url:
+        raise RuntimeError(
+            "codex.runner_backend=container requires MODEL_PROXY_URL (model-proxy issuer base URL); refusing to start"
+        )
     if timeout_seconds is not None and worker_job_timeout is not None:
         validate_codex_timeout_against_arq(
             timeout_seconds=timeout_seconds,

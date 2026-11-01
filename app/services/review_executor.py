@@ -28,6 +28,7 @@ class ReviewExecutor(Protocol):
         model: str,
         timeout_seconds: int,
         openai_api_key: str,
+        owner_id: str = "",
         reasoning_effort: str = "medium",
         sandbox: str = "read-only",
         approval_policy: str = "never",
@@ -48,11 +49,13 @@ class InProcessReviewExecutor:
         model: str,
         timeout_seconds: int,
         openai_api_key: str,
+        owner_id: str = "",
         reasoning_effort: str = "medium",
         sandbox: str = "read-only",
         approval_policy: str = "never",
         allow_unsandboxed: bool = False,
     ) -> str:
+        _ = owner_id  # container-only; in_process uses openai_api_key directly
         # Defense in depth: drop escaping symlinks before in-process Codex sees the tree.
         # Off the event loop so lease heartbeats / other async work are not starved.
         await asyncio.to_thread(neutralize_escaping_symlinks, checkout)

@@ -1,4 +1,4 @@
-"""Per-job token issuance, hashing, TTL, and revocation."""
+"""Per-job token issuance, hashing, and first-use TTL (no revocation)."""
 
 from __future__ import annotations
 
@@ -23,12 +23,14 @@ class JobTokenRecord:
     token_hash: str
     job_id: str
     owner_id: str
+    issued_at: float
     expires_at: float
+    first_used_at: float | None = None
     req_count: int = 0
     bytes_in: int = 0
     bytes_out: int = 0
     active_streams: int = 0
-    # Thread-safe signal: set on revoke / expiry so async waiters wake immediately
+    # Thread-safe signal: set on expiry so async waiters wake immediately
     # even when upstream is silent (ARB32-006).
     invalidated: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
@@ -38,6 +40,7 @@ class IssuedToken:
     job_id: str
     token: str
     expires_in: int
+    expires_at: float
     owner_id: str
 
 
@@ -63,6 +66,14 @@ class TokenStore:
             if rec is not None:
                 self._drop_record(rec)
 
+    def _mark_first_use_locked(self, rec: JobTokenRecord, now: float) -> None:
+        """Fix first_used_at once and extend expiry. Caller holds ``_lock``."""
+        if rec.first_used_at is not None:
+            return
+        rec.first_used_at = now
+        # Post-first-use lifetime: max review timeout + grace (ARB34-017).
+        rec.expires_at = now + float(self._settings.max_token_ttl_seconds)
+
     @staticmethod
     def hash_token(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -83,10 +94,8 @@ class TokenStore:
                 f"timeout_seconds ({timeout}) exceeds OPR_MAX_REVIEW_TIMEOUT_SECONDS "
                 f"({self._settings.max_review_timeout_seconds})"
             )
-        ttl = min(
-            timeout + int(self._settings.token_grace_seconds),
-            self._settings.max_token_ttl_seconds,
-        )
+        # Unused lifetime: issued_at + first-use TTL (ARB34-017).
+        unused_ttl = max(1, int(self._settings.token_first_use_ttl_seconds))
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
         token_hash = self.hash_token(token)
         now = time.time()
@@ -101,31 +110,25 @@ class TokenStore:
                 token_hash=token_hash,
                 job_id=jid,
                 owner_id=(owner_id or "").strip(),
-                expires_at=now + float(ttl),
+                issued_at=now,
+                expires_at=now + float(unused_ttl),
+                first_used_at=None,
             )
             self._by_hash[token_hash] = rec
             self._by_job[jid] = token_hash
         logger.info(
-            "model_proxy token issued job_id=%s owner_id=%s ttl=%s",
+            "model_proxy token issued job_id=%s owner_id=%s first_use_ttl=%s",
             jid,
             (owner_id or "").strip() or "-",
-            ttl,
+            unused_ttl,
         )
-        return IssuedToken(job_id=jid, token=token, expires_in=ttl, owner_id=rec.owner_id)
-
-    def revoke(self, job_id: str) -> bool:
-        jid = (job_id or "").strip()
-        with self._lock:
-            h = self._by_job.get(jid)
-            if not h:
-                return False
-            rec = self._by_hash.get(h)
-            if rec is None:
-                self._by_job.pop(jid, None)
-                return False
-            self._drop_record(rec)
-        logger.info("model_proxy token revoked job_id=%s", jid)
-        return True
+        return IssuedToken(
+            job_id=jid,
+            token=token,
+            expires_in=unused_ttl,
+            expires_at=float(rec.expires_at),
+            owner_id=rec.owner_id,
+        )
 
     def resolve(self, token: str) -> JobTokenRecord | None:
         raw = (token or "").strip()
@@ -138,6 +141,12 @@ class TokenStore:
             rec = self._by_hash.get(h)
             if rec is None:
                 return None
+            if rec.expires_at <= now or rec.invalidated.is_set():
+                self._drop_record(rec)
+                return None
+            # First authenticated use: atomically fix first_used_at and extend TTL.
+            self._mark_first_use_locked(rec, now)
+            # Re-check after extension (clock / concurrent edge).
             if rec.expires_at <= now or rec.invalidated.is_set():
                 self._drop_record(rec)
                 return None
@@ -213,7 +222,7 @@ class TokenStore:
     def end_request(self, rec: JobTokenRecord, *, refund_request: bool = False) -> None:
         """Release one concurrent slot; optionally refund request count (upload abort).
 
-        Safe to call when the record was already dropped (revoke/expiry): no-op.
+        Safe to call when the record was already dropped (expiry): no-op.
         Double-release floors ``active_streams`` at 0.
         """
         with self._lock:
