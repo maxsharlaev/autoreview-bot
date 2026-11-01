@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+- **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, model-catalog traffic via the custom `opr_proxy` provider, host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
+
 ### Fixed
 - **M3 token lifetime / no revoke (ARB34-017/018):** job tokens are **not revoked**. Unused tokens expire at `issued_at + PROXY_TOKEN_FIRST_USE_TTL_SECONDS` (default **120s**). On first authenticated use the proxy atomically fixes `first_used_at`; expiry becomes `first_used_at + OPR_MAX_REVIEW_TIMEOUT_SECONDS + PROXY_TOKEN_GRACE_SECONDS` (grace default **30s**). Removed the revoke scheduler, cancel/finish/reaper revoke paths, worker revoke client, and proxy `DELETE /internal/jobs/{job_id}/token`. Security relies on TTL + internal `review_egress` + per-job limits; residual risk documented in SECURITY / EN+RU docs.
 - **ARB34-008:** launcher reaper schedules proxy revokes via the bounded revoke scheduler (wall-clock timeout) instead of inline `revoke_job_token_sync`, so a slow-dripping proxy cannot stall container/checkout cleanup.
