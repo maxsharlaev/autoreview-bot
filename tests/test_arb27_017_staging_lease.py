@@ -11,6 +11,7 @@ import httpx
 import pytest
 from app.launcher.reaper import reap_checkout_orphans
 from app.services.container_executor import ContainerReviewExecutor
+from app.services.model_proxy_client import IssuedJobToken
 
 
 @pytest.mark.asyncio
@@ -43,7 +44,7 @@ async def test_slow_staging_keeps_job_dir_under_concurrent_reaper(
     monkeypatch.setattr(ce, "safe_copytree", slow_copy)
 
     async def _issue(*, job_id: str, timeout_seconds: int, owner_id: str = "", **kwargs):
-        return "opr_job_test_token_ok"
+        return IssuedJobToken(token="opr_job_test_token_ok", expires_at=time.time() + 600)
 
     async def _revoke(*, job_id: str, **kwargs):
         from app.services.model_proxy_client import RevokeAttemptOutcome

@@ -64,6 +64,19 @@ def _remove_job_dir(job_dir: Path) -> None:
     remove_directory_lease_file(job_dir)
 
 
+def _patch_job_json_token_expires(job_dir: Path, token_expires_unix: int | float) -> None:
+    """Write `token_expires_unix` into staged job.json (ARB34-014)."""
+    path = job_dir / "job.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        data = {}
+    data["token_expires_unix"] = int(token_expires_unix)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 class ContainerReviewExecutor:
     """Talks to the dedicated launcher; never holds the Docker socket itself.
 
@@ -135,7 +148,7 @@ class ContainerReviewExecutor:
                 allow_unsandboxed,
             )
             try:
-                proxy_token = await issue_job_token(
+                issued = await issue_job_token(
                     job_id=job_id,
                     timeout_seconds=timeout_seconds,
                     owner_id=owner_id or "",
@@ -143,6 +156,14 @@ class ContainerReviewExecutor:
                 )
             except ModelProxyIssuerError as exc:
                 raise CodexRunnerError(CODEX_SANDBOX, f"model-proxy token issue failed: {exc}") from exc
+            proxy_token = issued.token
+            token_expires_unix = int(issued.expires_at)
+            # Record absolute expiry after issuance (ARB34-014); created_unix stays for diagnostics.
+            await asyncio.to_thread(
+                _patch_job_json_token_expires,
+                job_dir,
+                token_expires_unix,
+            )
             checkout_ref = f"{job_id}/repo"
             try:
                 text = await self._call_launcher(
@@ -150,6 +171,7 @@ class ContainerReviewExecutor:
                     checkout_ref=checkout_ref,
                     proxy_token=proxy_token,
                     timeout_seconds=timeout_seconds,
+                    token_expires_unix=token_expires_unix,
                 )
             except asyncio.CancelledError:
                 # ARQ/job cancellation: ask launcher to kill the container, then drop
@@ -293,12 +315,26 @@ class ContainerReviewExecutor:
         # Staging may be removed only when the launcher confirms nothing remains.
         return bool(isinstance(data, dict) and data.get("confirmed") is True)
 
-    async def _call_launcher(self, *, job_id: str, checkout_ref: str, proxy_token: str, timeout_seconds: int) -> str:
+    async def _call_launcher(
+        self,
+        *,
+        job_id: str,
+        checkout_ref: str,
+        proxy_token: str,
+        timeout_seconds: int,
+        token_expires_unix: int | float | None = None,
+    ) -> str:
         headers = {
             "Authorization": f"Bearer {self._launcher_token}",
             "Content-Type": "application/json",
         }
-        payload = {"job_id": job_id, "checkout_ref": checkout_ref, "proxy_token": proxy_token}
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "checkout_ref": checkout_ref,
+            "proxy_token": proxy_token,
+        }
+        if token_expires_unix is not None:
+            payload["token_expires_unix"] = int(token_expires_unix)
         owns = self._http_client is None
         read_timeout = launcher_http_timeout_seconds(timeout_seconds)
         client = self._http_client or httpx.AsyncClient(

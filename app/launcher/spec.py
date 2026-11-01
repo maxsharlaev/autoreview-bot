@@ -192,6 +192,7 @@ def build_container_config(
     approval_policy: str,
     allow_unsandboxed: bool,
     proxy_token: str,
+    token_expires_unix: float | None = None,
 ) -> dict[str, Any]:
     """Full ContainerCreate body. Command/entrypoint come from the image.
 
@@ -210,16 +211,18 @@ def build_container_config(
         "TERM=dumb",
         "HOME=/home/review",
     ]
+    labels = {
+        REVIEW_LABEL: REVIEW_LABEL_VALUE,
+        "opr.job_id": job_id,
+        # Diagnostics / old-job fallback; revoke window prefers opr.token_expires_unix (ARB34-014).
+        "opr.created_unix": str(int(time.time())),
+    }
+    if token_expires_unix is not None:
+        labels["opr.token_expires_unix"] = str(int(float(token_expires_unix)))
     return {
         "Image": review_image(),
         "Env": env,
-        "Labels": {
-            REVIEW_LABEL: REVIEW_LABEL_VALUE,
-            "opr.job_id": job_id,
-            # Unix creation time for revoke retry window (ARB34-009); Docker
-            # Created is also used as a fallback by the reaper.
-            "opr.created_unix": str(int(time.time())),
-        },
+        "Labels": labels,
         "HostConfig": host_config,
         "User": "1000:1000",
         "WorkingDir": "/checkout",

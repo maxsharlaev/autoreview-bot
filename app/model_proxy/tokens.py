@@ -38,6 +38,7 @@ class IssuedToken:
     job_id: str
     token: str
     expires_in: int
+    expires_at: float  # absolute unix seconds (ARB34-014)
     owner_id: str
 
 
@@ -111,7 +112,13 @@ class TokenStore:
             (owner_id or "").strip() or "-",
             ttl,
         )
-        return IssuedToken(job_id=jid, token=token, expires_in=ttl, owner_id=rec.owner_id)
+        return IssuedToken(
+            job_id=jid,
+            token=token,
+            expires_in=ttl,
+            expires_at=float(rec.expires_at),
+            owner_id=rec.owner_id,
+        )
 
     def revoke(self, job_id: str) -> bool:
         jid = (job_id or "").strip()

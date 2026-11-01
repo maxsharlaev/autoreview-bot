@@ -96,6 +96,7 @@ def run_review_job(
     job_id: str,
     checkout_ref: str,
     proxy_token: str,
+    token_expires_unix: float | None = None,
     client: DockerClient | None = None,
 ) -> dict:
     """Create, start, wait; stop (do not remove) the review container. Returns result metadata."""
@@ -111,6 +112,7 @@ def run_review_job(
     cancelled = False
     container_id = ""
     created_at_unix: float | None = None
+    expires_unix: float | None = token_expires_unix
     owns = client is None
     docker = client or DockerClient()
     started = time.monotonic()
@@ -126,6 +128,11 @@ def run_review_job(
             created_at_unix = float(meta["created_unix"]) if meta.get("created_unix") is not None else time.time()
         except (TypeError, ValueError):
             created_at_unix = time.time()
+        if expires_unix is None and meta.get("token_expires_unix") is not None:
+            try:
+                expires_unix = float(meta["token_expires_unix"])
+            except (TypeError, ValueError):
+                expires_unix = None
         model = str(meta.get("model") or os.environ.get("OPR_DEFAULT_MODEL") or "gpt-5.6-sol")
         timeout_seconds = int(meta.get("timeout_seconds") or 600)
         max_timeout = max_review_timeout_seconds()
@@ -171,6 +178,7 @@ def run_review_job(
             approval_policy=approval_policy,
             allow_unsandboxed=allow_unsandboxed,
             proxy_token=proxy_token.strip(),
+            token_expires_unix=expires_unix,
         )
         assert_safe_host_config(config["HostConfig"])
 
@@ -246,10 +254,12 @@ def run_review_job(
         try:
             from app.launcher.revoke_scheduler import note_revoke_needed, schedule_proxy_token_revoke
 
-            cat = created_at_unix
-            if cat is None:
-                cat = time.time()
-            if not schedule_proxy_token_revoke(job_id, created_at=float(cat)):
+            cat = created_at_unix if created_at_unix is not None else time.time()
+            if not schedule_proxy_token_revoke(
+                job_id,
+                created_at=float(cat),
+                expires_at=float(expires_unix) if expires_unix is not None else None,
+            ):
                 note_revoke_needed(job_id)
                 logger.warning("finish revoke schedule rejected job=%s (queue full)", job_id)
         except Exception:  # noqa: BLE001 — never fail the job response on revoke schedule

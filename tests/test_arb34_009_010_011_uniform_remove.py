@@ -14,7 +14,7 @@ from app.launcher.timeouts import (
     WORKER_CANCEL_HTTP_READ_SECONDS,
     launcher_cancel_deadline_seconds,
 )
-from app.services.model_proxy_client import RevokeAttemptOutcome
+from app.services.model_proxy_client import IssuedJobToken, RevokeAttemptOutcome
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
@@ -40,6 +40,7 @@ def test_config_error_keeps_evidence_until_window(
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
     monkeypatch.setenv("LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS", "3600")
     monkeypatch.setenv("LAUNCHER_REVOKE_CONFIG_ERROR_BACKOFF_SECONDS", "5")
+    monkeypatch.setenv("LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS", "0")
     monkeypatch.setenv("LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS", "1")
     monkeypatch.setattr(reaper_mod, "orphan_ttl_seconds", lambda: 1)
     monkeypatch.setattr(reaper_mod.lifecycle, "launch_active", lambda jid: False)
@@ -54,7 +55,10 @@ def test_config_error_keeps_evidence_until_window(
     created = time.time() - 100
     keep_dir = tmp_path / job
     keep_dir.mkdir()
-    (keep_dir / "job.json").write_text(f'{{"created_unix": {int(created)}}}', encoding="utf-8")
+    (keep_dir / "job.json").write_text(
+        f'{{"created_unix": {int(created)}, "token_expires_unix": {int(created) + 3600}}}',
+        encoding="utf-8",
+    )
     os.utime(keep_dir, (created, created))
     containers = [
         {
@@ -66,6 +70,7 @@ def test_config_error_keeps_evidence_until_window(
                 "opr.review": "1",
                 "opr.job_id": job,
                 "opr.created_unix": str(int(created)),
+                "opr.token_expires_unix": str(int(created) + 3600),
             },
         }
     ]
@@ -106,12 +111,13 @@ def test_config_error_keeps_evidence_until_window(
                 "opr.review": "1",
                 "opr.job_id": "d" * 32,
                 "opr.created_unix": str(int(created_old)),
+                "opr.token_expires_unix": str(int(created_old)),
             },
         }
     )
     # Reset so status re-evaluates window from created_at
     rs._reset_for_tests()
-    assert rs.may_delete_after_revoke("d" * 32, created_at=created_old) is True
+    assert rs.may_delete_after_revoke("d" * 32, created_at=created_old, expires_at=created_old) is True
     removed.clear()
     reaper_mod.reap_once(client=FakeDocker())  # type: ignore[arg-type]
     assert "dddd" in removed
@@ -136,8 +142,8 @@ async def test_finish_keeps_job_dir_when_revoke_not_confirmed(
     output = tmp_path / "out.json"
     kept: list[Path] = []
 
-    async def fake_issue(**_kwargs: Any) -> str:
-        return "opr_job_test_token_ok"
+    async def fake_issue(**_kwargs: Any):
+        return IssuedJobToken(token="opr_job_test_token_ok", expires_at=time.time() + 600)
 
     async def fail_revoke(**_kwargs: Any) -> RevokeAttemptOutcome:
         return RevokeAttemptOutcome.TRANSIENT
@@ -197,8 +203,8 @@ async def test_finish_keeps_job_dir_on_revoke_timeout(
     schema.write_text("{}", encoding="utf-8")
     output = tmp_path / "out.json"
 
-    async def fake_issue(**_kwargs: Any) -> str:
-        return "opr_job_test_token_ok"
+    async def fake_issue(**_kwargs: Any):
+        return IssuedJobToken(token="opr_job_test_token_ok", expires_at=time.time() + 600)
 
     async def hang_revoke(**_kwargs: Any) -> RevokeAttemptOutcome:
         await asyncio.sleep(30)

@@ -5,9 +5,11 @@ around the async HTTP client. Pending work is bounded; ``schedule_proxy_token_re
 returns whether the job was accepted. Same ``job_id`` is deduped.
 
 Transient failures retry with exponential backoff until the revoke is confirmed
-or the revoke retry window elapses since the job **creation**
-time (container ``opr.created_unix`` / Docker Created, or checkout mtime).
-The window defaults to ``OPR_MAX_REVIEW_TIMEOUT_SECONDS + PROXY_TOKEN_GRACE_SECONDS``
+or the proxy token ``expires_at`` (+ clock-skew margin) elapses (ARB34-014).
+``expires_at`` comes from model-proxy issuance (label/job.json); the scheduler keeps
+the **latest** known deadline. Without ``expires_at``, fall back to issuance-receipt
++ full TTL when known; otherwise retain until the orphan TTL gate.
+Derived TTL defaults to ``OPR_MAX_REVIEW_TIMEOUT_SECONDS + PROXY_TOKEN_GRACE_SECONDS``
 (ARB34-013); an explicit ``LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS`` may only raise it.
 
 There are **no persistent tombstones**. Restart safety comes from leaving
@@ -40,6 +42,7 @@ DEFAULT_RETRY_SET_MAX = 256
 DEFAULT_STATUS_MAX = 512
 DEFAULT_CONFIRMED_PRUNE_SECONDS = 600.0
 DEFAULT_CONFIG_ERROR_BACKOFF_SECONDS = 60.0
+DEFAULT_CLOCK_SKEW_SECONDS = 30.0
 
 
 class RevokeJobStatus(StrEnum):
@@ -134,6 +137,17 @@ def ensure_revoke_retry_window_config() -> None:
         )
 
 
+def revoke_clock_skew_seconds() -> float:
+    """``LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS`` added to absolute token expiry (ARB34-014)."""
+    raw = os.environ.get("LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS", "").strip()
+    if not raw:
+        return float(DEFAULT_CLOCK_SKEW_SECONDS)
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(DEFAULT_CLOCK_SKEW_SECONDS)
+
+
 def _retry_initial_backoff_seconds() -> float:
     raw = os.environ.get("LAUNCHER_REVOKE_RETRY_INITIAL_BACKOFF_SECONDS", "").strip()
     if not raw:
@@ -217,7 +231,9 @@ _PENDING_LOCK = threading.Lock()
 _ACTIVE_JOBS: set[str] = set()
 _RETRY_NEEDED: dict[str, float] = {}
 _STATUS: dict[str, RevokeJobStatus] = {}
-_CREATED_AT: dict[str, float] = {}
+_CREATED_AT: dict[str, float] = {}  # diagnostic / weak fallback only
+_EXPIRES_AT: dict[str, float] = {}  # absolute token expiry (latest wins, ARB34-014)
+_ISSUED_AT: dict[str, float] = {}  # issuance-response receipt (latest wins)
 _CONFIRMED_AT: dict[str, float] = {}
 
 
@@ -248,14 +264,72 @@ def _clear_active(job_id: str) -> None:
 
 
 def _remember_created(job_id: str, created_at: float | None) -> float | None:
+    """Keep the **latest** creation/receipt anchor (conservative retention, ARB34-014)."""
     if created_at is None:
         return _CREATED_AT.get(job_id)
     cat = float(created_at)
     prev = _CREATED_AT.get(job_id)
-    if prev is None or cat < prev:
+    if prev is None or cat > prev:
         _CREATED_AT[job_id] = cat
         return cat
     return prev
+
+
+def _remember_expires(job_id: str, expires_at: float | None) -> float | None:
+    """Keep the **latest** absolute token expiry (most conservative deadline)."""
+    if expires_at is None:
+        return _EXPIRES_AT.get(job_id)
+    exp = float(expires_at)
+    prev = _EXPIRES_AT.get(job_id)
+    if prev is None or exp > prev:
+        _EXPIRES_AT[job_id] = exp
+        return exp
+    return prev
+
+
+def _remember_issued(job_id: str, issued_at: float | None) -> float | None:
+    """Keep the **latest** issuance-response receipt time for TTL fallback."""
+    if issued_at is None:
+        return _ISSUED_AT.get(job_id)
+    iss = float(issued_at)
+    prev = _ISSUED_AT.get(job_id)
+    if prev is None or iss > prev:
+        _ISSUED_AT[job_id] = iss
+        return iss
+    return prev
+
+
+def effective_token_expires_at(
+    job_id: str,
+    *,
+    expires_at: float | None = None,
+    issued_at: float | None = None,
+) -> float | None:
+    """Absolute unix when the token is considered dead (before skew), or None if unknown."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return None
+    with _PENDING_LOCK:
+        exp = _remember_expires(jid, expires_at)
+        if exp is not None:
+            return float(exp)
+        iss = _remember_issued(jid, issued_at)
+        if iss is not None:
+            return float(iss) + float(revoke_retry_window_seconds())
+        return None
+
+
+def revoke_delete_deadline_unix(
+    job_id: str,
+    *,
+    expires_at: float | None = None,
+    issued_at: float | None = None,
+) -> float | None:
+    """Unix time when evidence may be deleted for window expiry; None if unknown."""
+    exp = effective_token_expires_at(job_id, expires_at=expires_at, issued_at=issued_at)
+    if exp is None:
+        return None
+    return float(exp) + float(revoke_clock_skew_seconds())
 
 
 def _prune_status_locked(now_mono: float) -> None:
@@ -265,10 +339,14 @@ def _prune_status_locked(now_mono: float) -> None:
         if _STATUS.get(jid) is RevokeJobStatus.CONFIRMED:
             _STATUS.pop(jid, None)
             _CREATED_AT.pop(jid, None)
+            _EXPIRES_AT.pop(jid, None)
+            _ISSUED_AT.pop(jid, None)
     while len(_STATUS) > DEFAULT_STATUS_MAX:
         confirmed = [j for j, s in _STATUS.items() if s is RevokeJobStatus.CONFIRMED]
         if confirmed:
             victim = confirmed[0]
+        elif _EXPIRES_AT:
+            victim = min(_EXPIRES_AT, key=_EXPIRES_AT.get)  # type: ignore[arg-type]
         elif _CREATED_AT:
             victim = min(_CREATED_AT, key=_CREATED_AT.get)  # type: ignore[arg-type]
         else:
@@ -276,6 +354,8 @@ def _prune_status_locked(now_mono: float) -> None:
         _STATUS.pop(victim, None)
         _CONFIRMED_AT.pop(victim, None)
         _CREATED_AT.pop(victim, None)
+        _EXPIRES_AT.pop(victim, None)
+        _ISSUED_AT.pop(victim, None)
 
 
 def _set_status(job_id: str, status: RevokeJobStatus) -> None:
@@ -290,6 +370,8 @@ def revoke_status(
     job_id: str,
     *,
     created_at: float | None = None,
+    expires_at: float | None = None,
+    issued_at: float | None = None,
     now: float | None = None,
 ) -> RevokeJobStatus:
     """Non-blocking revoke status for ``job_id`` (reaper polls each pass)."""
@@ -297,15 +379,27 @@ def revoke_status(
     if not jid:
         return RevokeJobStatus.CONFIRMED
     clock = time.time() if now is None else float(now)
-    window = revoke_retry_window_seconds()
     with _PENDING_LOCK:
         if created_at is not None:
             _remember_created(jid, created_at)
-        cat = _CREATED_AT.get(jid, created_at)
+        if expires_at is not None:
+            _remember_expires(jid, expires_at)
+        if issued_at is not None:
+            _remember_issued(jid, issued_at)
         st = _STATUS.get(jid)
         if st is RevokeJobStatus.CONFIRMED:
             return RevokeJobStatus.CONFIRMED
-        if cat is not None and clock >= float(cat) + window:
+        # Deadline from expires_at (+skew) or issued_at+TTL; never from bare created_unix.
+        exp = _EXPIRES_AT.get(jid)
+        if exp is not None:
+            deadline = float(exp) + float(revoke_clock_skew_seconds())
+        else:
+            iss = _ISSUED_AT.get(jid)
+            if iss is not None:
+                deadline = float(iss) + float(revoke_retry_window_seconds()) + float(revoke_clock_skew_seconds())
+            else:
+                deadline = None
+        if deadline is not None and clock >= deadline:
             _STATUS[jid] = RevokeJobStatus.WINDOW_EXPIRED
             return RevokeJobStatus.WINDOW_EXPIRED
         if st is RevokeJobStatus.WINDOW_EXPIRED:
@@ -317,15 +411,43 @@ def revoke_status(
         return RevokeJobStatus.PENDING
 
 
+def known_token_expires(job_id: str, *, expires_at: float | None = None) -> bool:
+    """True when an absolute/derived token expiry is known for ``job_id``."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return False
+    with _PENDING_LOCK:
+        if expires_at is not None:
+            _remember_expires(jid, expires_at)
+        return jid in _EXPIRES_AT or jid in _ISSUED_AT
+
+
 def may_delete_after_revoke(
     job_id: str,
     *,
     created_at: float | None = None,
+    expires_at: float | None = None,
+    issued_at: float | None = None,
     now: float | None = None,
+    orphan_ttl_elapsed: bool = False,
 ) -> bool:
-    """True when reaper may remove container/checkout for ``job_id``."""
-    st = revoke_status(job_id, created_at=created_at, now=now)
-    return st in (RevokeJobStatus.CONFIRMED, RevokeJobStatus.WINDOW_EXPIRED)
+    """True when reaper may remove container/checkout for ``job_id``.
+
+    Confirmed revoke or window past token expiry (+skew). When no expiry is known
+    (old jobs), ``orphan_ttl_elapsed`` is the retention backstop (ARB34-014).
+    """
+    st = revoke_status(
+        job_id,
+        created_at=created_at,
+        expires_at=expires_at,
+        issued_at=issued_at,
+        now=now,
+    )
+    if st in (RevokeJobStatus.CONFIRMED, RevokeJobStatus.WINDOW_EXPIRED):
+        return True
+    if orphan_ttl_elapsed and not known_token_expires(job_id, expires_at=expires_at):
+        return True
+    return False
 
 
 def note_revoke_needed(job_id: str, *, deadline: float | None = None) -> None:
@@ -364,12 +486,19 @@ def drain_revoke_retries() -> int:
     with _PENDING_LOCK:
         items = list(_RETRY_NEEDED.items())
         created = dict(_CREATED_AT)
+        expires = dict(_EXPIRES_AT)
+        issued = dict(_ISSUED_AT)
     accepted = 0
     for jid, deadline in items:
         if deadline <= now:
             clear_revoke_needed(jid)
             continue
-        if schedule_proxy_token_revoke(jid, created_at=created.get(jid)):
+        if schedule_proxy_token_revoke(
+            jid,
+            created_at=created.get(jid),
+            expires_at=expires.get(jid),
+            issued_at=issued.get(jid),
+        ):
             clear_revoke_needed(jid)
             accepted += 1
     return accepted
@@ -440,12 +569,14 @@ def schedule_proxy_token_revoke(
     job_id: str,
     *,
     created_at: float | None = None,
+    expires_at: float | None = None,
+    issued_at: float | None = None,
 ) -> bool:
     """Best-effort background revoke; never blocks cancel/reaper.
 
     Returns True if accepted (queued, in-flight, already confirmed, or window
     already expired). Returns False if the pending queue is saturated.
-    ``created_at`` is the job creation unix time used for the retry window.
+    ``expires_at`` is the absolute proxy token expiry (preferred, ARB34-014).
     """
     global _PENDING
     jid = (job_id or "").strip()
@@ -453,16 +584,28 @@ def schedule_proxy_token_revoke(
         return True
     budget = _cancel_revoke_timeout_seconds()
     max_pending = _revoke_max_pending()
-    window = revoke_retry_window_seconds()
     now = time.time()
     with _PENDING_LOCK:
-        cat = _remember_created(jid, created_at)
-        if cat is None:
-            cat = now
-            _CREATED_AT[jid] = cat
+        if created_at is not None:
+            _remember_created(jid, created_at)
+        if expires_at is not None:
+            _remember_expires(jid, expires_at)
+        if issued_at is not None:
+            _remember_issued(jid, issued_at)
         if _STATUS.get(jid) is RevokeJobStatus.CONFIRMED:
             return True
-        if now >= float(cat) + window:
+        exp = _EXPIRES_AT.get(jid)
+        iss = _ISSUED_AT.get(jid)
+        has_known = exp is not None or iss is not None
+        if exp is not None:
+            deadline = float(exp) + float(revoke_clock_skew_seconds())
+        elif iss is not None:
+            deadline = float(iss) + float(revoke_retry_window_seconds()) + float(revoke_clock_skew_seconds())
+        else:
+            # No known expiry: do not mark WINDOW_EXPIRED; bound this attempt briefly
+            # so the reaper can re-schedule (orphan TTL is the delete backstop).
+            deadline = now + max(float(budget) * 3.0, 5.0)
+        if has_known and now >= deadline:
             _STATUS[jid] = RevokeJobStatus.WINDOW_EXPIRED
             return True
         if jid in _ACTIVE_JOBS:
@@ -480,7 +623,7 @@ def schedule_proxy_token_revoke(
         _PENDING += 1
         _ACTIVE_JOBS.add(jid)
         _STATUS[jid] = RevokeJobStatus.PENDING
-        retry_deadline = float(cat) + window
+        retry_deadline = float(deadline)
     try:
         _REVOKE_LOOP.submit(_revoke_with_retries(jid, budget, retry_deadline))
     except Exception:  # noqa: BLE001
@@ -500,4 +643,6 @@ def _reset_for_tests() -> None:
         _RETRY_NEEDED.clear()
         _STATUS.clear()
         _CREATED_AT.clear()
+        _EXPIRES_AT.clear()
+        _ISSUED_AT.clear()
         _CONFIRMED_AT.clear()

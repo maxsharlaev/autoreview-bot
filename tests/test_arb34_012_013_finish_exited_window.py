@@ -140,16 +140,16 @@ def test_exited_proxy_down_retained_until_window(
         RevokeJobStatus.CONFIG_ERROR,
     }
 
-    # Expire window → delete
-    monkeypatch.setenv("LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS", "1")
-    # created far in the past relative to new window
+    # Expire token → delete (ARB34-014)
     old_created = time.time() - 100
+    old_expires = time.time() - 90
     containers[0]["Created"] = old_created
     containers[0]["Labels"]["opr.created_unix"] = str(int(old_created))
+    containers[0]["Labels"]["opr.token_expires_unix"] = str(int(old_expires))
     rs._reset_for_tests()
     reaper_mod.reap_once(client=_fake_docker(containers, removed))  # type: ignore[arg-type]
     assert "cid-proxy-down" in removed
-    assert rs.revoke_status(job, created_at=old_created) is RevokeJobStatus.WINDOW_EXPIRED
+    assert rs.revoke_status(job, created_at=old_created, expires_at=old_expires) is RevokeJobStatus.WINDOW_EXPIRED
 
 
 def test_running_young_orphan_waits_ttl(

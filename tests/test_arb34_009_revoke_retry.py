@@ -94,6 +94,7 @@ def test_proxy_down_restart_reschedules_then_deletes_on_confirm(
                 "opr.review": "1",
                 "opr.job_id": job,
                 "opr.created_unix": str(int(created)),
+                "opr.token_expires_unix": str(int(time.time() + 3600)),
             },
         }
     ]
@@ -130,9 +131,9 @@ def test_proxy_down_restart_reschedules_then_deletes_on_confirm(
     assert rs.revoke_status(job, created_at=created) is RevokeJobStatus.CONFIRMED
     assert job in calls_after
 
-    # Pass 3: now confirmed ? delete.
-    removed.clear()
-    reaper_mod.reap_once(client=_fake_docker(containers, removed, killed))  # type: ignore[arg-type]
+    # Pass 3: now confirmed -> delete (may already be gone if revoke won the race on pass 2).
+    if "cccc" not in removed:
+        reaper_mod.reap_once(client=_fake_docker(containers, removed, killed))  # type: ignore[arg-type]
     assert "cccc" in removed
     assert not keep_dir.exists()
 
@@ -147,6 +148,7 @@ def test_deletion_after_window_expiry(
 
     monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path))
     monkeypatch.setenv("LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS", "1")
+    monkeypatch.setenv("LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS", "0")
     monkeypatch.setenv("LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS", "0.2")
     monkeypatch.setattr(reaper_mod, "orphan_ttl_seconds", lambda: 1)
     monkeypatch.setattr(reaper_mod.lifecycle, "launch_active", lambda jid: False)
@@ -158,7 +160,8 @@ def test_deletion_after_window_expiry(
     monkeypatch.setattr("app.services.model_proxy_client.revoke_job_token_attempt", always_down)
 
     job = "b" * 32
-    created = time.time() - 10  # already past 1s window
+    created = time.time() - 10
+    expires = created  # token already expired (ARB34-014)
     containers = [
         {
             "Id": "bbbb",
@@ -169,11 +172,12 @@ def test_deletion_after_window_expiry(
                 "opr.review": "1",
                 "opr.job_id": job,
                 "opr.created_unix": str(int(created)),
+                "opr.token_expires_unix": str(int(expires)),
             },
         }
     ]
     removed: list[str] = []
-    assert rs.revoke_status(job, created_at=created) is RevokeJobStatus.WINDOW_EXPIRED
+    assert rs.revoke_status(job, created_at=created, expires_at=expires) is RevokeJobStatus.WINDOW_EXPIRED
     reaper_mod.reap_once(client=_fake_docker(containers, removed))  # type: ignore[arg-type]
     assert "bbbb" in removed
 
@@ -212,6 +216,7 @@ def test_stopped_container_not_removed_while_pending(
                 "opr.review": "1",
                 "opr.job_id": job,
                 "opr.created_unix": str(int(created)),
+                "opr.token_expires_unix": str(int(time.time() + 3600)),
             },
         }
     ]
@@ -265,6 +270,7 @@ def test_queue_full_keeps_then_deletes_after_confirm(
                 "opr.review": "1",
                 "opr.job_id": keep_job,
                 "opr.created_unix": str(int(created)),
+                "opr.token_expires_unix": str(int(time.time() + 3600)),
             },
         }
     ]
@@ -309,7 +315,9 @@ def test_reaper_not_blocked_by_hanging_revoke(
 
     scheduled: list[str] = []
 
-    def accept(jid: str, *, created_at: float | None = None) -> bool:
+    def accept(
+        jid: str, *, created_at: float | None = None, expires_at: float | None = None, issued_at: float | None = None
+    ) -> bool:
         scheduled.append(jid)
         return True
 
@@ -318,7 +326,7 @@ def test_reaper_not_blocked_by_hanging_revoke(
     monkeypatch.setattr(
         reaper_mod,
         "may_delete_after_revoke",
-        lambda jid, created_at=None, now=None: True,
+        lambda jid, created_at=None, expires_at=None, issued_at=None, orphan_ttl_elapsed=False, now=None: True,
     )
 
     hang_job = "a" * 32
@@ -334,14 +342,24 @@ def test_reaper_not_blocked_by_hanging_revoke(
             "Created": 0,
             "State": "running",
             "Names": ["/opr-review-a"],
-            "Labels": {"opr.review": "1", "opr.job_id": hang_job, "opr.created_unix": "0"},
+            "Labels": {
+                "opr.review": "1",
+                "opr.job_id": hang_job,
+                "opr.created_unix": "0",
+                "opr.token_expires_unix": str(int(time.time() + 3600)),
+            },
         },
         {
             "Id": "bbbb",
             "Created": 0,
             "State": "running",
             "Names": ["/opr-review-b"],
-            "Labels": {"opr.review": "1", "opr.job_id": other_job, "opr.created_unix": "0"},
+            "Labels": {
+                "opr.review": "1",
+                "opr.job_id": other_job,
+                "opr.created_unix": "0",
+                "opr.token_expires_unix": str(int(time.time() + 3600)),
+            },
         },
     ]
     t0 = time.monotonic()

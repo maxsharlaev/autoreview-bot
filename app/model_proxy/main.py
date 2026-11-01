@@ -29,6 +29,7 @@ class IssueTokenResponse(BaseModel):
     job_id: str
     token: str
     expires_in: int
+    expires_at: float  # absolute unix seconds when the token dies (ARB34-014)
     owner_id: str
 
 
@@ -115,6 +116,7 @@ def issue_token(
         job_id=issued.job_id,
         token=issued.token,
         expires_in=issued.expires_in,
+        expires_at=float(issued.expires_at),
         owner_id=issued.owner_id,
     )
 

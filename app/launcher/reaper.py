@@ -88,6 +88,32 @@ def job_created_unix_from_checkout(path: Path) -> float:
         return 0.0
 
 
+def job_token_expires_unix_from_container(item: dict) -> float | None:
+    """Absolute token expiry from ``opr.token_expires_unix`` label (ARB34-014)."""
+    labels = item.get("Labels") or {}
+    raw = str(labels.get("opr.token_expires_unix") or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def job_token_expires_unix_from_checkout(path: Path) -> float | None:
+    """Absolute token expiry from job.json ``token_expires_unix`` (ARB34-014)."""
+    meta = path / "job.json"
+    if not meta.is_file():
+        return None
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("token_expires_unix") is not None:
+            return float(data["token_expires_unix"])
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
 def _container_still_running(item: dict) -> bool:
     """True if Docker list entry is not yet a stopped/dead finished review."""
     state = str(item.get("State") or "").lower()
@@ -248,14 +274,27 @@ def reap_checkout_orphans(
             # dir itself is the durable signal to re-schedule.
             created_at = job_created_unix_from_checkout(path) if stat.S_ISDIR(st.st_mode) else float(st.st_mtime)
             if is_uuid_job_dirname(name):
-                if not schedule_proxy_token_revoke(name, created_at=created_at):
+                expires_at = job_token_expires_unix_from_checkout(path)
+                # Age vs orphan TTL as backstop when expires_at unknown (ARB34-014).
+                try:
+                    age = clock - float(created_at)
+                except (TypeError, ValueError):
+                    age = orphan_ttl_seconds() + 1
+                orphan_elapsed = age >= float(orphan_ttl_seconds() if ttl_override is None else ttl_override)
+                if not schedule_proxy_token_revoke(name, created_at=created_at, expires_at=expires_at):
                     note_revoke_needed(name)
                     logger.warning(
                         "deferring checkout reap name=%s: revoke queue full",
                         name,
                     )
                     continue
-                if not may_delete_after_revoke(name, created_at=created_at, now=clock):
+                if not may_delete_after_revoke(
+                    name,
+                    created_at=created_at,
+                    expires_at=expires_at,
+                    now=clock,
+                    orphan_ttl_elapsed=orphan_elapsed,
+                ):
                     logger.warning(
                         "deferring checkout reap name=%s: revoke pending",
                         name,
@@ -356,7 +395,9 @@ def reap_once(client: DockerClient | None = None) -> int:
                     item.get("Names"),
                 )
             if job_id:
-                if not schedule_proxy_token_revoke(job_id, created_at=created_at):
+                expires_at = job_token_expires_unix_from_container(item)
+                orphan_elapsed = age >= float(ttl)
+                if not schedule_proxy_token_revoke(job_id, created_at=created_at, expires_at=expires_at):
                     note_revoke_needed(job_id)
                     logger.warning(
                         "deferring container remove id=%s job=%s: revoke queue full",
@@ -364,7 +405,13 @@ def reap_once(client: DockerClient | None = None) -> int:
                         job_id,
                     )
                     continue
-                if not may_delete_after_revoke(job_id, created_at=created_at, now=now):
+                if not may_delete_after_revoke(
+                    job_id,
+                    created_at=created_at,
+                    expires_at=expires_at,
+                    now=now,
+                    orphan_ttl_elapsed=orphan_elapsed,
+                ):
                     logger.warning(
                         "deferring container remove id=%s job=%s: revoke pending",
                         cid[:12],

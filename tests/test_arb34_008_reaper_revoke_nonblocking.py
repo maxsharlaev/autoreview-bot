@@ -26,12 +26,12 @@ def test_reaper_continues_when_one_revoke_hangs(
     monkeypatch.setattr(
         reaper_mod,
         "schedule_proxy_token_revoke",
-        lambda jid, created_at=None: (scheduled.append(jid), True)[1],
+        lambda jid, created_at=None, expires_at=None, issued_at=None: (scheduled.append(jid), True)[1],
     )
     monkeypatch.setattr(
         reaper_mod,
         "may_delete_after_revoke",
-        lambda jid, created_at=None, now=None: True,
+        lambda jid, created_at=None, expires_at=None, issued_at=None, orphan_ttl_elapsed=False, now=None: True,
     )
     monkeypatch.setattr(reaper_mod, "drain_revoke_retries", lambda: 0)
 

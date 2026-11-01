@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -21,6 +22,14 @@ class RevokeAttemptOutcome(StrEnum):
 
 
 DEFAULT_MODEL_PROXY_URL = "http://model-proxy:8081"
+
+
+@dataclass(frozen=True)
+class IssuedJobToken:
+    """Bearer plus absolute expiry from model-proxy (ARB34-014)."""
+
+    token: str
+    expires_at: float  # unix seconds
 
 
 def model_proxy_url() -> str:
@@ -47,8 +56,10 @@ async def issue_job_token(
     base_url: str | None = None,
     issuer_token: str | None = None,
     client: httpx.AsyncClient | None = None,
-) -> str:
-    """POST /internal/jobs/{job_id}/token. Returns the raw ``opr_job_`` token."""
+) -> IssuedJobToken:
+    """POST /internal/jobs/{job_id}/token. Returns token + absolute ``expires_at``."""
+    import time
+
     token = (issuer_token if issuer_token is not None else proxy_issuer_token()).strip()
     if len(token) < 16:
         raise ModelProxyIssuerError("PROXY_ISSUER_TOKEN missing or too short")
@@ -64,6 +75,7 @@ async def issue_job_token(
     finally:
         if owns:
             await http.aclose()
+    receipt_unix = time.time()
     if response.status_code == 401:
         raise ModelProxyIssuerError("model-proxy issuer auth failed")
     if response.status_code >= 400:
@@ -75,7 +87,20 @@ async def issue_job_token(
     raw = data.get("token") if isinstance(data, dict) else None
     if not isinstance(raw, str) or not raw.startswith("opr_job_"):
         raise ModelProxyIssuerError("model-proxy issue returned invalid token")
-    return raw
+    expires_at: float | None = None
+    if isinstance(data, dict) and data.get("expires_at") is not None:
+        try:
+            expires_at = float(data["expires_at"])
+        except (TypeError, ValueError):
+            expires_at = None
+    if expires_at is None:
+        # Old proxy: derive from receipt + expires_in (ARB34-014 fallback).
+        try:
+            expires_in = int(data.get("expires_in") or 0) if isinstance(data, dict) else 0
+        except (TypeError, ValueError):
+            expires_in = 0
+        expires_at = float(receipt_unix + max(0, expires_in))
+    return IssuedJobToken(token=raw, expires_at=float(expires_at))
 
 
 async def revoke_job_token(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 from app.services.codex_runner import CodexRunnerError
 from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
 from app.services.container_executor import ContainerReviewExecutor
+from app.services.model_proxy_client import IssuedJobToken
 from app.services.review_executor import CONTAINER_BACKEND, get_review_executor
 
 PROXY_TOKEN = "opr_job_test_proxy_token_value_ok"
@@ -24,7 +26,7 @@ def _stub_proxy_issuer(monkeypatch: pytest.MonkeyPatch, *, token: str = PROXY_TO
     async def _issue(*, job_id: str, timeout_seconds: int, owner_id: str = "", **kwargs):
         assert job_id
         assert timeout_seconds > 0
-        return token
+        return IssuedJobToken(token=token, expires_at=time.time() + 600)
 
     async def _revoke(*, job_id: str, **kwargs):
         from app.services.model_proxy_client import RevokeAttemptOutcome
@@ -54,9 +56,11 @@ async def test_container_executor_success(tmp_path: Path, monkeypatch: pytest.Mo
         assert request.headers["Authorization"] == "Bearer test-launcher-token-32chars-ok"
         assert "X-Model-Api-Key" not in request.headers
         body = json_body(request)
-        assert set(body) == {"job_id", "checkout_ref", "proxy_token"}
+        assert set(body) == {"job_id", "checkout_ref", "proxy_token", "token_expires_unix"}
         assert body["checkout_ref"].endswith("/repo")
         assert body["proxy_token"] == PROXY_TOKEN
+        assert isinstance(body["token_expires_unix"], int)
+        assert body["token_expires_unix"] > 0
         assert not str(body["proxy_token"]).startswith("sk-")
         return httpx.Response(
             200, json={"job_id": body["job_id"], "status": "ok", "output": '{"ok":true}', "duration_seconds": 0.1}
