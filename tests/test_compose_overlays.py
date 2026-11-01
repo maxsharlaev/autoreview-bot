@@ -21,6 +21,12 @@ CONTAINER = ROOT / "docker-compose.container-runner.yml"
 OBSERVABILITY = ROOT / "docker-compose.observability.yml"
 
 _SECRETISH = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PRIVATE)", re.IGNORECASE)
+_TOKEN_NAME_ALLOWLIST = {
+    "LAUNCHER_TOKEN",
+    "PROXY_ISSUER_TOKEN",
+    "PROXY_TOKEN_GRACE_SECONDS",
+    "PROXY_TOKEN_FIRST_USE_TTL_SECONDS",
+}
 
 
 def _load(path: Path) -> dict:
@@ -66,11 +72,11 @@ def test_launcher_has_no_env_file_and_no_secret_env_names() -> None:
     launcher = _service(overlay, "launcher")
     assert "env_file" not in launcher, "launcher must not use env_file (would ingest .env secrets)"
     for name in sorted(_env_keys(launcher)):
-        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN", "PROXY_TOKEN_GRACE_SECONDS"}:
+        if name in _TOKEN_NAME_ALLOWLIST:
             continue
         assert _SECRETISH.search(name) is None, (
             f"launcher environment must not include secret-like name {name!r} "
-            "(only LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN / PROXY_TOKEN_GRACE_SECONDS "
+            "(only LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN / PROXY_TOKEN_GRACE_SECONDS / PROXY_TOKEN_FIRST_USE_TTL_SECONDS "
             "among KEY/TOKEN/SECRET/PASSWORD/PRIVATE)"
         )
 
@@ -133,7 +139,7 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
     launcher = _service(data, "launcher")
     assert not launcher.get("env_file"), "rendered launcher must not carry env_file"
     for name in sorted(_env_keys(launcher)):
-        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN", "PROXY_TOKEN_GRACE_SECONDS"}:
+        if name in _TOKEN_NAME_ALLOWLIST:
             continue
         assert _SECRETISH.search(name) is None, name
     # Host env supplies LAUNCHER_TOKEN for interpolation; api must not receive it
@@ -175,18 +181,13 @@ def test_rendered_compose_launcher_and_prometheus_networks() -> None:
 
 # Launcher settings documented in docs/ENVIRONMENT.md that must appear in the overlay
 # with host-interpolated defaults (ARB-27-020). Secrets except LAUNCHER_TOKEN /
-# PROXY_ISSUER_TOKEN (and non-secret PROXY_TOKEN_GRACE_SECONDS) are forbidden.
+# PROXY_ISSUER_TOKEN (and non-secret PROXY_TOKEN_* TTL knobs) are allowlisted.
 _DOCUMENTED_LAUNCHER_SETTINGS = (
     "LAUNCHER_TOKEN",
-    "PROXY_ISSUER_TOKEN",
-    "MODEL_PROXY_URL",
     "OPR_MODEL_PROXY_BASE_URL",
     "LAUNCHER_APPARMOR_PROFILE",
     "LAUNCHER_CANCEL_DEADLINE_SECONDS",
     "LAUNCHER_CANCEL_WAIT_SECONDS",
-    "LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS",
-    "LAUNCHER_CANCEL_REVOKE_MAX_PENDING",
-    "PROXY_TOKEN_GRACE_SECONDS",
     "OPR_CHECKOUT_BASE",
     "OPR_CHECKOUT_VOLUME",
     "OPR_REVIEW_IMAGE",
@@ -265,10 +266,7 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
         "LAUNCHER_APPARMOR_PROFILE": "unconfined",
         "LAUNCHER_CANCEL_DEADLINE_SECONDS": "4",
         "LAUNCHER_CANCEL_WAIT_SECONDS": "3",
-        "LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS": "2",
-        "LAUNCHER_CANCEL_REVOKE_MAX_PENDING": "32",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
-        "PROXY_TOKEN_GRACE_SECONDS": "30",
         "OPR_CLONE_TIMEOUT_SECONDS": "300",
         "OPR_CHECKOUT_ORPHAN_TTL_SECONDS": "900",
         "OPR_LEASE_HEARTBEAT_SECONDS": "30",
@@ -311,7 +309,7 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
     assert str(launcher_env.get("LAUNCHER_CANCEL_WAIT_SECONDS")) in {"2.5", "2.50"}
     assert str(launcher_env.get("OPR_CHECKOUT_ORPHAN_TTL_SECONDS")) == "1200"
     for name in sorted(_env_keys(_service(data, "launcher"))):
-        if name in {"LAUNCHER_TOKEN", "PROXY_ISSUER_TOKEN", "PROXY_TOKEN_GRACE_SECONDS"}:
+        if name in _TOKEN_NAME_ALLOWLIST:
             continue
         assert _SECRETISH.search(name) is None, name
 
@@ -326,6 +324,7 @@ _DOCUMENTED_MODEL_PROXY_SETTINGS = (
     "PROXY_UPSTREAM_SCHEME",
     "OPR_MAX_REVIEW_TIMEOUT_SECONDS",
     "PROXY_TOKEN_GRACE_SECONDS",
+    "PROXY_TOKEN_FIRST_USE_TTL_SECONDS",
     "PROXY_MAX_BODY_BYTES",
     "PROXY_MAX_REQUESTS_PER_JOB",
     "PROXY_MAX_BYTES_PER_JOB",
@@ -337,7 +336,6 @@ _DOCUMENTED_MODEL_PROXY_SETTINGS = (
 _WORKER_PROXY_SETTINGS = (
     "PROXY_ISSUER_TOKEN",
     "MODEL_PROXY_URL",
-    "OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS",
 )
 
 
@@ -396,8 +394,14 @@ def test_overlay_lists_model_proxy_service() -> None:
     review_net = (overlay.get("networks") or {}).get("review_egress") or {}
     assert review_net.get("internal") is True
     launcher_keys = _env_keys(_service(overlay, "launcher"))
-    for name in ("PROXY_ISSUER_TOKEN", "MODEL_PROXY_URL", "OPR_MODEL_PROXY_BASE_URL"):
-        assert name in launcher_keys, f"launcher missing {name}"
+    assert "OPR_MODEL_PROXY_BASE_URL" in launcher_keys
+    for gone in (
+        "PROXY_ISSUER_TOKEN",
+        "MODEL_PROXY_URL",
+        "PROXY_TOKEN_GRACE_SECONDS",
+        "PROXY_TOKEN_FIRST_USE_TTL_SECONDS",
+    ):
+        assert gone not in launcher_keys, f"launcher should not set {gone}"
     keys = _env_keys(proxy)
     for name in _DOCUMENTED_MODEL_PROXY_SETTINGS:
         assert name in keys, f"model-proxy missing {name}"
@@ -414,7 +418,6 @@ def test_overlay_lists_model_proxy_service() -> None:
         - {
             "MODEL_PROXY_URL",
             "OPR_MODEL_PROXY_BASE_URL",
-            "OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS",
             # env_file-only secrets (must not appear in Compose environment:)
             "OPENAI_API_KEY",
             "PROXY_OWNER_KEY_ENVS",
@@ -433,6 +436,7 @@ def test_overlay_model_proxy_settings_use_safe_defaults() -> None:
         "PROXY_UPSTREAM_SCHEME": "https",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
         "PROXY_TOKEN_GRACE_SECONDS": "30",
+        "PROXY_TOKEN_FIRST_USE_TTL_SECONDS": "120",
         "PROXY_MAX_BODY_BYTES": "4194304",
         "PROXY_MAX_REQUESTS_PER_JOB": "50",
         "PROXY_MAX_BYTES_PER_JOB": "16777216",

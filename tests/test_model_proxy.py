@@ -18,6 +18,7 @@ def proxy_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         "PROXY_OWNER_ACME_OPENAI_API_KEY": "sk-test-upstream-acme-key",
         "OPR_MAX_REVIEW_TIMEOUT_SECONDS": "600",
         "PROXY_TOKEN_GRACE_SECONDS": "30",
+        "PROXY_TOKEN_FIRST_USE_TTL_SECONDS": "120",
         "PROXY_MAX_BODY_BYTES": "4096",
         "PROXY_MAX_REQUESTS_PER_JOB": "3",
         "PROXY_MAX_BYTES_PER_JOB": "20000",
@@ -51,7 +52,7 @@ def test_healthz(proxy_client: TestClient) -> None:
     assert r.json()["status"] == "ok"
 
 
-def test_issue_and_revoke_token(proxy_client: TestClient) -> None:
+def test_issue_token_returns_first_use_ttl(proxy_client: TestClient) -> None:
     jid = "a" * 32
     r = proxy_client.post(
         f"/internal/jobs/{jid}/token",
@@ -62,16 +63,8 @@ def test_issue_and_revoke_token(proxy_client: TestClient) -> None:
     body = r.json()
     assert body["job_id"] == jid
     assert body["token"].startswith("opr_job_")
-    assert body["expires_in"] == 150  # 120 + 30 grace
+    assert body["expires_in"] == 120  # PROXY_TOKEN_FIRST_USE_TTL_SECONDS default
     assert body["owner_id"] == "ACME"
-
-    rev = proxy_client.delete(f"/internal/jobs/{jid}/token", headers=_issuer_headers())
-    assert rev.status_code == 200
-    assert rev.json()["revoked"] is True
-
-    # Second revoke is idempotent miss
-    rev2 = proxy_client.delete(f"/internal/jobs/{jid}/token", headers=_issuer_headers())
-    assert rev2.json()["revoked"] is False
 
 
 def test_issue_requires_issuer_auth(proxy_client: TestClient) -> None:
@@ -95,6 +88,7 @@ def test_token_ttl_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROXY_ISSUER_TOKEN", "test-issuer-token-32chars-ok!!")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-upstream-default-key")
     monkeypatch.setenv("PROXY_TOKEN_GRACE_SECONDS", "0")
+    monkeypatch.setenv("PROXY_TOKEN_FIRST_USE_TTL_SECONDS", "1")
     monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "600")
     from app.model_proxy.main import app
 
@@ -106,7 +100,7 @@ def test_token_ttl_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
             json={"timeout_seconds": 1},
         )
         assert r.status_code == 200
-        assert r.json()["expires_in"] == 1
+        assert r.json()["expires_in"] == 1  # unused lifetime = first-use TTL
         token = r.json()["token"]
         time.sleep(1.2)
         fr = client.post(
@@ -219,14 +213,19 @@ def test_streaming_passthrough(proxy_client: TestClient, monkeypatch: pytest.Mon
             client.app.state.http = old
 
 
-def test_revoked_token_cannot_call(proxy_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invalidated_token_cannot_call(proxy_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     jid = "h" * 32
     tok = proxy_client.post(
         f"/internal/jobs/{jid}/token",
         headers=_issuer_headers(),
         json={"timeout_seconds": 60},
     ).json()["token"]
-    proxy_client.delete(f"/internal/jobs/{jid}/token", headers=_issuer_headers())
+    store = proxy_client.app.state.store
+    with store._lock:
+        h = store._by_job.get(jid)
+        rec = store._by_hash.get(h) if h else None
+        if rec is not None:
+            store._drop_record(rec)
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("upstream must not be called")

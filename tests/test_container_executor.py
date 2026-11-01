@@ -15,26 +15,13 @@ from app.services.review_executor import CONTAINER_BACKEND, get_review_executor
 PROXY_TOKEN = "opr_job_test_proxy_token_value_ok"
 
 
-def _stub_proxy_issuer(monkeypatch: pytest.MonkeyPatch, *, token: str = PROXY_TOKEN) -> list[str]:
-    """Stub model-proxy issue/revoke; return list of revoked job ids."""
-    monkeypatch.setenv("PROXY_ISSUER_TOKEN", "test-issuer-token-32chars-ok!!")
-    monkeypatch.setenv("MODEL_PROXY_URL", "http://model-proxy:8081")
-    revoked: list[str] = []
+def _stub_proxy_issuer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub model-proxy issue (tokens are not revoked)."""
 
-    async def _issue(*, job_id: str, timeout_seconds: int, owner_id: str = "", **kwargs):
-        assert job_id
-        assert timeout_seconds > 0
-        return token
-
-    async def _revoke(*, job_id: str, **kwargs):
-        from app.services.model_proxy_client import RevokeAttemptOutcome
-
-        revoked.append(job_id)
-        return RevokeAttemptOutcome.DONE
+    async def _issue(**kwargs):
+        return "opr_job_test_proxy_token_value_ok"
 
     monkeypatch.setattr("app.services.container_executor.issue_job_token", _issue)
-    monkeypatch.setattr("app.services.container_executor.revoke_job_token_attempt", _revoke)
-    return revoked
 
 
 @pytest.mark.asyncio
@@ -48,7 +35,7 @@ async def test_container_executor_success(tmp_path: Path, monkeypatch: pytest.Mo
     schema.write_text("{}", encoding="utf-8")
     out = tmp_path / "out.json"
 
-    revoked = _stub_proxy_issuer(monkeypatch)
+    _stub_proxy_issuer(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer test-launcher-token-32chars-ok"
@@ -82,7 +69,6 @@ async def test_container_executor_success(tmp_path: Path, monkeypatch: pytest.Mo
         )
     assert text == '{"ok":true}'
     assert out.read_text(encoding="utf-8") == '{"ok":true}'
-    assert len(revoked) == 1
 
 
 @pytest.mark.asyncio

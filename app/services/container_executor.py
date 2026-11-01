@@ -26,28 +26,9 @@ from app.launcher.timeouts import (
 from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
 from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UPGRADE_REQUIRED
-from app.services.model_proxy_client import (
-    ModelProxyIssuerError,
-    RevokeAttemptOutcome,
-    issue_job_token,
-    revoke_job_token_attempt,
-)
+from app.services.model_proxy_client import ModelProxyIssuerError, issue_job_token
 
 logger = logging.getLogger(__name__)
-
-# Finish-path proxy revoke budget (ARB34-004/011); reaper deletes after confirm.
-DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS = 2.0
-
-
-def finish_revoke_timeout_seconds() -> float:
-    raw = os.environ.get("OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS", "").strip()
-    if not raw:
-        return float(DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS)
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
-        return float(DEFAULT_FINISH_REVOKE_TIMEOUT_SECONDS)
-
 
 # Short timeout for cancel DELETE so it can run under asyncio.shield.
 _CANCEL_HTTP_TIMEOUT = httpx.Timeout(
@@ -175,41 +156,8 @@ class ContainerReviewExecutor:
         except Exception as exc:  # noqa: BLE001 - map unexpected staging/HTTP errors to fail-closed
             raise CodexRunnerError(CODEX_SANDBOX, f"container executor failed: {exc}") from exc
         finally:
-            revoke_confirmed = False
-            if proxy_token is not None:
-                # Fast bounded revoke (ARB34-004). Only DONE (2xx/404) confirms;
-                # False/timeout/config-error ? keep job_dir for the reaper (ARB34-011).
-                revoke_budget = finish_revoke_timeout_seconds()
-                try:
-                    async with asyncio.timeout(revoke_budget):
-                        outcome = await revoke_job_token_attempt(
-                            job_id=job_id,
-                            client=self._http_client,
-                            timeout_seconds=revoke_budget,
-                        )
-                    revoke_confirmed = outcome is RevokeAttemptOutcome.DONE
-                    if not revoke_confirmed:
-                        logger.warning(
-                            "model-proxy revoke not confirmed job_id=%s outcome=%s; keeping job_dir for reaper",
-                            job_id,
-                            outcome.value,
-                        )
-                except TimeoutError:
-                    logger.warning(
-                        "model-proxy revoke timed out job_id=%s budget_s=%s; keeping job_dir for reaper",
-                        job_id,
-                        revoke_budget,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "model-proxy revoke failed job_id=%s; keeping job_dir for reaper",
-                        job_id,
-                        exc_info=True,
-                    )
             await stop_directory_lease(job_dir)
-            # Uniform rule (ARB34-009/011): remove staging only after revoke confirmed.
-            if proxy_token is not None and not revoke_confirmed:
-                remove_job_dir = False
+            # Tokens are not revoked (ARB34-018); TTL covers residual. Remove staging when allowed.
             if remove_job_dir and job_dir.exists() and repo_dir.resolve() != checkout.resolve():
                 await asyncio.to_thread(_remove_job_dir, job_dir)
 

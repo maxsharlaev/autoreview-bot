@@ -179,7 +179,12 @@ def test_revoke_while_upstream_silent_ends_promptly(monkeypatch: pytest.MonkeyPa
             def revoker() -> None:
                 assert accepted.wait(5)
                 time.sleep(0.2)
-                client.delete(f"/internal/jobs/{jid}/token", headers=_issuer_headers())
+                store = client.app.state.store
+                with store._lock:
+                    _h = store._by_job.get(jid)
+                    _rec = store._by_hash.get(_h) if _h else None
+                    if _rec is not None:
+                        store._drop_record(_rec)
 
             t = threading.Thread(target=revoker, daemon=True)
             t.start()
@@ -262,7 +267,12 @@ def test_nonstream_invalidate_discards_buffer_returns_401(monkeypatch: pytest.Mo
             def revoker() -> None:
                 assert accepted.wait(5)
                 time.sleep(0.25)
-                client.delete(f"/internal/jobs/{jid}/token", headers=_issuer_headers())
+                store = client.app.state.store
+                with store._lock:
+                    _h = store._by_job.get(jid)
+                    _rec = store._by_hash.get(_h) if _h else None
+                    if _rec is not None:
+                        store._drop_record(_rec)
 
             t = threading.Thread(target=revoker, daemon=True)
             t.start()

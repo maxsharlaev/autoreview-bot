@@ -34,11 +34,6 @@ TOKEN_ISSUE = Counter(
     "Job token issue outcomes",
     ["result"],
 )
-TOKEN_REVOKE = Counter(
-    "model_proxy_token_revoke_total",
-    "Job token revoke outcomes",
-    ["result"],
-)
 ACTIVE_JOBS = Gauge(
     "model_proxy_active_jobs",
     "Active (non-expired) job tokens",

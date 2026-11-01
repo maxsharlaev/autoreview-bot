@@ -406,7 +406,12 @@ def test_revocation_mid_upstream_wait(monkeypatch: pytest.MonkeyPatch) -> None:
             def revoker() -> None:
                 assert started.wait(3)
                 time.sleep(0.15)
-                client.delete(f"/internal/jobs/{jid}/token", headers=_issuer_headers())
+                store = client.app.state.store
+                with store._lock:
+                    _h = store._by_job.get(jid)
+                    _rec = store._by_hash.get(_h) if _h else None
+                    if _rec is not None:
+                        store._drop_record(_rec)
 
             t = threading.Thread(target=revoker, daemon=True)
             t.start()
@@ -463,6 +468,8 @@ def test_expiry_mid_upstream_wait(monkeypatch: pytest.MonkeyPatch) -> None:
             PROXY_UPSTREAM_HOST=f"127.0.0.1:{port}",
             PROXY_UPSTREAM_SCHEME="http",
             PROXY_TOKEN_GRACE_SECONDS="0",
+            PROXY_TOKEN_FIRST_USE_TTL_SECONDS="120",
+            OPR_MAX_REVIEW_TIMEOUT_SECONDS="1",
             PROXY_STREAM_IDLE_TIMEOUT_SECONDS="10",
             PROXY_UPSTREAM_TIMEOUT_SECONDS="30",
             PROXY_MAX_BYTES_PER_JOB="100000",
@@ -518,6 +525,7 @@ async def test_next_chunk_unit_bounds_by_token_ttl(monkeypatch: pytest.MonkeyPat
         provider="openai",
         max_review_timeout_seconds=600,
         token_grace_seconds=0,
+        token_first_use_ttl_seconds=120,
         max_body_bytes=1000,
         max_requests_per_job=100,
         max_bytes_per_job=10000,

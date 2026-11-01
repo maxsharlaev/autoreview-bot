@@ -96,34 +96,29 @@
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker-сеть review-контейнеров (не postgres/redis/api). |
 | `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor-профиль review-контейнеров (`apparmor=<value>`). Default `unconfined` (как у worker), чтобы bubblewrap mount работал на Linux с AppArmor; задайте имя dedicated profile, когда он установлен. |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Age gate для labeled review-orphan контейнеров и связанных checkout (реальный orphan TTL). |
-| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | worker, launcher | Макс. `timeout_seconds` из staged `job.json` (как default `codex.timeout_seconds`). Держите >= `codex.timeout_seconds`. Также вместе с `PROXY_TOKEN_GRACE_SECONDS` задаёт default revoke retry window (ARB34-013). |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | worker, launcher | Макс. `timeout_seconds` из staged `job.json` (как default `codex.timeout_seconds`). Держите >= `codex.timeout_seconds`. |
 | `OPR_CLONE_TIMEOUT_SECONDS` | `300` | worker, launcher | Hard cap for `git_clone` (kills the git process group on timeout); further clamped to remaining ARQ JobDeadline minus reserved min Codex call + overhead. |
 | `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` | `900` (no-lease fallback) | worker, launcher | Консервативный age bound для checkout/job dirs без sidecar `<dirname>.lease` (crash до первого heartbeat). Живые dirs защищены sidecar lease heartbeats (`OPR_LEASE_HEARTBEAT_SECONDS`; файл рядом с каталогом, не внутри worktree; stale после heartbeat×3). |
 | `OPR_LEASE_HEARTBEAT_SECONDS` | `30` | worker, launcher | Как часто live checkout/job-каталог обновляет sidecar `<dirname>.lease` (вне worktree). Reaper считает lease stale после heartbeat×3. |
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | Как часто reaper сканирует orphan review-контейнеры. |
 | `LAUNCHER_CANCEL_DEADLINE_SECONDS` | `4` | launcher | Жёсткий предел ожидания DELETE `/v1/jobs/{id}`: cancel выполняется в background-worker; handler ждёт не дольше этого времени и возвращает `confirmed=false`, пока Docker-очистка может продолжаться (tombstone уже выставлен; повторный DELETE coalesces; leftovers забирает reaper). Каждый вызов Docker — только фактический остаток бюджета (не завышается; меньше 50 мс → skip). Должен быть ≤ worker DELETE HTTP read timeout (5s) **минус обязательный запас 0.5 с** (макс. 4.5 с; default 4 с проходит) и больше `LAUNCHER_CANCEL_WAIT_SECONDS`. Docker HTTP — long-lived async loop + asyncio.timeout (не per-call asyncio.run). |
 | `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | После kill-first cancel — секунды ожидания in-flight launch перед confirmed idle (ограничено остатком `LAUNCHER_CANCEL_DEADLINE_SECONDS`). |
-| `LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS` | `2` | launcher | Короткий HTTP-таймаут одной best-effort попытки revoke proxy-токена (cancel/finish/reaper; не блокирует cleanup). |
-| `LAUNCHER_CANCEL_REVOKE_MAX_PENDING` | `32` | launcher | Макс. in-flight background proxy revoke; при переполнении schedule drop + log (TTL остаётся hard cap). |
-| `PROXY_TOKEN_GRACE_SECONDS` | `30` | launcher, model-proxy | Добавка к `OPR_MAX_REVIEW_TIMEOUT_SECONDS` в TTL job-токена. Операторы могут увеличить. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Endpoint Docker Engine. Compose задаёт unix socket; не направляйте на удалённый daemon из ненадёжной сети. |
-| `PROXY_ISSUER_TOKEN` | (обязателен для container backend) | worker, launcher, model-proxy | Общий issuer bearer; launcher reaper/cancel отзывают оставшиеся job-токены. |
-| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Base URL issuer API (worker выдаёт; launcher отзывает при cancel/reaper). |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | Пишется в review `CODEX_HOME/config.toml` as the custom provider `base_url`. |
 
 <!-- section: model-proxy-m3 -->
 ## Model proxy (M3)
 
-Нужен, когда overlay container-runner поднимает `model-proxy` (opt-in Compose). Proxy хранит настоящие ключи модели; worker выдаёт короткоживущие `opr_job_` токены (TTL = `OPR_MAX_REVIEW_TIMEOUT_SECONDS` + `PROXY_TOKEN_GRACE_SECONDS`, grace по умолчанию **30 с**), а launcher передаёт в контейнер только этот токен как `CODEX_API_KEY` и сгенерированный `config.toml` (`model_provider = "opr_proxy"`). Review-контейнеры подключены только к internal-сети `review_egress` (без интернета); `model-proxy` ходит к upstream через `proxy_egress`. Revoke — **best-effort** (bounded, non-blocking); после любого сбоя job-токен может оставаться валидным до TTL. Снаружи proxy недоступен (только `review_egress`); реалистичный residual risk — другой review-контейнер в той же сети, который переиспользует утёкший job-токен в пределах per-job лимитов до TTL; upstream-ключ модели в review-контейнер не попадает. Режим `in_process` в M3 proxy не использует. Codex 0.164.0: отдельного надёжного флага отключения chatgpt.com model-catalog не найдено (кастомный провайдер в spike этот путь обходил); изоляция сети — запасной барьер.
+Нужен, когда overlay container-runner поднимает `model-proxy` (opt-in Compose). Proxy хранит настоящие ключи модели; worker выдаёт короткоживущие `opr_job_` токены, которые **не revoke'ятся**. Неиспользованный токен истекает в issuance + `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` (по умолчанию **120 с**); после первого authenticated use expiry = first-use + `OPR_MAX_REVIEW_TIMEOUT_SECONDS` + `PROXY_TOKEN_GRACE_SECONDS` (grace по умолчанию **30 с**). Launcher передаёт в контейнер только этот токен как `CODEX_API_KEY` и сгенерированный `config.toml` (`model_provider = "opr_proxy"`). Review-контейнеры подключены только к internal-сети `review_egress` (без интернета); `model-proxy` ходит к upstream через `proxy_egress`. Снаружи proxy недоступен (только `review_egress`); реалистичный residual risk — другой review-контейнер в той же сети, который переиспользует утёкший job-токен в пределах per-job лимитов до TTL; upstream-ключ модели в review-контейнер не попадает. Режим `in_process` в M3 proxy не использует. Codex 0.164.0: отдельного надёжного флага отключения chatgpt.com model-catalog не найдено (кастомный провайдер в spike этот путь обходил); изоляция сети — запасной барьер.
 
 Proxy отправляет upstream `Accept-Encoding: identity` и снимает representation-заголовки `content-encoding` / `content-length` / `transfer-encoding` из ответа клиенту (чтобы не пробросить encoding после декодированного тела).
 
 
 | Переменная | По умолчанию | Кто читает | Заметки |
 | --- | --- | --- | --- |
-| `PROXY_ISSUER_TOKEN` | (нужен для старта model-proxy) | model-proxy, worker, launcher | Общий bearer для `POST/DELETE /internal/jobs/{job_id}/token`. Сгенерируйте `openssl rand -hex 32` (>= 16 символов). |
+| `PROXY_ISSUER_TOKEN` | (нужен для старта model-proxy) | model-proxy, worker | Общий bearer для `POST /internal/jobs/{job_id}/token` (только issue; revoke нет). Сгенерируйте `openssl rand -hex 32` (>= 16 символов). |
 | `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (через `model-proxy.env`; также api/worker) | Upstream-ключ модели по умолчанию внутри proxy. В container-runner overlay задавайте только в `model-proxy.env` (не в Compose `environment:`, иначе перетрёт/обнулит `env_file`). |
@@ -132,15 +127,15 @@ Proxy отправляет upstream `Accept-Encoding: identity` и снимае�
 | `PROXY_PROVIDER` | `openai` | model-proxy | Id провайдера (в M3 PR2 только `openai`; позже расширим). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Фиксированный upstream host (клиент не переопределяет). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` или `http` (тесты). |
-| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | model-proxy, worker, launcher | Верхняя граница TTL job-токена вместе с grace. |
-| `PROXY_TOKEN_GRACE_SECONDS` | `30` | launcher, model-proxy | Добавка к `OPR_MAX_REVIEW_TIMEOUT_SECONDS` в TTL job-токена. Операторы могут увеличить. |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | model-proxy, worker, launcher | Вместе с grace задаёт TTL job-токена после first use. |
+| `PROXY_TOKEN_GRACE_SECONDS` | `30` | model-proxy | Добавка к `OPR_MAX_REVIEW_TIMEOUT_SECONDS` после первого authenticated use. Операторы могут увеличить. |
+| `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` | `120` | model-proxy | Время жизни неиспользованного job-токена с момента выдачи. После первого use TTL = max review timeout + grace. |
 | `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Макс. размер тела запроса: завышенный `Content-Length` — 413 до чтения; chunked/без длины читается потоково и обрывается на лимите. |
 | `PROXY_MAX_REQUESTS_PER_JOB` | `50` | model-proxy | Макс. число proxied-запросов на job-токен. |
 | `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Макс. байты in+out на job-токен; исходящие учитываются инкрементально/атомарно при чтении upstream (stream и non-stream), чтобы параллельные запросы вместе не превысили лимит. |
 | `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Макс. одновременных proxied-запросов на job (слот резервируется до чтения тела клиента; освобождается при сбое/таймауте/413 загрузки). |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle между чанками и для загрузки клиента (`request.stream`), и для ответа upstream (`asyncio.timeout` на ожидание следующего чанка; float-timeout HTTPX — только мягкий per-phase backstop). |
 | `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock общий дедлайн на чтение тела запроса клиента и на весь upstream request+response (не только inactivity HTTPX); также останавливается по expiry job-токена и закрывает upstream-ответ. |
-| `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` | `2` | worker | Wall-clock bound finish-path revoke в `ContainerReviewExecutor.run` finally (best-effort; не задерживает cleanup). |
 
 
 Файл секретов только для proxy: скопируйте [`model-proxy.env.example`](../../model-proxy.env.example) в `model-proxy.env` (в gitignore), ограничьте права (`chmod 600` / Windows ACL) и положите туда `OPENAI_API_KEY`, `PROXY_OWNER_KEY_ENVS` и env, на которые ссылается map. Compose подключает его через `env_file` **только** у model-proxy (не worker/launcher).

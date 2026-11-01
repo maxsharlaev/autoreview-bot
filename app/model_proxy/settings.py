@@ -10,6 +10,7 @@ from dataclasses import dataclass
 MIN_ISSUER_TOKEN_LEN = 16
 DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS = 600
 DEFAULT_TOKEN_GRACE_SECONDS = 30
+DEFAULT_TOKEN_FIRST_USE_TTL_SECONDS = 120
 DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_REQUESTS_PER_JOB = 50
 DEFAULT_MAX_BYTES_PER_JOB = 16 * 1024 * 1024
@@ -75,6 +76,7 @@ class ProxySettings:
     provider: str
     max_review_timeout_seconds: int
     token_grace_seconds: int
+    token_first_use_ttl_seconds: int
     max_body_bytes: int
     max_requests_per_job: int
     max_bytes_per_job: int
@@ -235,6 +237,11 @@ def load_settings() -> ProxySettings:
     provider = (os.environ.get("PROXY_PROVIDER", "").strip() or DEFAULT_PROVIDER).lower()
     max_review = _int_env("OPR_MAX_REVIEW_TIMEOUT_SECONDS", DEFAULT_MAX_REVIEW_TIMEOUT_SECONDS)
     grace = _int_env("PROXY_TOKEN_GRACE_SECONDS", DEFAULT_TOKEN_GRACE_SECONDS, minimum=0)
+    first_use_ttl = _int_env(
+        "PROXY_TOKEN_FIRST_USE_TTL_SECONDS",
+        DEFAULT_TOKEN_FIRST_USE_TTL_SECONDS,
+        minimum=1,
+    )
     max_body = _int_env("PROXY_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES)
     max_reqs = _int_env("PROXY_MAX_REQUESTS_PER_JOB", DEFAULT_MAX_REQUESTS_PER_JOB)
     max_bytes = _int_env("PROXY_MAX_BYTES_PER_JOB", DEFAULT_MAX_BYTES_PER_JOB)
@@ -255,6 +262,7 @@ def load_settings() -> ProxySettings:
         provider=provider,
         max_review_timeout_seconds=max_review,
         token_grace_seconds=grace,
+        token_first_use_ttl_seconds=first_use_ttl,
         max_body_bytes=max_body,
         max_requests_per_job=max_reqs,
         max_bytes_per_job=max_bytes,

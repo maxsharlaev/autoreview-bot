@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import httpx
 import pytest
 from app.launcher.codex_config import render_opr_proxy_config
 from app.launcher.spec import build_container_config, build_host_config
@@ -163,101 +162,3 @@ def test_launcher_rejects_legacy_model_key_header(monkeypatch: pytest.MonkeyPatc
     assert isinstance(detail, dict)
     assert detail["code"] == "CODEX_UPGRADE_REQUIRED"
     assert REAL_KEY not in str(detail)
-
-
-@pytest.mark.asyncio
-async def test_revoke_on_finish_and_cancel_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from app.services.container_executor import ContainerReviewExecutor
-
-    monkeypatch.setenv("PROXY_ISSUER_TOKEN", "test-issuer-token-32chars-ok!!")
-    monkeypatch.setenv("MODEL_PROXY_URL", "http://model-proxy:8081")
-    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
-
-    events: list[str] = []
-
-    async def _issue(*, job_id: str, timeout_seconds: int, owner_id: str = "", **kwargs):
-        events.append(f"issue:{job_id}:{owner_id}")
-        return PROXY_TOKEN
-
-    async def _revoke(*, job_id: str, **kwargs):
-        from app.services.model_proxy_client import RevokeAttemptOutcome
-
-        events.append(f"revoke:{job_id}")
-        return RevokeAttemptOutcome.DONE
-
-    monkeypatch.setattr("app.services.container_executor.issue_job_token", _issue)
-    monkeypatch.setattr("app.services.container_executor.revoke_job_token_attempt", _revoke)
-
-    checkout = tmp_path / "co"
-    checkout.mkdir()
-    (checkout / "a.py").write_text("x=1\n", encoding="utf-8")
-    schema = tmp_path / "s.json"
-    schema.write_text("{}", encoding="utf-8")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content.decode())
-        assert body["proxy_token"] == PROXY_TOKEN
-        assert REAL_KEY not in request.content.decode()
-        assert "X-Model-Api-Key" not in request.headers
-        return httpx.Response(
-            200,
-            json={"job_id": body["job_id"], "status": "ok", "output": '{"ok":true}', "duration_seconds": 0.1},
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://launcher") as client:
-        ex = ContainerReviewExecutor(
-            launcher_url="http://launcher",
-            launcher_token="test-launcher-token-32chars-ok",
-            checkout_base=tmp_path / "base",
-            http_client=client,
-        )
-        await ex.run(
-            checkout=checkout,
-            prompt="p",
-            schema_path=schema,
-            output_path=tmp_path / "out.json",
-            model="m",
-            timeout_seconds=30,
-            openai_api_key=REAL_KEY,
-            owner_id="owner-a",
-        )
-    assert any(e.startswith("issue:") and e.endswith(":owner-a") for e in events)
-    assert any(e.startswith("revoke:") for e in events)
-
-
-def test_reaper_revokes_on_container_remove(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.launcher import reaper as reaper_mod
-
-    revoked: list[str] = []
-
-    def fake_schedule(job_id: str) -> None:
-        revoked.append(job_id)
-
-    monkeypatch.setattr(reaper_mod, "schedule_proxy_token_revoke", fake_schedule)
-    monkeypatch.setattr(reaper_mod, "orphan_ttl_seconds", lambda: 1)
-    monkeypatch.setattr(reaper_mod.lifecycle, "launch_active", lambda jid: False)
-
-    class FakeDocker:
-        def list_review_containers(self):
-            return [
-                {
-                    "Id": "deadbeef",
-                    "Created": 0,
-                    "Names": ["/opr-review-x"],
-                    "Labels": {"opr.review": "1", "opr.job_id": "d" * 32},
-                }
-            ]
-
-        def kill_container(self, cid):
-            return None
-
-        def remove_container(self, cid, force=False):
-            return None
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(reaper_mod, "reap_checkout_orphans", lambda **kwargs: 0)
-    removed = reaper_mod.reap_once(client=FakeDocker())  # type: ignore[arg-type]
-    assert removed >= 1
-    assert "d" * 32 in revoked

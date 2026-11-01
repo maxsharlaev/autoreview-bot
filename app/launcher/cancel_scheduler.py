@@ -11,11 +11,7 @@ AR-030-005: ``add_done_callback`` must run *outside* ``_INFLIGHT_LOCK``. A non-r
 ``threading.Lock`` deadlocks when the future is already done and the callback runs
 synchronously (``_clear_inflight`` would re-acquire the same lock).
 
-ARB34-002 / ARB34-005: after the bounded wait returns (confirmed or not), schedule a
-best-effort proxy token revoke on the *separate* revoke scheduler (dedicated asyncio
-loop + wall-clock ``asyncio.timeout``, bounded pending queue). ``_CANCEL_POOL`` is
-exclusive to Docker cancellation so blocked revokes cannot starve cancels. Reaper
-revoke remains the idempotent backstop.
+``_CANCEL_POOL`` is exclusive to Docker cancellation.
 """
 
 from __future__ import annotations
@@ -27,12 +23,11 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from app.launcher.job_lifecycle import lifecycle
-from app.launcher.revoke_scheduler import schedule_proxy_token_revoke
 from app.launcher.timeouts import launcher_cancel_deadline_seconds
 
 logger = logging.getLogger(__name__)
 
-# Long-lived pool ??? Docker cancel only (ARB34-005); never schedule proxy revoke here.
+# Long-lived pool: Docker cancel only.
 _CANCEL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="opr-cancel")
 _INFLIGHT: dict[str, Future] = {}
 _INFLIGHT_LOCK = threading.Lock()  # non-reentrant; never call callbacks while held
@@ -88,8 +83,6 @@ def cancel_review_job_bounded(*, job_id: str, client: Any | None = None) -> dict
             wait_s,
         )
         result = {"job_id": jid, "removed": 0, "confirmed": False}
-    # After the bounded response path ??? never wait on proxy I/O here (ARB34-002/005).
-    schedule_proxy_token_revoke(jid)
     return result
 
 

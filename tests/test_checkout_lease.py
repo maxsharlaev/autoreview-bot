@@ -74,11 +74,6 @@ def test_no_lease_young_dir_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 def test_no_lease_old_dir_removed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPR_CHECKOUT_ORPHAN_TTL_SECONDS", "120")
-    # UUID dirs require revoke confirm before delete (ARB34-009); this test covers lease/TTL only.
-    monkeypatch.setattr(
-        "app.launcher.reaper.schedule_proxy_token_revoke",
-        lambda jid: None,
-    )
     name = uuid.uuid4().hex
     d = tmp_path / name
     d.mkdir()

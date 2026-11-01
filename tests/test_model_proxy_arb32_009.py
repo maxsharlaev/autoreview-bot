@@ -21,7 +21,9 @@ def _rec(*, ttl: float = 60.0) -> JobTokenRecord:
         token_hash="b" * 64,
         job_id="a" * 32,
         owner_id="",
+        issued_at=time.time(),
         expires_at=time.time() + ttl,
+        first_used_at=time.time(),
     )
 
 
@@ -321,7 +323,10 @@ async def test_forward_header_wait_revoke_cancels_send(monkeypatch: pytest.Monke
     async def revoker() -> None:
         await send_started.wait()
         await asyncio.sleep(0.05)
-        store.revoke(rec.job_id)
+        with store._lock:
+            live = store._by_hash.get(rec.token_hash)
+            if live is not None:
+                store._drop_record(live)
 
     rev = asyncio.create_task(revoker())
     resp = await forward_responses(

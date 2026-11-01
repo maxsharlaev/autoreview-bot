@@ -26,6 +26,7 @@ def _base_settings(**overrides: object) -> ProxySettings:
         "provider": "openai",
         "max_review_timeout_seconds": 600,
         "token_grace_seconds": 60,
+        "token_first_use_ttl_seconds": 120,
         "max_body_bytes": 1024,
         "max_requests_per_job": 10,
         "max_bytes_per_job": 1024,

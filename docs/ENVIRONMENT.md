@@ -96,35 +96,30 @@ Used only when `codex.runner_backend: container`. Enable via `./scripts/stack.ps
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker network attached to review containers (not postgres/redis/api). |
 | `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor profile for review containers (`apparmor=<value>`). Default `unconfined` (same posture as the worker) so bubblewrap mounts work on AppArmor Linux hosts; set a dedicated profile name when one is installed. |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Age gate for labeled review orphan containers and related checkouts (real orphan TTL). |
-| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | worker, launcher | Max `timeout_seconds` accepted from staged `job.json` (matches default `codex.timeout_seconds`). Keep >= `codex.timeout_seconds`. Also used with `PROXY_TOKEN_GRACE_SECONDS` to derive the revoke retry window (ARB34-013). |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | worker, launcher | Max `timeout_seconds` accepted from staged `job.json` (matches default `codex.timeout_seconds`). Keep >= `codex.timeout_seconds`. |
 | `OPR_CLONE_TIMEOUT_SECONDS` | `300` | worker, launcher | Hard cap for `git_clone` (kills the git process group on timeout); further clamped to remaining ARQ JobDeadline minus reserved min Codex call + overhead. |
 | `OPR_CHECKOUT_ORPHAN_TTL_SECONDS` | `900` (no-lease fallback) | worker, launcher | Conservative age bound for checkout/job dirs that never got a sidecar `<dirname>.lease` (crash before first heartbeat). Live dirs are protected by sidecar lease heartbeats (`OPR_LEASE_HEARTBEAT_SECONDS`; file beside the dir, not inside the worktree; stale after heartbeat×3). |
 | `OPR_LEASE_HEARTBEAT_SECONDS` | `30` | worker, launcher | How often a live checkout/job dir refreshes its sidecar `<dirname>.lease` (outside the worktree). Reaper treats a lease as stale after heartbeat×3. |
 | `OPR_REVIEW_REAPER_INTERVAL_SECONDS` | `300` | launcher | How often the reaper scans for orphan review containers and stale checkout dirs. |
 | `LAUNCHER_CANCEL_DEADLINE_SECONDS` | `4` | launcher | Hard wait bound for DELETE `/v1/jobs/{id}`: cancel work runs in a background worker; the handler waits at most this long then returns `confirmed=false` while Docker cleanup may continue (tombstone already set; duplicate DELETE coalesces; reaper reclaims leftovers). Per Docker call also uses the actual remaining budget (never inflated; under 50ms → skip). Must be ≤ worker DELETE HTTP read timeout (5s) **minus a mandatory 0.5s margin** (max 4.5s; default 4s passes) and above `LAUNCHER_CANCEL_WAIT_SECONDS`. Docker HTTP uses a long-lived async loop + asyncio.timeout (not per-call asyncio.run). |
 | `LAUNCHER_CANCEL_WAIT_SECONDS` | `3` | launcher | After kill-first cancel, seconds to wait for an in-flight launch before confirming idle (capped by remaining `LAUNCHER_CANCEL_DEADLINE_SECONDS`). |
-| `LAUNCHER_CANCEL_REVOKE_TIMEOUT_SECONDS` | `2` | launcher | Short HTTP timeout for one best-effort proxy token revoke attempt (cancel/finish/reaper; never blocks cleanup). |
-| `LAUNCHER_CANCEL_REVOKE_MAX_PENDING` | `32` | launcher | Max in-flight background proxy revokes; when saturated the schedule is dropped with a log (TTL remains the hard cap). |
-| `PROXY_TOKEN_GRACE_SECONDS` | `30` | launcher, model-proxy | Added to `OPR_MAX_REVIEW_TIMEOUT_SECONDS` for job-token TTL. Operators may raise it. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback model name if staged `job.json` omits `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Path to the baked review seccomp JSON (override for tests/dev only). |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | launcher | Docker Engine endpoint. Compose sets the unix socket; do not point this at a remote daemon from an untrusted network. |
-| `PROXY_ISSUER_TOKEN` | (required for container backend) | worker, launcher, model-proxy | Shared issuer bearer; launcher reaper/cancel revoke leftover job tokens. |
-| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Issuer base URL (worker issues; launcher revokes on cancel/reaper). |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | Written into review `CODEX_HOME/config.toml` as the custom provider `base_url`. |
 
 <!-- section: model-proxy-m3 -->
 ## Model proxy (M3)
 
-Used when the container-runner overlay includes `model-proxy` (opt-in Compose). The proxy holds real model keys; the worker issues short-lived `opr_job_` tokens (TTL = `OPR_MAX_REVIEW_TIMEOUT_SECONDS` + `PROXY_TOKEN_GRACE_SECONDS`, grace default **30s**) and the launcher injects only that token as `CODEX_API_KEY` plus a generated `config.toml` (`model_provider = "opr_proxy"`). Review containers attach only to the internal `review_egress` network (no internet); `model-proxy` reaches the upstream API via `proxy_egress`. Revocation is **best-effort** (bounded, non-blocking); after any failure a job token may remain valid until TTL. Outside use is impossible (proxy only on `review_egress`); residual risk is another review container on that network reusing a leaked job token within per-job limits until TTL — the upstream model key never enters the review container. `in_process` does **not** use the proxy in M3. Codex 0.164.0: no separate reliable knob was found to disable the built-in chatgpt.com model-catalog fetch beyond using a custom provider (which avoided that path in the spike); network isolation is the backstop.
+Used when the container-runner overlay includes `model-proxy` (opt-in Compose). The proxy holds real model keys; the worker issues short-lived `opr_job_` tokens that are **not revoked**. Unused tokens expire at issuance + `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` (default **120s**); after first authenticated use, expiry is first-use + `OPR_MAX_REVIEW_TIMEOUT_SECONDS` + `PROXY_TOKEN_GRACE_SECONDS` (grace default **30s**). The launcher injects only that token as `CODEX_API_KEY` plus a generated `config.toml` (`model_provider = "opr_proxy"`). Review containers attach only to the internal `review_egress` network (no internet); `model-proxy` reaches the upstream API via `proxy_egress`. Outside use is impossible (proxy only on `review_egress`); residual risk is another review container on that network reusing a leaked job token within per-job limits until TTL — the upstream model key never enters the review container. `in_process` does **not** use the proxy in M3. Codex 0.164.0: no separate reliable knob was found to disable the built-in chatgpt.com model-catalog fetch beyond using a custom provider (which avoided that path in the spike); network isolation is the backstop.
 
 The proxy sends upstream `Accept-Encoding: identity` and strips representation headers `content-encoding` / `content-length` / `transfer-encoding` from the client response (so a decoded body is never forwarded with a stale encoding).
 
 
 | Variable | Default | Read by | Notes |
 | --- | --- | --- | --- |
-| `PROXY_ISSUER_TOKEN` | (required to start model-proxy / container backend) | model-proxy, worker, launcher | Shared bearer for `POST/DELETE /internal/jobs/{job_id}/token`. Generate with `openssl rand -hex 32` (>= 16 chars). |
-| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker, launcher | Base URL for issuer/revoke calls. |
+| `PROXY_ISSUER_TOKEN` | (required to start model-proxy / container backend) | model-proxy, worker | Shared bearer for `POST /internal/jobs/{job_id}/token` (issue only; tokens are not revoked). Generate with `openssl rand -hex 32` (>= 16 chars). |
+| `MODEL_PROXY_URL` | `http://model-proxy:8081` | worker | Base URL for issuer calls. |
 | `OPR_MODEL_PROXY_BASE_URL` | `http://model-proxy:8081/v1` | launcher | `base_url` in the review container `config.toml` custom provider. |
 | `OPENAI_API_KEY` | `""` | model-proxy (via `model-proxy.env`; also api/worker as today) | Default upstream model key inside the proxy. For the container-runner overlay, set it only in `model-proxy.env` (not Compose `environment:`, which would override/empty `env_file`). |
 | `PROXY_OWNER_<ID>_OPENAI_API_KEY` | `""` | model-proxy | Legacy per-owner upstream key (`<ID>` = `[A-Z0-9_]+`). Used only as a fallback for owner ids that do **not** contain `-`: lookup uses `PROXY_OWNER_<OWNER_ID.upper()>_OPENAI_API_KEY`. Hyphenated owner ids (`org-a`) must use `PROXY_OWNER_KEY_ENVS` (no hyphen→underscore remap). Falls back to `OPENAI_API_KEY` when no owner key matches. |
@@ -132,15 +127,15 @@ The proxy sends upstream `Accept-Encoding: identity` and strips representation h
 | `PROXY_PROVIDER` | `openai` | model-proxy | Upstream provider id (only `openai` in M3 PR2; extensible later). |
 | `PROXY_UPSTREAM_HOST` | `api.openai.com` | model-proxy | Fixed upstream host (callers cannot override). |
 | `PROXY_UPSTREAM_SCHEME` | `https` | model-proxy | `https` or `http` (tests). |
-| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | model-proxy, worker, launcher | Caps job-token TTL with grace. |
-| `PROXY_TOKEN_GRACE_SECONDS` | `30` | launcher, model-proxy | Added to `OPR_MAX_REVIEW_TIMEOUT_SECONDS` for job-token TTL. Operators may raise it. |
+| `OPR_MAX_REVIEW_TIMEOUT_SECONDS` | `600` | model-proxy, worker, launcher | With grace, caps post-first-use job-token TTL. |
+| `PROXY_TOKEN_GRACE_SECONDS` | `30` | model-proxy | Added to `OPR_MAX_REVIEW_TIMEOUT_SECONDS` after first authenticated use. Operators may raise it. |
+| `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` | `120` | model-proxy | Unused job-token lifetime from issuance. On first use, TTL becomes max review timeout + grace. |
 | `PROXY_MAX_BODY_BYTES` | `4194304` (4 MiB) | model-proxy | Max request body size: oversized `Content-Length` rejected with 413 before read; chunked/unknown length read incrementally and aborted at the cap. |
 | `PROXY_MAX_REQUESTS_PER_JOB` | `50` | model-proxy | Max proxied requests per job token. |
 | `PROXY_MAX_BYTES_PER_JOB` | `16777216` (16 MiB) | model-proxy | Max in+out bytes per job token; outbound counted incrementally/atomically while consuming upstream (stream and non-stream) so concurrent requests cannot jointly exceed the cap. |
 | `PROXY_MAX_CONCURRENT_PER_JOB` | `2` | model-proxy | Max concurrent in-flight proxied requests per job (slot reserved before reading the client body; released on upload failure/timeout/413). |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECONDS` | `300` | model-proxy | Wall-clock idle bound between chunks for both client upload (`request.stream`) and upstream response (`asyncio.timeout` per next-chunk wait; HTTPX float timeout is only a soft per-phase backstop). |
 | `PROXY_UPSTREAM_TIMEOUT_SECONDS` | `660` | model-proxy | Wall-clock overall deadline for reading the client request body and for the whole upstream request+response (not HTTPX inactivity alone); also stops at job-token expiry and closes the upstream response. |
-| `OPR_PROXY_FINISH_REVOKE_TIMEOUT_SECONDS` | `2` | worker | Wall-clock bound for finish-path revoke in `ContainerReviewExecutor.run` finally (best-effort; must not delay cleanup). |
 
 
 Proxy-only secrets file: copy [`model-proxy.env.example`](../model-proxy.env.example) to `model-proxy.env` (gitignored), restrict permissions (`chmod 600` / Windows ACLs), and put `OPENAI_API_KEY`, `PROXY_OWNER_KEY_ENVS`, and any env vars named by that map there. Compose loads it via `env_file` on **model-proxy only** (never worker/launcher).
