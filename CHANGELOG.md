@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+- **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
+
 ### Fixed
+- **ARB35-001:** docs no longer claim model-catalog traffic goes through the proxy; proxy allowlists only `POST /v1/responses`, and with pinned Codex + `opr_proxy` no separate catalog request was observed (spike) — network isolation fails the review visibly if one appears (EN/RU SECURITY / ARCHITECTURE / ENVIRONMENT).
+- **ARB35-002:** ROADMAP status row limitation rewritten by backend: default `in_process` still passes the model key; opt-in `container` (M3) receives only a proxy job token (EN/RU).
 - **M3 token lifetime / no revoke (ARB34-017/018):** job tokens are **not revoked**. Unused tokens expire at `issued_at + PROXY_TOKEN_FIRST_USE_TTL_SECONDS` (default **120s**). On first authenticated use the proxy atomically fixes `first_used_at`; expiry becomes `first_used_at + OPR_MAX_REVIEW_TIMEOUT_SECONDS + PROXY_TOKEN_GRACE_SECONDS` (grace default **30s**). Removed the revoke scheduler, cancel/finish/reaper revoke paths, worker revoke client, and proxy `DELETE /internal/jobs/{job_id}/token`. Security relies on TTL + internal `review_egress` + per-job limits; residual risk documented in SECURITY / EN+RU docs.
 - **ARB34-008:** launcher reaper schedules proxy revokes via the bounded revoke scheduler (wall-clock timeout) instead of inline `revoke_job_token_sync`, so a slow-dripping proxy cannot stall container/checkout cleanup.
 - **ARB34-006 (follow-up):** container-runner Compose no longer sets `OPENAI_API_KEY` / `PROXY_OWNER_KEY_ENVS` in `environment:` (those overrode `model-proxy.env`); secrets come from `model-proxy.env` only.
