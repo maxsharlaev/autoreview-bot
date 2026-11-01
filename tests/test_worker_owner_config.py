@@ -35,6 +35,10 @@ def owner_config(monkeypatch, tmp_path):
         path.write_text(yaml.safe_dump(data), encoding="utf-8")
         monkeypatch.chdir(tmp_path)  # no .env from the working tree
         monkeypatch.setenv("CONFIG_PATH", str(path))
+        # M4 default runner_backend is container; satisfy fail-fast env gate unless overridden.
+        monkeypatch.setenv("LAUNCHER_TOKEN", "test-launcher-token-32chars-ok")
+        monkeypatch.setenv("PROXY_ISSUER_TOKEN", "test-issuer-token-32chars-ok!!")
+        monkeypatch.setenv("MODEL_PROXY_URL", "http://model-proxy:8081")
         for name in LEGACY_ENV:
             monkeypatch.delenv(name, raising=False)
         for name, value in (env or {}).items():

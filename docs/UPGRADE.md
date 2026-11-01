@@ -45,6 +45,18 @@ Always back up the Postgres volume before a downgrade.
 
 Step-by-step upgrade to an `owners:` block, keeping history with `aliases: [default]`, and rollback: [MULTI_OWNER.md](MULTI_OWNER.md#upgrade-and-rollback).
 
+<!-- section: m4-container-default -->
+## M4: container backend is the default (hard cut)
+
+`codex.runner_backend` now defaults to **`container`**. There is no warning-only release and no silent fallback to `in_process`.
+
+On upgrade, pick one:
+
+1. **Stay on container (recommended):** keep or add `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create/update `model-proxy.env`, build `opr-review:local`, then `./scripts/stack.ps1 up` / `./scripts/stack.sh up` (container-runner overlay is included by default). If prerequisites are missing, the worker refuses to start (fail-fast).
+2. **Explicit fallback:** set `codex.runner_backend: in_process` in `config.yaml` and start with `./scripts/stack.ps1 up -InProcess` / `./scripts/stack.sh up --in-process` (omit the overlay).
+
+Existing configs that already set `runner_backend: in_process` keep that behavior; configs that omit the key pick up the new default.
+
 <!-- section: m3-container-proxy-rolling -->
 ## Container backend + model-proxy (M3): no rolling mix
 
@@ -56,7 +68,7 @@ rolling-compatible across the M3 proxy-token cut. Upgrade them together:
    (`docker compose ps`, launcher/reaper logs).
 2. **Upgrade together:** rebuild and recreate **worker + launcher + model-proxy** from the same
    checkout (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`
-   or `./scripts/stack.ps1 up -Container`). Create/update `model-proxy.env` from
+   or `./scripts/stack.ps1 up`). Create/update `model-proxy.env` from
    `model-proxy.env.example` before start; keep real keys out of worker/launcher env.
 3. **Rollback:** symmetric — recreate the same three services from the previous commit (and the
    matching `model-proxy.env`). Do not run a new worker against an old launcher (or the reverse):

@@ -45,6 +45,18 @@
 
 Пошаговое обновление до блока `owners:`, сохранение истории через `aliases: [default]` и откат: [MULTI_OWNER.md](MULTI_OWNER.md#обновление-и-откат).
 
+<!-- section: m4-container-default -->
+## M4: container backend по умолчанию (hard cut)
+
+`codex.runner_backend` теперь по умолчанию **`container`**. Отдельного warning-only релиза и тихого fallback на `in_process` нет.
+
+При апгрейде выберите одно:
+
+1. **Остаться на container (рекомендуется):** задайте/оставьте `LAUNCHER_TOKEN` и `PROXY_ISSUER_TOKEN` в `.env`, создайте/обновите `model-proxy.env`, соберите `opr-review:local`, затем `./scripts/stack.ps1 up` / `./scripts/stack.sh up` (overlay container-runner подключается по умолчанию). Без prerequisites worker не стартует (fail-fast).
+2. **Явный fallback:** в `config.yaml` укажите `codex.runner_backend: in_process` и поднимайте стек через `./scripts/stack.ps1 up -InProcess` / `./scripts/stack.sh up --in-process` (без overlay).
+
+Конфиги, где уже стоит `runner_backend: in_process`, не меняют поведение; если ключ отсутствует — применяется новый default.
+
 <!-- section: m3-container-proxy-rolling -->
 ## Container backend + model-proxy (M3): без rolling mix
 
@@ -56,7 +68,7 @@ Worker, launcher и model-proxy для `codex.runner_backend: container` **не*
    launcher jobs (`docker compose ps`, логи launcher/reaper).
 2. **Upgrade вместе:** rebuild и recreate **worker + launcher + model-proxy** из одного
    checkout (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`
-   или `./scripts/stack.ps1 up -Container`). Перед стартом создайте/обновите `model-proxy.env` из
+   или `./scripts/stack.ps1 up`). Перед стартом создайте/обновите `model-proxy.env` из
    `model-proxy.env.example`; реальные ключи не должны попадать в env worker/launcher.
 3. **Rollback:** симметрично — recreate тех же трёх сервисов с предыдущего commit (и парного
    `model-proxy.env`). Не запускайте новый worker против старого launcher (и наоборот):

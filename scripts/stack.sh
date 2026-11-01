@@ -2,7 +2,8 @@
 # Manage the autoreview-bot Compose stack (base + optional overlays).
 # Usage:
 #   ./scripts/stack.sh up
-#   ./scripts/stack.sh up --observability --container
+#   ./scripts/stack.sh up --observability
+#   ./scripts/stack.sh up --in-process
 #   ./scripts/stack.sh status
 set -euo pipefail
 
@@ -11,12 +12,17 @@ cd "$ROOT"
 
 COMMAND=""
 OBSERVABILITY=0
-CONTAINER=0
+# M4: container-runner overlay on by default; --in-process opts out.
+CONTAINER=1
+EXPLICIT_CONTAINER=0
+EXPLICIT_IN_PROCESS=0
 REST=()
 
 usage() {
   cat <<'EOF'
-Usage: stack.sh <up|down|restart|logs|status> [--observability] [--container] [--] [compose-args...]
+Usage: stack.sh <up|down|restart|logs|status> [--observability] [--container|--in-process] [--] [compose-args...]
+  --container     Include container-runner overlay (default since M4; kept for back-compat).
+  --in-process    Omit container-runner overlay (in_process reviews only).
 EOF
 }
 
@@ -32,6 +38,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --container)
       CONTAINER=1
+      EXPLICIT_CONTAINER=1
+      shift
+      ;;
+    --in-process)
+      CONTAINER=0
+      EXPLICIT_IN_PROCESS=1
       shift
       ;;
     -h|--help)
@@ -52,6 +64,11 @@ done
 
 if [[ -z "$COMMAND" ]]; then
   usage
+  exit 2
+fi
+
+if [[ "$EXPLICIT_CONTAINER" -eq 1 && "$EXPLICIT_IN_PROCESS" -eq 1 ]]; then
+  echo "Use either --container (default) or --in-process, not both." >&2
   exit 2
 fi
 
@@ -87,8 +104,8 @@ assert_launcher_token() {
   local token
   token="$(dotenv_get LAUNCHER_TOKEN || true)"
   if [[ -z "$token" || ${#token} -lt 16 ]]; then
-    cat <<'EOF'
-LAUNCHER_TOKEN is missing or shorter than 16 characters (required for --container).
+    cat <<EOF
+LAUNCHER_TOKEN is missing or shorter than 16 characters (required for the container-runner overlay; default since M4).
 
 Generate one (do not commit it; put it in .env):
 
@@ -100,6 +117,9 @@ Generate one (do not commit it; put it in .env):
 
 Then set in .env:
   LAUNCHER_TOKEN=<paste value>
+
+Or opt out of the overlay: ./scripts/stack.sh ${COMMAND} --in-process
+(and set codex.runner_backend: in_process in config.yaml).
 EOF
     exit 1
   fi

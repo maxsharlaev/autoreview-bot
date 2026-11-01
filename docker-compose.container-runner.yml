@@ -1,4 +1,5 @@
-# Opt-in overlay for codex.runner_backend: container (not loaded by default CI/`docker compose`).
+# Container-runner overlay (M4 default via ./scripts/stack.* up; omit with --in-process / -InProcess).
+# Not loaded by bare `docker compose -f docker-compose.yml` or the CI image-build job.
 # Usage:
 #   docker build -f Dockerfile.review -t opr-review:local .
 #   # set LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN in .env (openssl rand -hex 32), then:

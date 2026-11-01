@@ -153,11 +153,19 @@ def test_startup_warns_when_no_owner_bound_to_legacy_default(build, warned, capl
     ],
 )
 async def test_worker_startup_warns_when_no_owner_bound_to_legacy_default(build, warned, caplog) -> None:
+    from app.config import AppConfig, CodexYaml
     from app.owners.registry import LEGACY_DEFAULT_UNBOUND_WARNING
     from app.workers import settings as worker_settings
 
+    # Owner-binding warning only; keep in_process so ensure_container_runner_env is a no-op
+    # even when get_settings is a MagicMock (worker_job_timeout would otherwise fail closed).
     with (
         patch.object(worker_settings, "get_settings"),
+        patch.object(
+            worker_settings,
+            "get_app_config",
+            return_value=AppConfig(codex=CodexYaml(runner_backend="in_process")),
+        ),
         patch.object(worker_settings, "configure_logging"),
         patch.object(worker_settings, "start_worker_metrics_server"),
         patch.object(worker_settings, "create_engine"),

@@ -5,7 +5,8 @@
 
 .EXAMPLE
   .\scripts\stack.ps1 up
-  .\scripts\stack.ps1 up -Observability -Container
+  .\scripts\stack.ps1 up -Observability
+  .\scripts\stack.ps1 up -InProcess
   .\scripts\stack.ps1 status
 #>
 [CmdletBinding()]
@@ -15,7 +16,10 @@ param(
     [string]$Command,
 
     [switch]$Observability,
+    # Default stack includes the container-runner overlay (M4). Kept for back-compat.
     [switch]$Container,
+    # Opt out of the container-runner overlay (in_process reviews only).
+    [switch]$InProcess,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
@@ -24,6 +28,14 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $Root
+
+if ($Container -and $InProcess) {
+    Write-Host "Use either -Container (default) or -InProcess, not both."
+    exit 2
+}
+
+# M4: container-runner overlay is on unless -InProcess.
+$UseContainerOverlay = -not $InProcess
 
 function Get-DotEnvValue([string]$Name) {
     $envVal = [Environment]::GetEnvironmentVariable($Name)
@@ -51,7 +63,7 @@ function Assert-LauncherToken {
     $token = Get-DotEnvValue "LAUNCHER_TOKEN"
     if ([string]::IsNullOrWhiteSpace($token) -or $token.Length -lt 16) {
         Write-Host @"
-LAUNCHER_TOKEN is missing or shorter than 16 characters (required for -Container).
+LAUNCHER_TOKEN is missing or shorter than 16 characters (required for the container-runner overlay; default since M4).
 
 Generate one (do not commit it; put it in .env):
 
@@ -65,6 +77,9 @@ Generate one (do not commit it; put it in .env):
 
 Then set in .env:
   LAUNCHER_TOKEN=<paste value>
+
+Or opt out of the overlay: .\scripts\stack.ps1 $Command -InProcess
+(and set codex.runner_backend: in_process in config.yaml).
 "@
         exit 1
     }
@@ -75,13 +90,13 @@ function Get-ComposeArgs {
     if ($Observability) {
         $composeArgs += @("-f", "docker-compose.observability.yml")
     }
-    if ($Container) {
+    if ($UseContainerOverlay) {
         $composeArgs += @("-f", "docker-compose.container-runner.yml")
     }
     return $composeArgs
 }
 
-if ($Container) {
+if ($UseContainerOverlay) {
     Assert-LauncherToken
 }
 

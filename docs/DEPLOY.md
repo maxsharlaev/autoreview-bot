@@ -127,7 +127,7 @@ Preferred local commands (from the repo root):
 ```powershell
 .\scripts\stack.ps1 up
 .\scripts\stack.ps1 up -Observability
-.\scripts\stack.ps1 up -Container
+.\scripts\stack.ps1 up -InProcess
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
 ```
@@ -135,20 +135,19 @@ Preferred local commands (from the repo root):
 ```bash
 ./scripts/stack.sh up
 ./scripts/stack.sh up --observability
-./scripts/stack.sh up --container
+./scripts/stack.sh up --in-process
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-`-Container` / `--container` adds `docker-compose.container-runner.yml` and requires `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). Raw `docker compose -f …` commands remain supported as an alternative.
+Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy) and requires `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. Raw `docker compose -f …` commands remain supported as an alternative.
 
 <!-- section: deployment-steps -->
 ## Deployment steps
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
 2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only inside the Docker network.
-3. `./scripts/stack.ps1 up` (or `./scripts/stack.sh up`). Wait for `migrate` (exit 0), then `api` and `worker` Up. For `codex.runner_backend: container`: set `LAUNCHER_TOKEN` in `.env`, build the review image (`docker build -f Dockerfile.review -t opr-review:local .`), then `./scripts/stack.ps1 up -Container` (or `./scripts/stack.sh up --container`). Alternative: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`.
-For `container` + model-proxy (M3): create `model-proxy.env` from `model-proxy.env.example` (restricted perms; never mount on worker/launcher). Restrict the host firewall / cloud security group for Compose `proxy_egress` to the configured upstream model host (`PROXY_UPSTREAM_HOST`). Upgrades of worker, launcher, and model-proxy must be drained and applied together — see [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-no-rolling-mix).
+3. Default backend is `codex.runner_backend: container` (M4). Set `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create `model-proxy.env` from `model-proxy.env.example` (restricted perms; never mount on worker/launcher), build the review image (`docker build -f Dockerfile.review -t opr-review:local .`), then `./scripts/stack.ps1 up` (or `./scripts/stack.sh up`) — the container-runner overlay is included by default. Wait for `migrate` (exit 0), then `api`, `worker`, `launcher`, and `model-proxy` Up. Alternative: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`. For the explicit `in_process` fallback: set `codex.runner_backend: in_process` and `./scripts/stack.ps1 up -InProcess` (or `./scripts/stack.sh up --in-process`). Restrict the host firewall / cloud security group for Compose `proxy_egress` to the configured upstream model host (`PROXY_UPSTREAM_HOST`). Upgrades of worker, launcher, and model-proxy must be drained and applied together — see [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-no-rolling-mix).
 
 4. Checks from the host or internal network:
 

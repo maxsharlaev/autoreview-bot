@@ -127,7 +127,7 @@ features:
 ```powershell
 .\scripts\stack.ps1 up
 .\scripts\stack.ps1 up -Observability
-.\scripts\stack.ps1 up -Container
+.\scripts\stack.ps1 up -InProcess
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
 ```
@@ -135,20 +135,19 @@ features:
 ```bash
 ./scripts/stack.sh up
 ./scripts/stack.sh up --observability
-./scripts/stack.sh up --container
+./scripts/stack.sh up --in-process
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-`-Container` / `--container` подключает `docker-compose.container-runner.yml` и требует `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). «Сырые» команды `docker compose -f …` остаются запасным вариантом.
+С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy) и требует `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). «Сырые» команды `docker compose -f …` остаются запасным вариантом.
 
 <!-- section: deployment-steps -->
 ## Шаги деплоя
 
 1. Склонируйте репозиторий на хост; создайте `.env` и `config.yaml`, как описано выше.
 2. Проверьте, что Postgres/Redis не опубликованы на хосте, `8000` доступен reverse proxy через loopback, а `9100` — только внутри Docker-сети.
-3. `./scripts/stack.ps1 up` (или `./scripts/stack.sh up`). Дождитесь `migrate` (exit 0), затем `api` и `worker` в состоянии Up. Для `codex.runner_backend: container`: задайте `LAUNCHER_TOKEN` в `.env`, соберите review-образ (`docker build -f Dockerfile.review -t opr-review:local .`), затем `./scripts/stack.ps1 up -Container` (или `./scripts/stack.sh up --container`). Альтернатива: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`.
-Для `container` + model-proxy (M3): создайте `model-proxy.env` из `model-proxy.env.example` (ограниченные права; не монтировать на worker/launcher). Ограничьте host firewall / cloud security group для Compose `proxy_egress` upstream-хостом модели (`PROXY_UPSTREAM_HOST`). Worker, launcher и model-proxy обновляйте после drain вместе — см. [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-без-rolling-mix).
+3. Backend по умолчанию — `codex.runner_backend: container` (M4). Задайте `LAUNCHER_TOKEN` и `PROXY_ISSUER_TOKEN` в `.env`, создайте `model-proxy.env` из `model-proxy.env.example` (ограниченные права; не монтировать на worker/launcher), соберите review-образ (`docker build -f Dockerfile.review -t opr-review:local .`), затем `./scripts/stack.ps1 up` (или `./scripts/stack.sh up`) — overlay container-runner подключается по умолчанию. Дождитесь `migrate` (exit 0), затем Up у `api`, `worker`, `launcher` и `model-proxy`. Альтернатива: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`. Явный fallback `in_process`: `codex.runner_backend: in_process` и `./scripts/stack.ps1 up -InProcess` (или `./scripts/stack.sh up --in-process`). Ограничьте host firewall / cloud security group для Compose `proxy_egress` upstream-хостом модели (`PROXY_UPSTREAM_HOST`). Worker, launcher и model-proxy обновляйте после drain вместе — см. [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-без-rolling-mix).
 
 4. Проверки с хоста или из внутренней сети:
 
