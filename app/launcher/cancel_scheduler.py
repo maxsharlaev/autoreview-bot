@@ -16,6 +16,9 @@ best-effort proxy token revoke on the *separate* revoke scheduler (dedicated asy
 loop + wall-clock ``asyncio.timeout``, bounded pending queue). ``_CANCEL_POOL`` is
 exclusive to Docker cancellation so blocked revokes cannot starve cancels. Reaper
 stopped containers remain for the reaper until revoke confirms or the retry window elapses.
+
+ARB34-015: cancel passes ``expires_at`` from job.json / ``opr.token_expires_unix`` when
+known so a short attempt bound cannot mark ``WINDOW_EXPIRED`` and drop evidence early.
 """
 
 from __future__ import annotations
@@ -36,6 +39,49 @@ logger = logging.getLogger(__name__)
 _CANCEL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="opr-cancel")
 _INFLIGHT: dict[str, Future] = {}
 _INFLIGHT_LOCK = threading.Lock()  # non-reentrant; never call callbacks while held
+
+
+def _lookup_token_expires_unix(job_id: str, *, client: Any | None = None) -> float | None:
+    """Best-effort absolute token expiry for cancel-path revoke (ARB34-015).
+
+    Prefers staged ``job.json`` ``token_expires_unix``, then the review container
+    label ``opr.token_expires_unix``. Never blocks cancel on lookup failure.
+    """
+    from app.launcher.reaper import (
+        checkout_base_path,
+        job_token_expires_unix_from_checkout,
+        job_token_expires_unix_from_container,
+    )
+
+    try:
+        path = checkout_base_path() / job_id
+        exp = job_token_expires_unix_from_checkout(path)
+        if exp is not None:
+            return float(exp)
+    except Exception:  # noqa: BLE001 - cancel must not fail on lookup
+        logger.debug("cancel expires_at checkout lookup failed job=%s", job_id, exc_info=True)
+
+    owns = client is None
+    docker = client
+    try:
+        if docker is None:
+            from app.launcher.docker_api import DockerClient
+
+            docker = DockerClient()
+        listed = docker.list_containers_for_job(job_id, timeout=0.5)
+        for item in listed or []:
+            exp = job_token_expires_unix_from_container(item)
+            if exp is not None:
+                return float(exp)
+    except Exception:  # noqa: BLE001
+        logger.debug("cancel expires_at container lookup failed job=%s", job_id, exc_info=True)
+    finally:
+        if owns and docker is not None:
+            try:
+                docker.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return None
 
 
 def _clear_inflight(job_id: str, fut: Future) -> None:
@@ -89,7 +135,8 @@ def cancel_review_job_bounded(*, job_id: str, client: Any | None = None) -> dict
         )
         result = {"job_id": jid, "removed": 0, "confirmed": False}
     # After the bounded response path — never wait on proxy I/O here (ARB34-002/005).
-    # If the revoke queue rejects, note for reaper retry (ARB34-009); no disk tombstone.
-    if not schedule_proxy_token_revoke(jid):
+    # Pass known expires_at so attempt bounds cannot mark WINDOW_EXPIRED (ARB34-015).
+    expires_at = _lookup_token_expires_unix(jid, client=client)
+    if not schedule_proxy_token_revoke(jid, expires_at=expires_at):
         note_revoke_needed(jid)
     return result

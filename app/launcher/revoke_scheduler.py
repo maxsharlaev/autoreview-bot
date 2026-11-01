@@ -5,10 +5,12 @@ around the async HTTP client. Pending work is bounded; ``schedule_proxy_token_re
 returns whether the job was accepted. Same ``job_id`` is deduped.
 
 Transient failures retry with exponential backoff until the revoke is confirmed
-or the proxy token ``expires_at`` (+ clock-skew margin) elapses (ARB34-014).
-``expires_at`` comes from model-proxy issuance (label/job.json); the scheduler keeps
-the **latest** known deadline. Without ``expires_at``, fall back to issuance-receipt
-+ full TTL when known; otherwise retain until the orphan TTL gate.
+or a **known** proxy token deadline elapses (``expires_at`` + clock-skew, or
+issuance-receipt + TTL; ARB34-014/015). Short *attempt* deadlines (unknown expiry)
+never become ``WINDOW_EXPIRED`` — status stays ``PENDING`` / retry-needed so a later
+real ``expires_at`` can still retain evidence (ARB34-015). Status is upgradable:
+learning a later ``expires_at`` resets an erroneous ``WINDOW_EXPIRED`` back to
+``PENDING`` (latest-wins). Without any known deadline, retain until the orphan TTL gate.
 Derived TTL defaults to ``OPR_MAX_REVIEW_TIMEOUT_SECONDS + PROXY_TOKEN_GRACE_SECONDS``
 (ARB34-013); an explicit ``LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS`` may only raise it.
 
@@ -299,6 +301,39 @@ def _remember_issued(job_id: str, issued_at: float | None) -> float | None:
     return prev
 
 
+def _token_deadline_locked(jid: str, clock: float) -> tuple[float | None, bool]:
+    """Known token delete-deadline (expires/issued + skew), or (None, False).
+
+    Distinct from short *attempt* bounds used when expiry is unknown (ARB34-015).
+    """
+    exp = _EXPIRES_AT.get(jid)
+    if exp is not None:
+        return float(exp) + float(revoke_clock_skew_seconds()), True
+    iss = _ISSUED_AT.get(jid)
+    if iss is not None:
+        return (
+            float(iss) + float(revoke_retry_window_seconds()) + float(revoke_clock_skew_seconds()),
+            True,
+        )
+    return None, False
+
+
+def _maybe_upgrade_window_expired_locked(jid: str, clock: float) -> RevokeJobStatus | None:
+    """If WINDOW_EXPIRED but known token deadline is still ahead, reset to PENDING."""
+    st = _STATUS.get(jid)
+    if st is not RevokeJobStatus.WINDOW_EXPIRED:
+        return st
+    deadline, has_known = _token_deadline_locked(jid, clock)
+    if has_known and deadline is not None and clock < deadline:
+        _STATUS[jid] = RevokeJobStatus.PENDING
+        return RevokeJobStatus.PENDING
+    if not has_known:
+        # Erroneous expiry mark with no known token deadline → reopen as pending.
+        _STATUS[jid] = RevokeJobStatus.PENDING
+        return RevokeJobStatus.PENDING
+    return st
+
+
 def effective_token_expires_at(
     job_id: str,
     *,
@@ -389,17 +424,11 @@ def revoke_status(
         st = _STATUS.get(jid)
         if st is RevokeJobStatus.CONFIRMED:
             return RevokeJobStatus.CONFIRMED
-        # Deadline from expires_at (+skew) or issued_at+TTL; never from bare created_unix.
-        exp = _EXPIRES_AT.get(jid)
-        if exp is not None:
-            deadline = float(exp) + float(revoke_clock_skew_seconds())
-        else:
-            iss = _ISSUED_AT.get(jid)
-            if iss is not None:
-                deadline = float(iss) + float(revoke_retry_window_seconds()) + float(revoke_clock_skew_seconds())
-            else:
-                deadline = None
-        if deadline is not None and clock >= deadline:
+        # Upgrade erroneous WINDOW_EXPIRED when a later real deadline arrives (ARB34-015).
+        st = _maybe_upgrade_window_expired_locked(jid, clock)
+        # Token deadline only — never the short attempt bound (ARB34-015).
+        deadline, has_known = _token_deadline_locked(jid, clock)
+        if has_known and deadline is not None and clock >= deadline:
             _STATUS[jid] = RevokeJobStatus.WINDOW_EXPIRED
             return RevokeJobStatus.WINDOW_EXPIRED
         if st is RevokeJobStatus.WINDOW_EXPIRED:
@@ -537,12 +566,27 @@ async def _revoke_with_retries(
 
             now = time.time()
             if now >= retry_deadline:
+                # Attempt bound exhausted. WINDOW_EXPIRED only for a *known* token
+                # deadline that has passed; otherwise stay PENDING for reaper retry
+                # so a later expires_at can still retain evidence (ARB34-015).
+                with _PENDING_LOCK:
+                    token_deadline, has_known = _token_deadline_locked(job_id, now)
+                if has_known and token_deadline is not None and now >= token_deadline:
+                    logger.warning(
+                        "background proxy revoke giving up job=%s: token window expired",
+                        job_id,
+                    )
+                    clear_revoke_needed(job_id)
+                    _set_status(job_id, RevokeJobStatus.WINDOW_EXPIRED)
+                    return
                 logger.warning(
-                    "background proxy revoke giving up job=%s after retry window",
+                    "background proxy revoke attempt budget exhausted job=%s "
+                    "known_deadline=%s; keeping PENDING for reaper retry",
                     job_id,
+                    has_known,
                 )
-                clear_revoke_needed(job_id)
-                _set_status(job_id, RevokeJobStatus.WINDOW_EXPIRED)
+                _set_status(job_id, RevokeJobStatus.PENDING)
+                note_revoke_needed(job_id)
                 return
 
             if outcome is RevokeAttemptOutcome.CONFIG_ERROR:
@@ -574,9 +618,10 @@ def schedule_proxy_token_revoke(
 ) -> bool:
     """Best-effort background revoke; never blocks cancel/reaper.
 
-    Returns True if accepted (queued, in-flight, already confirmed, or window
-    already expired). Returns False if the pending queue is saturated.
-    ``expires_at`` is the absolute proxy token expiry (preferred, ARB34-014).
+    Returns True if accepted (queued, in-flight, already confirmed, or token
+    window already expired). Returns False if the pending queue is saturated.
+    ``expires_at`` is the absolute proxy token expiry (preferred, ARB34-014/015).
+    Passing a later ``expires_at`` upgrades a premature ``WINDOW_EXPIRED``.
     """
     global _PENDING
     jid = (job_id or "").strip()
@@ -594,16 +639,14 @@ def schedule_proxy_token_revoke(
             _remember_issued(jid, issued_at)
         if _STATUS.get(jid) is RevokeJobStatus.CONFIRMED:
             return True
-        exp = _EXPIRES_AT.get(jid)
-        iss = _ISSUED_AT.get(jid)
-        has_known = exp is not None or iss is not None
-        if exp is not None:
-            deadline = float(exp) + float(revoke_clock_skew_seconds())
-        elif iss is not None:
-            deadline = float(iss) + float(revoke_retry_window_seconds()) + float(revoke_clock_skew_seconds())
+        # Learning expires_at may reopen an erroneous WINDOW_EXPIRED (ARB34-015).
+        _maybe_upgrade_window_expired_locked(jid, now)
+        token_deadline, has_known = _token_deadline_locked(jid, now)
+        if has_known:
+            deadline = float(token_deadline)  # type: ignore[arg-type]
         else:
-            # No known expiry: do not mark WINDOW_EXPIRED; bound this attempt briefly
-            # so the reaper can re-schedule (orphan TTL is the delete backstop).
+            # No known expiry: short *attempt* bound only — never WINDOW_EXPIRED
+            # (orphan TTL is the delete backstop; ARB34-014/015).
             deadline = now + max(float(budget) * 3.0, 5.0)
         if has_known and now >= deadline:
             _STATUS[jid] = RevokeJobStatus.WINDOW_EXPIRED

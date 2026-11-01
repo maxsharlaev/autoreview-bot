@@ -110,7 +110,7 @@
 | `LAUNCHER_REVOKE_RETRY_MAX_BACKOFF_SECONDS` | `30` | launcher | Потолок exponential backoff между transient revoke retry (ARB34-009). |
 | `LAUNCHER_REVOKE_RETRY_SET_MAX` | `256` | launcher | Макс. in-memory job id, которые повторяют schedule revoke после reject очереди (ARB34-009; size + TTL). Остановленные orphans — durable сигнал. |
 | `LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS` | derived: `OPR_MAX_REVIEW_TIMEOUT_SECONDS` + `PROXY_TOKEN_GRACE_SECONDS` (optional override) | launcher | Полный TTL токена для fallback-дедлайна от момента получения ответа issue (ARB34-013/014). Основное окно удаления — абсолютный `token_expires_unix` / `opr.token_expires_unix` из model-proxy `expires_at` (+ clock skew). Явное значение меньше derived sum — fail closed при старте. |
-| `LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS` | `30` | launcher | Добавка к абсолютному `expires_at` proxy-токена перед истечением revoke window (ARB34-014). |
+| `LAUNCHER_REVOKE_CLOCK_SKEW_SECONDS` | `30` | launcher | Добавка к абсолютному `expires_at` proxy-токена перед истечением revoke window (ARB34-014). Короткие attempt-дедлайны без известного expires_at не дают WINDOW_EXPIRED (ARB34-015). |
 | `PROXY_TOKEN_GRACE_SECONDS` | `60` | launcher | Тот же grace, что у TTL job-токена model-proxy. Вместе с `OPR_MAX_REVIEW_TIMEOUT_SECONDS` задаёт default `LAUNCHER_REVOKE_RETRY_WINDOW_SECONDS` (ARB34-013). Не секрет; allowlist в lint имён env compose. |
 | `OPR_DEFAULT_MODEL` | (from staged `job.json`) | launcher | Fallback-имя модели, если в staged `job.json` нет `model`. |
 | `OPR_REVIEW_SECCOMP_PROFILE` | `/opt/opr-seccomp/review-bwrap.json` | launcher | Путь к seccomp JSON review-контейнера (override только для tests/dev). |
