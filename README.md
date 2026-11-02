@@ -29,12 +29,12 @@ cp model-proxy.env.example model-proxy.env
 #       LAUNCHER_TOKEN (>= 16 chars), PROXY_ISSUER_TOKEN (>= 16 chars)
 # model-proxy.env: OPENAI_API_KEY (and optional per-owner keys); never mount this on worker/launcher
 # config.yaml: github.allowed_repos; disable Jira features unless Jira is configured
-./scripts/stack.sh up            # Linux/macOS (builds opr-review:local, then compose + container-runner overlay)
+./scripts/stack.sh up            # Linux/macOS (compose --profile build-review build review-image, then up + overlay)
 # .\scripts\stack.ps1 up         # Windows
 curl -fsS http://localhost:8000/is-ready
 ```
 
-Lightweight alternative (no launcher / model-proxy): set `codex.runner_backend: in_process` in `config.yaml`, then `./scripts/stack.sh up --in-process` (or `.\scripts\stack.ps1 up -InProcess`).
+Lightweight alternative (no launcher / model-proxy): set `codex.runner_backend: in_process` in `config.yaml`, then `./scripts/stack.sh --in-process up` (or `.\scripts\stack.ps1 -InProcess up`).
 
 Start a first review by hand:
 

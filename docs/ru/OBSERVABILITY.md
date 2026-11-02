@@ -34,9 +34,9 @@
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki
-./scripts/stack.sh up --observability
+./scripts/stack.sh --observability up
 # Stop everything (Postgres data is kept)
-./scripts/stack.sh down --observability
+./scripts/stack.sh --observability down
 ```
 
 <!-- section: dev-prometheus -->
@@ -62,9 +62,9 @@ Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работ
 ### Только Prometheus и масштабирование
 
 ```bash
-./scripts/stack.sh compose --observability up -d prometheus
-./scripts/stack.sh compose --observability up -d --scale worker=2 worker
-./scripts/stack.sh compose --observability rm -sf prometheus grafana loki alloy docker-socket-proxy
+./scripts/stack.sh --observability compose up -d prometheus
+./scripts/stack.sh --observability compose up -d --scale worker=2 worker
+./scripts/stack.sh --observability compose rm -sf prometheus grafana loki alloy docker-socket-proxy
 ```
 
 Первая команда запускает только Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет сервисы наблюдаемости.

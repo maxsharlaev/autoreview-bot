@@ -34,9 +34,9 @@ For local checks only, [docker-compose.observability.yml](../docker-compose.obse
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki
-./scripts/stack.sh up --observability
+./scripts/stack.sh --observability up
 # Stop everything (Postgres data is kept)
-./scripts/stack.sh down --observability
+./scripts/stack.sh --observability down
 ```
 
 <!-- section: dev-prometheus -->
@@ -62,9 +62,9 @@ The logs contain exactly what `./scripts/stack.sh logs` shows, nothing more, so 
 ### Prometheus only and scaling
 
 ```bash
-./scripts/stack.sh compose --observability up -d prometheus
-./scripts/stack.sh compose --observability up -d --scale worker=2 worker
-./scripts/stack.sh compose --observability rm -sf prometheus grafana loki alloy docker-socket-proxy
+./scripts/stack.sh --observability compose up -d prometheus
+./scripts/stack.sh --observability compose up -d --scale worker=2 worker
+./scripts/stack.sh --observability compose rm -sf prometheus grafana loki alloy docker-socket-proxy
 ```
 
 The first command starts only Prometheus, the second scales workers (all replicas show up under `open-pr-review-worker`), the last removes the observability services.

@@ -92,7 +92,7 @@
 | `LAUNCHER_URL` | `http://launcher:8080` | worker | Base URL launcher во внутренней сети. |
 | `OPR_CHECKOUT_BASE` | `/var/opr/checkouts` | worker, launcher | Корень общего тома со staged checkout; launcher отвергает path traversal вне этой базы. |
 | `OPR_CHECKOUT_VOLUME` | `opr_checkouts` | launcher | Имя Docker volume для Mounts `Type=volume` + `VolumeOptions.Subpath` (не launcher-local bind; нужен Engine ≥ 26 / API ≥ 1.45). |
-| `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher | Тег review-образа из `Dockerfile.review`. Compose подставляет `${OPR_REVIEW_IMAGE:-opr-review:local}`; `stack up` собирает тот же тег. |
+| `OPR_REVIEW_IMAGE` | `opr-review:local` | launcher, review-image | Тег review-образа из `Dockerfile.review`. Compose подставляет `${OPR_REVIEW_IMAGE:-opr-review:local}` для launcher и build-only сервиса `review-image` (`profiles: [build-review]`); `stack up` запускает `docker compose --profile build-review build review-image`. |
 | `OPR_REVIEW_NETWORK` | `autoreview_review_egress` | launcher | Docker-сеть review-контейнеров (не postgres/redis/api). |
 | `LAUNCHER_APPARMOR_PROFILE` | `unconfined` | launcher | AppArmor-профиль review-контейнеров (`apparmor=<value>`). Default `unconfined` (как у worker), чтобы bubblewrap mount работал на Linux с AppArmor; задайте имя dedicated profile, когда он установлен. |
 | `OPR_REVIEW_ORPHAN_TTL_SECONDS` | `7200` | launcher | Age gate для labeled review-orphan контейнеров и связанных checkout (реальный orphan TTL). |

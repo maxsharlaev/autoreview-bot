@@ -52,8 +52,8 @@
 
 При апгрейде выберите одно:
 
-1. **Остаться на container (рекомендуется):** задайте/оставьте `LAUNCHER_TOKEN` и `PROXY_ISSUER_TOKEN` в `.env`, создайте/обновите `model-proxy.env`, затем `./scripts/stack.ps1 up` / `./scripts/stack.sh up` (helper собирает `opr-review:local` из `Dockerfile.review` и подключает overlay container-runner по умолчанию; для non-helper деплоя сначала соберите образ вручную). Без prerequisites worker не стартует (fail-fast).
-2. **Явный fallback:** в `config.yaml` укажите `codex.runner_backend: in_process` и поднимайте стек через `./scripts/stack.ps1 up -InProcess` / `./scripts/stack.sh up --in-process` (без overlay).
+1. **Остаться на container (рекомендуется):** задайте/оставьте `LAUNCHER_TOKEN` и `PROXY_ISSUER_TOKEN` в `.env`, создайте/обновите `model-proxy.env`, затем `./scripts/stack.ps1 up` / `./scripts/stack.sh up` (helper запускает `--profile build-review build review-image` и подключает overlay container-runner по умолчанию; для non-helper деплоя сначала соберите `review-image` вручную). Без prerequisites worker не стартует (fail-fast).
+2. **Явный fallback:** в `config.yaml` укажите `codex.runner_backend: in_process` и поднимайте стек через `./scripts/stack.ps1 -InProcess up` / `./scripts/stack.sh --in-process up` (без overlay).
 
 Конфиги, где уже стоит `runner_backend: in_process`, не меняют поведение; если ключ отсутствует — применяется новый default.
 

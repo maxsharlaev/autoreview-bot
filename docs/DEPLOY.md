@@ -126,8 +126,8 @@ Preferred local commands (from the repo root):
 
 ```powershell
 .\scripts\stack.ps1 up
-.\scripts\stack.ps1 up -Observability
-.\scripts\stack.ps1 up -InProcess
+.\scripts\stack.ps1 -Observability up
+.\scripts\stack.ps1 -InProcess up
 .\scripts\stack.ps1 compose -- config
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
@@ -135,21 +135,21 @@ Preferred local commands (from the repo root):
 
 ```bash
 ./scripts/stack.sh up
-./scripts/stack.sh up --observability
-./scripts/stack.sh up --in-process
+./scripts/stack.sh --observability up
+./scripts/stack.sh --in-process up
 ./scripts/stack.sh compose config
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy), builds `opr-review:local` from `Dockerfile.review` (override with `OPR_REVIEW_IMAGE`), and **requires** `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). `status` / `down` / `restart` / `logs` still use that overlay when not `-InProcess`, but do **not** re-check `LAUNCHER_TOKEN`. Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. `compose` passthrough (`./scripts/stack.sh compose …`) uses the same `-f` files without token/image build. Raw `docker compose -f …` remains a non-helper alternative.
+Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy), builds the `review-image` service (`--profile build-review`, tag `${OPR_REVIEW_IMAGE:-opr-review:local}`), and **requires** `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). `status` / `down` / `restart` / `logs` still use that overlay when not `-InProcess`, but do **not** re-check `LAUNCHER_TOKEN`. Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. `compose` passthrough (`./scripts/stack.sh compose …`) uses the same `-f` files without token/image build. Raw `docker compose -f …` remains a non-helper alternative.
 
 <!-- section: deployment-steps -->
 ## Deployment steps
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
 2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only inside the Docker network.
-3. Default backend is `codex.runner_backend: container` (M4). Set `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create `model-proxy.env` from `model-proxy.env.example` (restricted perms; never mount on worker/launcher), then `./scripts/stack.ps1 up` (or `./scripts/stack.sh up`) — the helper builds the review image (`Dockerfile.review` → `OPR_REVIEW_IMAGE` / `opr-review:local`) and includes the container-runner overlay by default. Wait for `migrate` (exit 0), then `api`, `worker`, `launcher`, and `model-proxy` Up. Manual / non-helper deploys still need `docker build -f Dockerfile.review -t opr-review:local .` before `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`. For the explicit `in_process` fallback: set `codex.runner_backend: in_process` and `./scripts/stack.ps1 up -InProcess` (or `./scripts/stack.sh up --in-process`). Restrict the host firewall / cloud security group for Compose `proxy_egress` to the configured upstream model host (`PROXY_UPSTREAM_HOST`). Upgrades of worker, launcher, and model-proxy must be drained and applied together — see [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-no-rolling-mix).
+3. Default backend is `codex.runner_backend: container` (M4). Set `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create `model-proxy.env` from `model-proxy.env.example` (restricted perms; never mount on worker/launcher), then `./scripts/stack.ps1 up` (or `./scripts/stack.sh up`) — the helper runs `docker compose … --profile build-review build review-image` (tag `${OPR_REVIEW_IMAGE:-opr-review:local}`) and includes the container-runner overlay by default. Wait for `migrate` (exit 0), then `api`, `worker`, `launcher`, and `model-proxy` Up. Manual / non-helper deploys still need `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml --profile build-review build review-image` before `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`. For the explicit `in_process` fallback: set `codex.runner_backend: in_process` and `./scripts/stack.ps1 -InProcess up` (or `./scripts/stack.sh --in-process up`). Restrict the host firewall / cloud security group for Compose `proxy_egress` to the configured upstream model host (`PROXY_UPSTREAM_HOST`). Upgrades of worker, launcher, and model-proxy must be drained and applied together — see [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-no-rolling-mix).
 
 4. Checks from the host or internal network:
 

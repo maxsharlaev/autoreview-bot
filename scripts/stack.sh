@@ -2,11 +2,14 @@
 # Manage the autoreview-bot Compose stack (base + optional overlays).
 # Usage:
 #   ./scripts/stack.sh up
-#   ./scripts/stack.sh up --observability
-#   ./scripts/stack.sh up --in-process
+#   ./scripts/stack.sh --observability up
+#   ./scripts/stack.sh --in-process up
 #   ./scripts/stack.sh compose config
+#   ./scripts/stack.sh compose up -d --scale worker=2
 #   ./scripts/stack.sh status
 # OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
+# ARB36-008: command is the first positional; options only before it; after
+# `compose` all remaining args are passed verbatim to docker compose.
 set -euo pipefail
 
 if [[ -n "${OPR_STACK_ROOT:-}" ]]; then
@@ -16,29 +19,27 @@ else
 fi
 cd "$ROOT"
 
-COMMAND=""
 OBSERVABILITY=0
 # M4: container-runner overlay on by default; --in-process opts out.
 CONTAINER=1
 EXPLICIT_CONTAINER=0
 EXPLICIT_IN_PROCESS=0
-REST=()
 
 usage() {
   cat <<'EOF'
-Usage: stack.sh <up|down|restart|logs|status|compose> [--observability] [--container|--in-process] [--] [compose-args...]
-  --container     Include container-runner overlay (default since M4; kept for back-compat).
-  --in-process    Omit container-runner overlay (in_process reviews only).
-  compose         Passthrough to `docker compose` with the same -f files (no token check / image build).
+Usage: stack.sh [options] <up|down|restart|logs|status|compose> [args...]
+Options (only before the command):
+  --observability   Include observability overlay.
+  --container       Include container-runner overlay (default since M4; back-compat).
+  --in-process      Omit container-runner overlay (in_process reviews only).
+  compose           Passthrough to `docker compose` with the same -f files
+                    (no token check / image build); remaining args are verbatim.
 EOF
 }
 
+# Leading options only (ARB36-008).
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    up|down|restart|logs|status|compose)
-      COMMAND="$1"
-      shift
-      ;;
     --observability)
       OBSERVABILITY=1
       shift
@@ -59,20 +60,36 @@ while [[ $# -gt 0 ]]; do
       ;;
     --)
       shift
-      REST+=("$@")
       break
       ;;
+    -*)
+      echo "Unknown option: $1 (options must appear before the command)." >&2
+      usage
+      exit 2
+      ;;
     *)
-      REST+=("$1")
-      shift
+      break
       ;;
   esac
 done
 
-if [[ -z "$COMMAND" ]]; then
+if [[ $# -lt 1 ]]; then
   usage
   exit 2
 fi
+
+COMMAND="$1"
+shift
+REST=("$@")
+
+case "$COMMAND" in
+  up|down|restart|logs|status|compose) ;;
+  *)
+    echo "Unknown command: $COMMAND" >&2
+    usage
+    exit 2
+    ;;
+esac
 
 if [[ "$EXPLICIT_CONTAINER" -eq 1 && "$EXPLICIT_IN_PROCESS" -eq 1 ]]; then
   echo "Use either --container (default) or --in-process, not both." >&2
@@ -125,7 +142,7 @@ Generate one (do not commit it; put it in .env):
 Then set in .env:
   LAUNCHER_TOKEN=<paste value>
 
-Or opt out of the overlay: ./scripts/stack.sh ${COMMAND} --in-process
+Or opt out of the overlay: ./scripts/stack.sh --in-process ${COMMAND}
 (and set codex.runner_backend: in_process in config.yaml).
 EOF
     exit 1
@@ -140,43 +157,13 @@ if [[ "$CONTAINER" -eq 1 ]]; then
   compose_args+=(-f docker-compose.container-runner.yml)
 fi
 
-# Resolve launcher image from rendered compose config (ARB36-005), not by parsing .env.
-resolve_review_image() {
-  local image
-  image="$(
-    docker compose "${compose_args[@]}" config --format json | python -c '
-import json, sys
-data = json.load(sys.stdin)
-env = (data.get("services") or {}).get("launcher", {}).get("environment") or {}
-if isinstance(env, list):
-    parsed = {}
-    for item in env:
-        text = str(item)
-        if "=" in text:
-            k, v = text.split("=", 1)
-            parsed[k] = v
-    env = parsed
-print(str(env.get("OPR_REVIEW_IMAGE") or "").strip())
-'
-  )" || {
-    echo "Failed to resolve OPR_REVIEW_IMAGE from compose config." >&2
-    exit 1
-  }
-  if [[ -z "$image" ]]; then
-    image="opr-review:local"
-  fi
-  printf '%s' "$image"
-}
-
+# ARB36-007: build review image via compose profile service (no host Python / docker build -f).
 ensure_review_image() {
-  local image
-  image="$(resolve_review_image)"
-  echo "Building review image ${image} (Dockerfile.review)..."
-  docker build -f Dockerfile.review -t "$image" .
+  echo "Building review-image (Dockerfile.review → \${OPR_REVIEW_IMAGE:-opr-review:local})..."
+  docker compose "${compose_args[@]}" --profile build-review build review-image
 }
 
-# Credential check + review image build only for up (ARB36-001 / ARB36-002).
-# Lifecycle / compose passthrough still use the overlay but do not rebuild.
+# Credential check + review image build only for helper `up` (not compose up).
 if [[ "$CONTAINER" -eq 1 && "$COMMAND" == "up" ]]; then
   assert_launcher_token
   ensure_review_image

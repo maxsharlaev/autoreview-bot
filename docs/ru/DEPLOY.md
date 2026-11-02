@@ -126,8 +126,8 @@ features:
 
 ```powershell
 .\scripts\stack.ps1 up
-.\scripts\stack.ps1 up -Observability
-.\scripts\stack.ps1 up -InProcess
+.\scripts\stack.ps1 -Observability up
+.\scripts\stack.ps1 -InProcess up
 .\scripts\stack.ps1 compose -- config
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
@@ -135,21 +135,21 @@ features:
 
 ```bash
 ./scripts/stack.sh up
-./scripts/stack.sh up --observability
-./scripts/stack.sh up --in-process
+./scripts/stack.sh --observability up
+./scripts/stack.sh --in-process up
 ./scripts/stack.sh compose config
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy), собирает `opr-review:local` из `Dockerfile.review` (переопределение через `OPR_REVIEW_IMAGE`) и **требует** `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). `status` / `down` / `restart` / `logs` по-прежнему используют этот overlay без `-InProcess`, но **не** перепроверяют `LAUNCHER_TOKEN`. Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). Passthrough `compose` (`./scripts/stack.sh compose …`) использует те же `-f` без проверки токена/сборки образа. «Сырые» `docker compose -f …` — запасной non-helper вариант.
+С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy), собирает сервис `review-image` (`--profile build-review`, тег `${OPR_REVIEW_IMAGE:-opr-review:local}`) и **требует** `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). `status` / `down` / `restart` / `logs` по-прежнему используют этот overlay без `-InProcess`, но **не** перепроверяют `LAUNCHER_TOKEN`. Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). Passthrough `compose` (`./scripts/stack.sh compose …`) использует те же `-f` без проверки токена/сборки образа. «Сырые» `docker compose -f …` — запасной non-helper вариант.
 
 <!-- section: deployment-steps -->
 ## Шаги деплоя
 
 1. Склонируйте репозиторий на хост; создайте `.env` и `config.yaml`, как описано выше.
 2. Проверьте, что Postgres/Redis не опубликованы на хосте, `8000` доступен reverse proxy через loopback, а `9100` — только внутри Docker-сети.
-3. Backend по умолчанию — `codex.runner_backend: container` (M4). Задайте `LAUNCHER_TOKEN` и `PROXY_ISSUER_TOKEN` в `.env`, создайте `model-proxy.env` из `model-proxy.env.example` (ограниченные права; не монтируйте на worker/launcher), затем `./scripts/stack.ps1 up` (или `./scripts/stack.sh up`) — helper собирает review-образ (`Dockerfile.review` → `OPR_REVIEW_IMAGE` / `opr-review:local`) и подключает overlay container-runner по умолчанию. Дождитесь `migrate` (exit 0), затем Up у `api`, `worker`, `launcher` и `model-proxy`. Для ручного / non-helper деплоя по-прежнему нужен `docker build -f Dockerfile.review -t opr-review:local .` перед `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`. Явный fallback `in_process`: `codex.runner_backend: in_process` и `./scripts/stack.ps1 up -InProcess` (или `./scripts/stack.sh up --in-process`). Ограничьте host firewall / cloud security group для Compose `proxy_egress` upstream-хостом модели (`PROXY_UPSTREAM_HOST`). Worker, launcher и model-proxy обновляйте после drain вместе — см. [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-без-rolling-mix).
+3. Backend по умолчанию — `codex.runner_backend: container` (M4). Задайте `LAUNCHER_TOKEN` и `PROXY_ISSUER_TOKEN` в `.env`, создайте `model-proxy.env` из `model-proxy.env.example` (ограниченные права; не монтируйте на worker/launcher), затем `./scripts/stack.ps1 up` (или `./scripts/stack.sh up`) — helper запускает `docker compose … --profile build-review build review-image` (тег `${OPR_REVIEW_IMAGE:-opr-review:local}`) и подключает overlay container-runner по умолчанию. Дождитесь `migrate` (exit 0), затем Up у `api`, `worker`, `launcher` и `model-proxy`. Для ручного / non-helper деплоя по-прежнему нужен `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml --profile build-review build review-image` перед `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`. Явный fallback `in_process`: `codex.runner_backend: in_process` и `./scripts/stack.ps1 -InProcess up` (или `./scripts/stack.sh --in-process up`). Ограничьте host firewall / cloud security group для Compose `proxy_egress` upstream-хостом модели (`PROXY_UPSTREAM_HOST`). Worker, launcher и model-proxy обновляйте после drain вместе — см. [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-без-rolling-mix).
 
 4. Проверки с хоста или из внутренней сети:
 

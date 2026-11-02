@@ -5,26 +5,16 @@
 
 .EXAMPLE
   .\scripts\stack.ps1 up
-  .\scripts\stack.ps1 up -Observability
-  .\scripts\stack.ps1 up -InProcess
+  .\scripts\stack.ps1 -Observability up
+  .\scripts\stack.ps1 -InProcess up
   .\scripts\stack.ps1 compose -- config
+  .\scripts\stack.ps1 compose -- up -d --scale worker=2
   .\scripts\stack.ps1 status
 #>
-[CmdletBinding()]
-param(
-    [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("up", "down", "restart", "logs", "status", "compose")]
-    [string]$Command,
-
-    [switch]$Observability,
-    # Default stack includes the container-runner overlay (M4). Kept for back-compat.
-    [switch]$Container,
-    # Opt out of the container-runner overlay (in_process reviews only).
-    [switch]$InProcess,
-
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$Rest
-)
+# ARB36-008: parse argv manually so options apply only before the command and
+# everything after `compose` is passed verbatim (no second command hijack).
+# Use $args directly so PowerShell does not steal compose flags like -d (= -Debug).
+$ArgList = @($args)
 
 $ErrorActionPreference = "Stop"
 # OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
@@ -34,6 +24,62 @@ if (-not [string]::IsNullOrWhiteSpace($env:OPR_STACK_ROOT)) {
     $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 }
 Set-Location $Root
+
+function Show-Usage {
+    Write-Host @"
+Usage: stack.ps1 [options] <up|down|restart|logs|status|compose> [args...]
+Options (only before the command):
+  -Observability   Include observability overlay.
+  -Container       Include container-runner overlay (default since M4; back-compat).
+  -InProcess       Omit container-runner overlay (in_process reviews only).
+  compose          Passthrough to docker compose with the same -f files
+                   (no token check / image build); remaining args are verbatim.
+"@
+}
+
+$Observability = $false
+$Container = $false
+$InProcess = $false
+$argv = @()
+if ($null -ne $ArgList) { $argv = @($ArgList) }
+
+$i = 0
+while ($i -lt $argv.Count) {
+    $a = $argv[$i]
+    switch -Regex ($a) {
+        '^(?i)-Observability$' { $Observability = $true; $i++; continue }
+        '^(?i)-Container$' { $Container = $true; $i++; continue }
+        '^(?i)-InProcess$' { $InProcess = $true; $i++; continue }
+        '^(?i)-h$|^(?i)-Help$|^(?i)--help$' { Show-Usage; exit 0 }
+        '^--$' { $i++; break }
+        '^-' {
+            Write-Host "Unknown option: $a (options must appear before the command)."
+            Show-Usage
+            exit 2
+        }
+        default { break }
+    }
+    break
+}
+
+if ($i -ge $argv.Count) {
+    Show-Usage
+    exit 2
+}
+
+$Command = $argv[$i]
+$i++
+$Rest = @()
+if ($i -lt $argv.Count) {
+    $Rest = @($argv[$i..($argv.Count - 1)])
+}
+
+$valid = @("up", "down", "restart", "logs", "status", "compose")
+if ($valid -notcontains $Command) {
+    Write-Host "Unknown command: $Command"
+    Show-Usage
+    exit 2
+}
 
 if ($Container -and $InProcess) {
     Write-Host "Use either -Container (default) or -InProcess, not both."
@@ -84,7 +130,7 @@ Generate one (do not commit it; put it in .env):
 Then set in .env:
   LAUNCHER_TOKEN=<paste value>
 
-Or opt out of the overlay: .\scripts\stack.ps1 $Command -InProcess
+Or opt out of the overlay: .\scripts\stack.ps1 -InProcess $Command
 (and set codex.runner_backend: in_process in config.yaml).
 "@
         exit 1
@@ -102,38 +148,9 @@ function Get-ComposeArgs {
     return $composeArgs
 }
 
-function Resolve-ReviewImage([string[]]$ComposeArgs) {
-    $raw = & docker compose @ComposeArgs config --format json
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Failed to render compose config for review image."
-        exit $LASTEXITCODE
-    }
-    $data = $raw | ConvertFrom-Json
-    $envMap = $data.services.launcher.environment
-    $image = $null
-    if ($null -eq $envMap) {
-        $image = ""
-    } elseif ($envMap -is [System.Array]) {
-        foreach ($item in $envMap) {
-            $text = [string]$item
-            if ($text.StartsWith("OPR_REVIEW_IMAGE=")) {
-                $image = $text.Substring("OPR_REVIEW_IMAGE=".Length)
-                break
-            }
-        }
-    } else {
-        $image = [string]$envMap.OPR_REVIEW_IMAGE
-    }
-    if ([string]::IsNullOrWhiteSpace($image)) {
-        return "opr-review:local"
-    }
-    return $image.Trim()
-}
-
 function Ensure-ReviewImage([string[]]$ComposeArgs) {
-    $image = Resolve-ReviewImage -ComposeArgs $ComposeArgs
-    Write-Host "Building review image $image (Dockerfile.review)..."
-    & docker build -f Dockerfile.review -t $image .
+    Write-Host "Building review-image (Dockerfile.review -> `${OPR_REVIEW_IMAGE:-opr-review:local})..."
+    & docker compose @ComposeArgs --profile build-review build review-image
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -141,8 +158,7 @@ function Ensure-ReviewImage([string[]]$ComposeArgs) {
 
 $composeArgs = Get-ComposeArgs
 
-# Credential check + review image build only for up (ARB36-001 / ARB36-002).
-# Lifecycle / compose passthrough still use the overlay but do not rebuild.
+# Credential check + review image build only for helper `up` (not compose up).
 if ($UseContainerOverlay -and $Command -eq "up") {
     Assert-LauncherToken
     Ensure-ReviewImage -ComposeArgs $composeArgs
