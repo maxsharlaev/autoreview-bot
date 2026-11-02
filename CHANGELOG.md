@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **ARB38-001:** `stack.ps1` / `stack.sh` consume at most one leading `--` after `compose` (explicit separator-consumed flag); `compose -- -- up` forwards `-- up` to `docker compose`.
+- **ARB38-002:** `stack.ps1` / `stack.sh` strip at most one **leading** `--` after `compose` (post-parse); a `--` in the middle or at the end (e.g. `compose run app command -- --literal`, `compose config --`) is forwarded unchanged.
 - **ARB36-004 (follow-up):** `scripts/stack.ps1` / `stack.sh` `compose` passthrough silently consumes one optional leading `--` (documented PowerShell form) and does not forward it to `docker compose`; remaining args stay verbatim (no token check / image build).
 
 ### Changed

@@ -328,6 +328,61 @@ def test_stack_ps1_compose_double_dash_forwards_second(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_non_leading_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: a `--` that is not the first arg after compose must be forwarded."""
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        extra_args=["run", "app", "command", "--", "--literal"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "run",
+        "app",
+        "command",
+        "--",
+        "--literal",
+    ], recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_trailing_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: trailing `--` after a real subcommand is forwarded."""
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        extra_args=["config", "--"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "config",
+        "--",
+    ], recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
 def test_stack_ps1_compose_up_does_not_hijack_helper_up(tmp_path: Path) -> None:
     """ARB36-008: `compose up` must not become helper up (no token / no profile build)."""
     home, log = _prepare_stack_home(tmp_path)
@@ -492,6 +547,67 @@ def test_stack_sh_compose_double_dash_forwards_second(tmp_path: Path) -> None:
         "-d",
     ], recorded
     assert "build-review" not in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_non_leading_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: a `--` that is not the first arg after compose must be forwarded."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["run", "app", "command", "--", "--literal"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "run",
+        "app",
+        "command",
+        "--",
+        "--literal",
+    ], recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_trailing_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: trailing `--` after a real subcommand is forwarded."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["config", "--"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "config",
+        "--",
+    ], recorded
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")

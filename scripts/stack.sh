@@ -14,7 +14,7 @@
 # OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
 # ARB36-008/009: first positional non-option is the command. Helper switches may
 # appear before/after non-compose commands; after `compose` args are verbatim
-# (one optional leading `--` is consumed, ARB36-004).
+# (one optional leading `--` after `compose` is consumed, ARB36-004 / ARB38-002).
 set -euo pipefail
 
 if [[ -n "${OPR_STACK_ROOT:-}" ]]; then
@@ -62,7 +62,6 @@ apply_helper_opt() {
 COMMAND=""
 REST=()
 seen_command=0
-compose_sep_consumed=0
 while [[ $# -gt 0 ]]; do
   arg="$1"
   shift
@@ -86,12 +85,7 @@ while [[ $# -gt 0 ]]; do
 
   # After the command.
   if [[ "$COMMAND" == "compose" ]]; then
-    # ARB36-004 / ARB38-001: consume at most one leading `--` after `compose`
-    # (helper separator). Further `--` are forwarded to docker compose.
-    if [[ "$compose_sep_consumed" -eq 0 && "$arg" == "--" ]]; then
-      compose_sep_consumed=1
-      continue
-    fi
+    # Collect verbatim; optional leading `--` stripped once after the loop (ARB36-004 / ARB38-002).
     REST+=("$arg")
     continue
   fi
@@ -101,6 +95,11 @@ while [[ $# -gt 0 ]]; do
   fi
   REST+=("$arg")
 done
+
+# ARB36-004 / ARB38-002: drop at most one leading `--` after `compose` (helper separator only).
+if [[ "$COMMAND" == "compose" && ${#REST[@]} -gt 0 && "${REST[0]}" == "--" ]]; then
+  REST=("${REST[@]:1}")
+fi
 
 if [[ -z "$COMMAND" ]]; then
   usage

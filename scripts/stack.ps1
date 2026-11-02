@@ -15,7 +15,7 @@
 #>
 # ARB36-008/009/010: first positional non-option is the command. Helper switches
 # may appear before/after non-compose commands; after `compose` args are verbatim
-# (one optional leading `--` is consumed, ARB36-004).
+# (one optional leading `--` after `compose` is consumed, ARB36-004 / ARB38-002).
 # Use $args directly so PowerShell does not steal compose flags like -d (= -Debug).
 # Plain if/elseif loop (no switch+continue+break) so every option is processed.
 $ArgList = @($args)
@@ -71,7 +71,6 @@ if ($null -ne $ArgList) { $argv = @($ArgList) }
 $Command = $null
 $Rest = New-Object System.Collections.Generic.List[string]
 $seenCommand = $false
-$composeSepConsumed = $false
 
 foreach ($a in $argv) {
     if (-not $seenCommand) {
@@ -102,12 +101,7 @@ foreach ($a in $argv) {
     }
 
     if ($Command -eq "compose") {
-        # ARB36-004 / ARB38-001: consume at most one leading `--` after `compose`
-        # (helper separator; documented for PowerShell). Further `--` are forwarded.
-        if (-not $composeSepConsumed -and $a -eq "--") {
-            $composeSepConsumed = $true
-            continue
-        }
+        # Collect verbatim; optional leading `--` stripped once after the loop (ARB36-004 / ARB38-002).
         [void]$Rest.Add($a)
         continue
     }
@@ -147,6 +141,10 @@ if ($Container -and $InProcess) {
 # M4: container-runner overlay is on unless -InProcess.
 $UseContainerOverlay = -not $InProcess
 $Rest = @($Rest)
+# ARB36-004 / ARB38-002: drop at most one leading `--` after `compose` (helper separator only).
+if ($Command -eq "compose" -and $Rest.Count -gt 0 -and $Rest[0] -eq "--") {
+    $Rest = @($Rest | Select-Object -Skip 1)
+}
 
 function Get-DotEnvValue([string]$Name) {
     $envVal = [Environment]::GetEnvironmentVariable($Name)
