@@ -26,7 +26,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+# OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
+if (-not [string]::IsNullOrWhiteSpace($env:OPR_STACK_ROOT)) {
+    $Root = (Resolve-Path -LiteralPath $env:OPR_STACK_ROOT).Path
+} else {
+    $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+}
 Set-Location $Root
 
 if ($Container -and $InProcess) {
@@ -63,7 +68,7 @@ function Assert-LauncherToken {
     $token = Get-DotEnvValue "LAUNCHER_TOKEN"
     if ([string]::IsNullOrWhiteSpace($token) -or $token.Length -lt 16) {
         Write-Host @"
-LAUNCHER_TOKEN is missing or shorter than 16 characters (required for the container-runner overlay; default since M4).
+LAUNCHER_TOKEN is missing or shorter than 16 characters (required for stack up with the container-runner overlay; default since M4).
 
 Generate one (do not commit it; put it in .env):
 
@@ -96,7 +101,8 @@ function Get-ComposeArgs {
     return $composeArgs
 }
 
-if ($UseContainerOverlay) {
+# Credential check only for up (ARB36-001). Lifecycle commands still use the overlay.
+if ($UseContainerOverlay -and $Command -eq "up") {
     Assert-LauncherToken
 }
 

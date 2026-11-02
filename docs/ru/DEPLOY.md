@@ -140,7 +140,7 @@ features:
 ./scripts/stack.sh down
 ```
 
-С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy) и требует `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). «Сырые» команды `docker compose -f …` остаются запасным вариантом.
+С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy) и **требует** `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). `status` / `down` / `restart` / `logs` по-прежнему используют этот overlay без `-InProcess`, но **не** перепроверяют `LAUNCHER_TOKEN`. Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). «Сырые» команды `docker compose -f …` остаются запасным вариантом.
 
 <!-- section: deployment-steps -->
 ## Шаги деплоя

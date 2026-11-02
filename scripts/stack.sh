@@ -5,9 +5,14 @@
 #   ./scripts/stack.sh up --observability
 #   ./scripts/stack.sh up --in-process
 #   ./scripts/stack.sh status
+# OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${OPR_STACK_ROOT:-}" ]]; then
+  ROOT="$(cd "${OPR_STACK_ROOT}" && pwd)"
+else
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$ROOT"
 
 COMMAND=""
@@ -105,7 +110,7 @@ assert_launcher_token() {
   token="$(dotenv_get LAUNCHER_TOKEN || true)"
   if [[ -z "$token" || ${#token} -lt 16 ]]; then
     cat <<EOF
-LAUNCHER_TOKEN is missing or shorter than 16 characters (required for the container-runner overlay; default since M4).
+LAUNCHER_TOKEN is missing or shorter than 16 characters (required for stack up with the container-runner overlay; default since M4).
 
 Generate one (do not commit it; put it in .env):
 
@@ -130,8 +135,12 @@ if [[ "$OBSERVABILITY" -eq 1 ]]; then
   compose_args+=(-f docker-compose.observability.yml)
 fi
 if [[ "$CONTAINER" -eq 1 ]]; then
-  assert_launcher_token
   compose_args+=(-f docker-compose.container-runner.yml)
+fi
+
+# Credential check only for up (ARB36-001). Lifecycle commands still use the overlay.
+if [[ "$CONTAINER" -eq 1 && "$COMMAND" == "up" ]]; then
+  assert_launcher_token
 fi
 
 case "$COMMAND" in

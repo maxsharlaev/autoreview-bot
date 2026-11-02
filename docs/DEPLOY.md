@@ -140,7 +140,7 @@ Preferred local commands (from the repo root):
 ./scripts/stack.sh down
 ```
 
-Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy) and requires `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. Raw `docker compose -f …` commands remain supported as an alternative.
+Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy) and **requires** `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). `status` / `down` / `restart` / `logs` still use that overlay when not `-InProcess`, but do **not** re-check `LAUNCHER_TOKEN`. Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. Raw `docker compose -f …` commands remain supported as an alternative.
 
 <!-- section: deployment-steps -->
 ## Deployment steps
