@@ -8,7 +8,7 @@
 
 1. Прочитайте раздел `Unreleased` в changelog: новые права, ключи или миграции.
 2. Сделайте резервную копию тома Postgres (`postgres_data`), например `pg_dump` из контейнера `postgres`.
-3. Обновите checkout (`git pull`) и пересоберите: `docker compose up -d --build`.
+3. Обновите checkout (`git pull`) и пересоберите через stack helper: `./scripts/stack.sh up` / `.\scripts\stack.ps1 up` (или `--in-process` / `-InProcess` при `codex.runner_backend: in_process`).
 4. Compose сначала запускает `migrate` (`alembic upgrade head`, однократно); `api` и `worker` стартуют только после его успешного завершения. Проверьте `docker compose logs migrate`.
 5. Проверьте `GET /health`, `GET /is-ready`, лог старта API (owner'ы, owner по умолчанию, предупреждения конфига) и `GET /api/v1/ops/status`.
 

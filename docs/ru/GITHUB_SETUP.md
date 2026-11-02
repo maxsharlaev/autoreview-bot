@@ -98,7 +98,7 @@ github:
 <!-- section: verify -->
 ## Проверка
 
-После `docker compose up` и публичного HTTPS (или туннеля):
+После `./scripts/stack.sh up` / `.\scripts\stack.ps1 up` (или `--in-process` / `-InProcess` при `runner_backend: in_process`) и публичного HTTPS (или туннеля):
 
 1. Настройте Action, как описано выше.
 2. Откройте тестовый не draft PR. В логе worker'а появляется `review_run`; PR получает sticky-комментарий `<!-- open-pr-review -->`.

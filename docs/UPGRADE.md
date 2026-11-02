@@ -8,7 +8,7 @@ There are no versioned releases yet; deployments track `main`. Notable changes a
 
 1. Read the `Unreleased` section of the changelog for new permissions, keys or migrations.
 2. Back up the Postgres volume (`postgres_data`), for example with `pg_dump` from the `postgres` container.
-3. Update the checkout (`git pull`) and rebuild: `docker compose up -d --build`.
+3. Update the checkout (`git pull`) and rebuild with the stack helper: `./scripts/stack.sh up` / `.\scripts\stack.ps1 up` (or `--in-process` / `-InProcess` when `codex.runner_backend: in_process`).
 4. Compose starts `migrate` first (`alembic upgrade head`, one shot); `api` and `worker` start only after it exits successfully. Check `docker compose logs migrate`.
 5. Check `GET /health`, `GET /is-ready`, the API startup log (owners, default owner, config warnings) and `GET /api/v1/ops/status`.
 

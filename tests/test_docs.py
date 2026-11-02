@@ -306,3 +306,39 @@ def test_russian_mirror_has_the_same_section_ids(name: str) -> None:
     for index, (en_id, ru_id) in enumerate(zip(english, russian, strict=False)):
         assert en_id == ru_id, f"docs/ru/{name}: section {index} is {ru_id!r}, docs/{name} has {en_id!r}"
     assert len(english) == len(russian), f"docs/ru/{name}: {len(russian)} sections, docs/{name} has {len(english)}"
+
+
+# --- Onboarding: stack helper required (ARB36-002) ----------------------------
+
+_BARE_COMPOSE_UP = re.compile(r"(?i)docker(?:\s+|-)compose\s+up(?:\s+(?:-d\s+)?--build)?\b")
+
+
+def _bare_compose_up_instructions(text: str) -> list[str]:
+    """Lines that tell readers to start the stack with bare compose (no -f / stack helper)."""
+    bad: list[str] = []
+    for line in text.splitlines():
+        if not _BARE_COMPOSE_UP.search(line):
+            continue
+        # Allowed: explicit compose file list (overlay), scale, recreate named services.
+        if re.search(r"(?i)(-f\s|stack\.(?:sh|ps1)|--scale|--force-recreate)", line):
+            continue
+        bad.append(line.strip())
+    return bad
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ROOT / "README.md",
+        ROOT / "CONTRIBUTING.md",
+        DOCS / "GITHUB_SETUP.md",
+        RU / "GITHUB_SETUP.md",
+        DOCS / "UPGRADE.md",
+        RU / "UPGRADE.md",
+    ],
+    ids=lambda p: str(p.relative_to(ROOT)),
+)
+def test_onboarding_docs_do_not_instruct_bare_docker_compose_up(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    bad = _bare_compose_up_instructions(text)
+    assert not bad, f"{path.relative_to(ROOT)} instructs bare docker compose up:\n" + "\n".join(bad)

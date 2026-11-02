@@ -98,7 +98,7 @@ Events from repositories outside a non-empty list are ignored (`202`, `repo_not_
 <!-- section: verify -->
 ## Verify
 
-After `docker compose up` and public HTTPS (or a tunnel):
+After `./scripts/stack.sh up` / `.\scripts\stack.ps1 up` (or `--in-process` / `-InProcess` when using `runner_backend: in_process`) and public HTTPS (or a tunnel):
 
 1. Set up the Action as above.
 2. Open a non-draft test PR. The worker log shows a `review_run`; the PR gets a sticky comment `<!-- open-pr-review -->`.

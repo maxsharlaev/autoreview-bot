@@ -15,9 +15,14 @@ Contributions are welcome under the [Apache-2.0 license](LICENSE).
 ```bash
 cp .env.example .env
 cp config.example.yaml config.yaml
-# Fill POSTGRES_PASSWORD with a random value
-docker compose up --build
+cp model-proxy.env.example model-proxy.env
+# .env: POSTGRES_PASSWORD, REVIEW_API_KEY, plus LAUNCHER_TOKEN and PROXY_ISSUER_TOKEN (>= 16 chars each)
+# model-proxy.env: OPENAI_API_KEY (restrict file perms; never mount on worker/launcher)
+./scripts/stack.sh up            # Linux/macOS (container-runner overlay on by default)
+# .\scripts\stack.ps1 up         # Windows
 ```
+
+Lightweight alternative: set `codex.runner_backend: in_process` in `config.yaml`, then `./scripts/stack.sh up --in-process` (or `.\scripts\stack.ps1 up -InProcess`).
 
 The API listens on `http://localhost:8000`. Check health with `GET /health` and readiness with `GET /is-ready`.
 
