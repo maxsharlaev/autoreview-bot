@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PS1 = ROOT / "scripts" / "stack.ps1"
 SH = ROOT / "scripts" / "stack.sh"
+IS_WINDOWS = sys.platform.startswith("win")
 
 
 def test_stack_ps1_defaults_to_container_overlay_with_inprocess_opt_out() -> None:
@@ -45,10 +46,9 @@ def _git_bash() -> str | None:
         if candidate.is_file():
             return str(candidate)
     which = shutil.which("bash")
-    # Prefer Git Bash over WSL for Windows path handling.
     if which and "Windows\\System32\\bash" not in which.replace("/", "\\"):
         return which
-    return None
+    return which
 
 
 def _prepare_stack_home(tmp_path: Path) -> tuple[Path, Path]:
@@ -121,7 +121,6 @@ def _run_sh(
     env = os.environ.copy()
     env.pop("LAUNCHER_TOKEN", None)
     env["OPR_STACK_ROOT"] = str(home)
-    # Put stub first; keep a minimal PATH for bash itself.
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
     if env_extra:
         env.update(env_extra)
@@ -136,6 +135,7 @@ def _run_sh(
     )
 
 
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
 @pytest.mark.parametrize("command", ["status", "down", "restart", "logs"])
 def test_stack_ps1_lifecycle_without_launcher_token_uses_overlay(command: str, tmp_path: Path) -> None:
     home, log = _prepare_stack_home(tmp_path)
@@ -148,6 +148,7 @@ def test_stack_ps1_lifecycle_without_launcher_token_uses_overlay(command: str, t
     assert "LAUNCHER_TOKEN" not in (completed.stdout + completed.stderr)
 
 
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
 def test_stack_ps1_up_without_launcher_token_fails(tmp_path: Path) -> None:
     home, log = _prepare_stack_home(tmp_path)
     bin_dir = tmp_path / "bin"
@@ -158,6 +159,7 @@ def test_stack_ps1_up_without_launcher_token_fails(tmp_path: Path) -> None:
     assert log.read_text(encoding="utf-8").strip() == ""
 
 
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
 def test_stack_ps1_up_with_launcher_token_invokes_compose(tmp_path: Path) -> None:
     home, log = _prepare_stack_home(tmp_path)
     bin_dir = tmp_path / "bin"
@@ -171,10 +173,10 @@ def test_stack_ps1_up_with_launcher_token_invokes_compose(tmp_path: Path) -> Non
     assert completed.returncode == 0, completed.stdout + completed.stderr
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
-    assert " up " in f" {recorded} " or recorded.strip().endswith("up -d --build") or "up -d --build" in recorded
+    assert "up -d --build" in recorded
 
 
-@pytest.mark.skipif(_git_bash() is None and sys.platform.startswith("win"), reason="Git Bash not available")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 @pytest.mark.parametrize("command", ["status", "down", "restart", "logs"])
 def test_stack_sh_lifecycle_without_launcher_token_uses_overlay(command: str, tmp_path: Path) -> None:
     bash = _git_bash() or shutil.which("bash")
@@ -188,7 +190,7 @@ def test_stack_sh_lifecycle_without_launcher_token_uses_overlay(command: str, tm
     assert "docker-compose.container-runner.yml" in recorded
 
 
-@pytest.mark.skipif(_git_bash() is None and sys.platform.startswith("win"), reason="Git Bash not available")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 def test_stack_sh_up_without_launcher_token_fails(tmp_path: Path) -> None:
     bash = _git_bash() or shutil.which("bash")
     assert bash
@@ -201,7 +203,7 @@ def test_stack_sh_up_without_launcher_token_fails(tmp_path: Path) -> None:
     assert log.read_text(encoding="utf-8").strip() == ""
 
 
-@pytest.mark.skipif(_git_bash() is None and sys.platform.startswith("win"), reason="Git Bash not available")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 def test_stack_sh_up_with_launcher_token_invokes_compose(tmp_path: Path) -> None:
     bash = _git_bash() or shutil.which("bash")
     assert bash
