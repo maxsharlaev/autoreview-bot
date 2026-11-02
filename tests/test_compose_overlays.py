@@ -272,6 +272,7 @@ def test_overlay_launcher_settings_use_safe_defaults() -> None:
         "OPR_LEASE_HEARTBEAT_SECONDS": "30",
         "OPR_REVIEW_ORPHAN_TTL_SECONDS": "7200",
         "OPR_REVIEW_REAPER_INTERVAL_SECONDS": "300",
+        "OPR_REVIEW_IMAGE": "opr-review:local",
     }
     for key, default in expected_defaults.items():
         raw = str(env[key])
@@ -312,6 +313,49 @@ def test_rendered_compose_propagates_host_launcher_settings() -> None:
         if name in _TOKEN_NAME_ALLOWLIST:
             continue
         assert _SECRETISH.search(name) is None, name
+
+
+def _launcher_env_from_rendered(stdout: str) -> dict:
+    data = yaml.safe_load(stdout)
+    launcher_env = _service(data, "launcher").get("environment") or {}
+    if isinstance(launcher_env, list):
+        launcher_env = dict(item.split("=", 1) for item in launcher_env if isinstance(item, str) and "=" in item)
+    return launcher_env
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker not available")
+def test_rendered_compose_opr_review_image_default_and_override() -> None:
+    """ARB36-003: launcher OPR_REVIEW_IMAGE interpolates host env; default opr-review:local."""
+    base_env = {
+        **os.environ,
+        "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
+        "POSTGRES_PASSWORD": os.environ.get("POSTGRES_PASSWORD") or "test-postgres-password",
+    }
+    base_env.pop("OPR_REVIEW_IMAGE", None)
+
+    defaulted = subprocess.run(
+        ["docker", "compose", "-f", str(BASE), "-f", str(CONTAINER), "config"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=base_env,
+    )
+    if defaulted.returncode != 0:
+        pytest.skip(f"docker compose config failed: {defaulted.stderr[-400:]}")
+    assert _launcher_env_from_rendered(defaulted.stdout).get("OPR_REVIEW_IMAGE") == "opr-review:local"
+
+    overridden = subprocess.run(
+        ["docker", "compose", "-f", str(BASE), "-f", str(CONTAINER), "config"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**base_env, "OPR_REVIEW_IMAGE": "custom-review:arb36"},
+    )
+    if overridden.returncode != 0:
+        pytest.skip(f"docker compose config failed: {overridden.stderr[-400:]}")
+    assert _launcher_env_from_rendered(overridden.stdout).get("OPR_REVIEW_IMAGE") == "custom-review:arb36"
 
 
 # Model-proxy settings documented in docs/ENVIRONMENT.md (M3 PR2).

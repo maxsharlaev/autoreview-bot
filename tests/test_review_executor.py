@@ -33,7 +33,11 @@ def test_get_review_executor_rejects_unknown() -> None:
 
 def test_codex_yaml_default_runner_backend() -> None:
     cfg = CodexYaml()
-    assert cfg.runner_backend == IN_PROCESS_BACKEND
+    assert cfg.runner_backend == CONTAINER_BACKEND
+
+
+def test_codex_yaml_accepts_in_process() -> None:
+    assert CodexYaml(runner_backend="in_process").runner_backend == IN_PROCESS_BACKEND
 
 
 def test_codex_yaml_accepts_container() -> None:

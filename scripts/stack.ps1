@@ -5,25 +5,139 @@
 
 .EXAMPLE
   .\scripts\stack.ps1 up
-  .\scripts\stack.ps1 up -Observability -Container
+  .\scripts\stack.ps1 -Observability up
+  .\scripts\stack.ps1 up -Observability
+  .\scripts\stack.ps1 -InProcess up
+  .\scripts\stack.ps1 up -InProcess
+  .\scripts\stack.ps1 compose -- config
+  .\scripts\stack.ps1 compose -- up -d --scale worker=2
   .\scripts\stack.ps1 status
 #>
-[CmdletBinding()]
-param(
-    [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("up", "down", "restart", "logs", "status")]
-    [string]$Command,
-
-    [switch]$Observability,
-    [switch]$Container,
-
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$Rest
-)
+# ARB36-008/009/010: first positional non-option is the command. Helper switches
+# may appear before/after non-compose commands; after `compose` args are verbatim.
+# Use $args directly so PowerShell does not steal compose flags like -d (= -Debug).
+# Plain if/elseif loop (no switch+continue+break) so every option is processed.
+$ArgList = @($args)
 
 $ErrorActionPreference = "Stop"
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+# OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
+if (-not [string]::IsNullOrWhiteSpace($env:OPR_STACK_ROOT)) {
+    $Root = (Resolve-Path -LiteralPath $env:OPR_STACK_ROOT).Path
+} else {
+    $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+}
 Set-Location $Root
+
+function Show-Usage {
+    Write-Host @"
+Usage: stack.ps1 [options] <up|down|restart|logs|status|compose> [args...]
+Helper options (before or after non-compose commands; before `compose` only):
+  -Observability   Include observability overlay.
+  -Container       Include container-runner overlay (default since M4; back-compat).
+  -InProcess       Omit container-runner overlay (in_process reviews only).
+  compose          Passthrough to docker compose with the same -f files
+                   (no token check / image build); remaining args are verbatim.
+"@
+}
+
+function Test-HelperOpt([string]$Name) {
+    return @(
+        "-Observability", "-Container", "-InProcess",
+        "-h", "-Help", "--help"
+    ) -contains $Name
+}
+
+function Apply-HelperOpt([string]$Name) {
+    if ($Name -eq "-Observability") {
+        $script:Observability = $true
+    } elseif ($Name -eq "-Container") {
+        $script:Container = $true
+    } elseif ($Name -eq "-InProcess") {
+        $script:InProcess = $true
+    } elseif ($Name -eq "-h" -or $Name -eq "-Help" -or $Name -eq "--help") {
+        Show-Usage
+        exit 0
+    }
+}
+
+$Observability = $false
+$Container = $false
+$InProcess = $false
+$argv = @()
+if ($null -ne $ArgList) { $argv = @($ArgList) }
+
+$Command = $null
+$Rest = New-Object System.Collections.Generic.List[string]
+$seenCommand = $false
+
+foreach ($a in $argv) {
+    if (-not $seenCommand) {
+        if ($a -eq "--") {
+            continue
+        }
+        # Case-insensitive helper option match
+        $norm = $a
+        if ($a -match '^(?i)-Observability$') { $norm = "-Observability" }
+        elseif ($a -match '^(?i)-Container$') { $norm = "-Container" }
+        elseif ($a -match '^(?i)-InProcess$') { $norm = "-InProcess" }
+        elseif ($a -match '^(?i)-h$') { $norm = "-h" }
+        elseif ($a -match '^(?i)-Help$') { $norm = "-Help" }
+        elseif ($a -eq "--help") { $norm = "--help" }
+
+        if (Test-HelperOpt $norm) {
+            Apply-HelperOpt $norm
+            continue
+        }
+        if ($a.StartsWith("-")) {
+            Write-Host "Unknown option before command: $a"
+            Show-Usage
+            exit 2
+        }
+        $Command = $a
+        $seenCommand = $true
+        continue
+    }
+
+    if ($Command -eq "compose") {
+        [void]$Rest.Add($a)
+        continue
+    }
+
+    $norm = $a
+    if ($a -match '^(?i)-Observability$') { $norm = "-Observability" }
+    elseif ($a -match '^(?i)-Container$') { $norm = "-Container" }
+    elseif ($a -match '^(?i)-InProcess$') { $norm = "-InProcess" }
+    elseif ($a -match '^(?i)-h$') { $norm = "-h" }
+    elseif ($a -match '^(?i)-Help$') { $norm = "-Help" }
+    elseif ($a -eq "--help") { $norm = "--help" }
+
+    if (Test-HelperOpt $norm) {
+        Apply-HelperOpt $norm
+        continue
+    }
+    [void]$Rest.Add($a)
+}
+
+if ([string]::IsNullOrWhiteSpace($Command)) {
+    Show-Usage
+    exit 2
+}
+
+$valid = @("up", "down", "restart", "logs", "status", "compose")
+if ($valid -notcontains $Command) {
+    Write-Host "Unknown command: $Command"
+    Show-Usage
+    exit 2
+}
+
+if ($Container -and $InProcess) {
+    Write-Host "Use either -Container (default) or -InProcess, not both."
+    exit 2
+}
+
+# M4: container-runner overlay is on unless -InProcess.
+$UseContainerOverlay = -not $InProcess
+$Rest = @($Rest)
 
 function Get-DotEnvValue([string]$Name) {
     $envVal = [Environment]::GetEnvironmentVariable($Name)
@@ -51,7 +165,7 @@ function Assert-LauncherToken {
     $token = Get-DotEnvValue "LAUNCHER_TOKEN"
     if ([string]::IsNullOrWhiteSpace($token) -or $token.Length -lt 16) {
         Write-Host @"
-LAUNCHER_TOKEN is missing or shorter than 16 characters (required for -Container).
+LAUNCHER_TOKEN is missing or shorter than 16 characters (required for stack up with the container-runner overlay; default since M4).
 
 Generate one (do not commit it; put it in .env):
 
@@ -65,6 +179,9 @@ Generate one (do not commit it; put it in .env):
 
 Then set in .env:
   LAUNCHER_TOKEN=<paste value>
+
+Or opt out of the overlay: .\scripts\stack.ps1 -InProcess $Command
+(and set codex.runner_backend: in_process in config.yaml).
 "@
         exit 1
     }
@@ -75,17 +192,27 @@ function Get-ComposeArgs {
     if ($Observability) {
         $composeArgs += @("-f", "docker-compose.observability.yml")
     }
-    if ($Container) {
+    if ($UseContainerOverlay) {
         $composeArgs += @("-f", "docker-compose.container-runner.yml")
     }
     return $composeArgs
 }
 
-if ($Container) {
-    Assert-LauncherToken
+function Ensure-ReviewImage([string[]]$ComposeArgs) {
+    Write-Host "Building review-image (Dockerfile.review -> `${OPR_REVIEW_IMAGE:-opr-review:local})..."
+    & docker compose @ComposeArgs --profile build-review build review-image
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 $composeArgs = Get-ComposeArgs
+
+# Credential check + review image build only for helper `up` (not compose up).
+if ($UseContainerOverlay -and $Command -eq "up") {
+    Assert-LauncherToken
+    Ensure-ReviewImage -ComposeArgs $composeArgs
+}
 
 switch ($Command) {
     "up" {
@@ -106,6 +233,10 @@ switch ($Command) {
     }
     "status" {
         & docker compose @composeArgs ps @Rest
+        exit $LASTEXITCODE
+    }
+    "compose" {
+        & docker compose @composeArgs @Rest
         exit $LASTEXITCODE
     }
 }

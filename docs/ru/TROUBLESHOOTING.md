@@ -63,9 +63,9 @@ on:
 curl -fsS http://localhost:8000/health
 curl -fsS http://localhost:8000/is-ready
 curl -fsS http://localhost:8000/metrics | grep open_pr_review
-docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
-docker compose ps
-docker compose logs -f worker
+./scripts/stack.sh compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
+./scripts/stack.sh status
+./scripts/stack.sh logs worker
 ```
 
 Очередь и недавние ошибки (операторский ключ):
@@ -101,7 +101,7 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/ops/status" -Headers @{ Aut
 ### API отвечает `202`, на GitHub ничего не появляется
 
 1. `GET /api/v1/ops/status`.
-2. `queue_jobs > 0` и `in_flight.running = 0`: **worker не разбирает очередь.** Контейнер запущен (`docker compose ps`)? В логе есть `worker ready` или он упал при старте (ошибка конфига owner'а останавливает worker с кодом выхода 1)? Отвечает ли `:9100/metrics`?
+2. `queue_jobs > 0` и `in_flight.running = 0`: **worker не разбирает очередь.** Контейнер запущен (`./scripts/stack.sh status`)? В логе есть `worker ready` или он упал при старте (ошибка конфига owner'а останавливает worker с кодом выхода 1)? Отвечает ли `:9100/metrics`?
 3. `last_failures[].error_code = CODEX_QUOTA`: **нет квоты модели.** Ревью не висит; оно падает примерно за 30–40 с. Пополните billing организации ключа. До этого повторные запросы только добавляют упавшие прогоны.
 4. `CODEX_AUTH`: ключ не доходит до песочницы. Проверьте `OPENAI_API_KEY` (или ключ owner'а) в окружении **worker'а**, затем пересоздайте worker.
 5. Сразу `status=completed` на том же SHA: прогон переиспользован (webhook или `force: false`). Ручной API по умолчанию использует `force: true`; пример Actions отправляет `force: false`.
@@ -133,7 +133,7 @@ Prometheus должен достучаться до `:8000/metrics` и `:9100/me
 <!-- section: metrics-but-no-logs-in-grafana -->
 ### Метрики есть, логов в Grafana нет
 
-Сервис пишет только в stdout; отправляет их ваш агент логов. Локально: `docker compose logs -f worker`.
+Сервис пишет только в stdout; отправляет их ваш агент логов. Локально: `./scripts/stack.sh logs worker`.
 
 <!-- section: error-and-skip-codes -->
 ## Коды ошибок и пропусков
@@ -165,9 +165,9 @@ Prometheus должен достучаться до `:8000/metrics` и `:9100/me
 
 | Действие | Как |
 | --- | --- |
-| Перезапустить worker | `docker compose restart worker`; очередь в Redis сохраняется. |
-| Применить изменения `.env` / `config.yaml` | `docker compose up -d --force-recreate api worker` |
+| Перезапустить worker | `./scripts/stack.sh restart worker` / `.\scripts\stack.ps1 restart worker`; очередь в Redis сохраняется. |
+| Применить изменения `.env` / `config.yaml` | `./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker` |
 | Резервная копия | Том `postgres_data`. Redis хранит очередь, а не источник истины. |
-| Никогда на production без резервной копии | `docker compose down -v` удаляет базу и очередь. |
+| Никогда на production без резервной копии | `./scripts/stack.sh down -v` / `.\scripts\stack.ps1 down -v` удаляет базу и очередь. |
 
 Перед обновлением схемы сделайте резервную копию Postgres ([UPGRADE.md](UPGRADE.md)).

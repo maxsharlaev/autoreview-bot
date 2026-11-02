@@ -6,7 +6,7 @@
 - The file path is `CONFIG_PATH` (default `config.yaml`, relative to the working directory; `/app/config.yaml` in the Compose images).
 - A missing file means all defaults below.
 - Unknown top-level keys are ignored, so an older image can read a newer file. Inside `owners.<id>` unknown keys are rejected.
-- The API and the worker read the file once at startup. **Restart both after any change** (`docker compose up -d --force-recreate api worker`). A prompt file named in the config is re-read on every review.
+- The API and the worker read the file once at startup. **Restart both after any change** (`./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker`). A prompt file named in the config is re-read on every review.
 - An invalid file (wrong type, value out of range, bad owner block) stops the API and the worker at startup with an error naming the field. Secret values are never printed.
 
 Column **Owner** says whether the key can be overridden in an `owners.<id>` block (see [MULTI_OWNER.md](MULTI_OWNER.md)). Overrides are partial and deep-merged over the top-level value; the merged section is validated like the global one.
@@ -147,7 +147,7 @@ Check run or commit status on the PR head. Details: [PROGRESS_STATUS.md](PROGRES
 | `codex.prompt_file` | path | `""` | — | Replacement review prompt, e.g. `prompts/local/review.md`. Empty uses [`prompts/review.md`](../prompts/review.md). Relative to the working directory (`/app` in Docker). A missing file fails the review. `{{summary_language}}` and `{{details_language}}` are substituted. |
 | `codex.sandbox` | string | `read-only` | - | Codex `--sandbox` value. When `allow_unsandboxed` is `false` (default), **only** `read-only` is accepted at startup; `workspace-write` and `danger-full-access` are rejected. |
 | `codex.allow_unsandboxed` | bool | `false` | - | Trusted-dev escape hatch only. When `false` (default), reviews **fail closed** with `CODEX_SANDBOX` if the Linux sandbox cannot start, and `codex.sandbox` must be `read-only`. Do not enable for public repos. |
-| `codex.runner_backend` | string | `in_process` | - | Where Codex runs: `in_process` (default, worker process) or `container` (ephemeral review container via the dedicated launcher). Container mode needs the `docker-compose.container-runner.yml` overlay plus `LAUNCHER_URL` / `LAUNCHER_TOKEN` / shared checkout volume; failures are fail-closed (`CODEX_SANDBOX`) with no fallback to `in_process`. |
+| `codex.runner_backend` | string | `container` | - | Where Codex runs: `container` (default since M4; ephemeral review container via launcher + model-proxy) or `in_process` (explicit fallback in the worker process). Container mode needs the `docker-compose.container-runner.yml` overlay (included by `stack up`) plus `LAUNCHER_URL` / `LAUNCHER_TOKEN` / `PROXY_ISSUER_TOKEN` / `MODEL_PROXY_URL` / shared checkout volume; failures are fail-closed (`CODEX_SANDBOX`) with no silent fallback to `in_process`. |
 | `codex.approval_policy` | string | `never` | — | Codex approval policy. Keep `never`: nobody answers prompts in a worker. |
 | `codex.timeout_seconds` | int | `600` | — | Timeout of one Codex call. Keep it below `WORKER_JOB_TIMEOUT`. |
 | `codex.max_files` | int | `100` | — | More changed files in the PR than this, counting skipped files too (lockfiles, binaries and other files not sent to the model): no model call, the PR gets the `PR_TOO_LARGE_FOR_AI_REVIEW` comment. |

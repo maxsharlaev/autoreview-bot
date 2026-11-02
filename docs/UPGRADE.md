@@ -8,8 +8,8 @@ There are no versioned releases yet; deployments track `main`. Notable changes a
 
 1. Read the `Unreleased` section of the changelog for new permissions, keys or migrations.
 2. Back up the Postgres volume (`postgres_data`), for example with `pg_dump` from the `postgres` container.
-3. Update the checkout (`git pull`) and rebuild: `docker compose up -d --build`.
-4. Compose starts `migrate` first (`alembic upgrade head`, one shot); `api` and `worker` start only after it exits successfully. Check `docker compose logs migrate`.
+3. Update the checkout (`git pull`) and rebuild with the stack helper: `./scripts/stack.sh up` / `.\scripts\stack.ps1 up` (or `--in-process` / `-InProcess` when `codex.runner_backend: in_process`).
+4. Compose starts `migrate` first (`alembic upgrade head`, one shot); `api` and `worker` start only after it exits successfully. Check `./scripts/stack.sh logs migrate` / `.\scripts\stack.ps1 logs migrate`.
 5. Check `GET /health`, `GET /is-ready`, the API startup log (owners, default owner, config warnings) and `GET /api/v1/ops/status`.
 
 Without Compose: stop the worker, run `alembic upgrade head` with the new code and the production `DATABASE_URL`, then start the API and worker.
@@ -35,7 +35,7 @@ Configuration stays compatible: new keys have defaults that keep the previous be
 
 - **Configuration only** (for example an owner block): restore the previous `config.yaml` / `.env` and recreate the API and worker. Runs queued for a removed owner are skipped as `owner_not_configured`, for a disabled one as `owner_disabled`; their rows stay. See [MULTI_OWNER.md](MULTI_OWNER.md#upgrade-and-rollback) for the order that also closes progress statuses.
 - **Code with the same schema:** check out the previous commit and rebuild.
-- **Code with an older schema:** downgrade **with the new image first**, then deploy the old one: `docker compose run --rm migrate alembic downgrade <revision>`. Going back to an image from before multi-owner support needs `alembic downgrade 004_finding_details_visibility`; the old image cannot use the upgraded schema (after `007` `findings.owner_id` is required without a default, after `006` comment authors are objects).
+- **Code with an older schema:** downgrade **with the new image first**, then deploy the old one: `./scripts/stack.sh compose run --rm migrate alembic downgrade <revision>`. Going back to an image from before multi-owner support needs `alembic downgrade 004_finding_details_visibility`; the old image cannot use the upgraded schema (after `007` `findings.owner_id` is required without a default, after `006` comment authors are objects).
 - The `007_findings_owner_id` downgrade refuses, and reports the count, while findings of several owners share a stable id on one pull request. With `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` it keeps the repository owner's row (or the oldest) and deletes the others with their transitions.
 
 Always back up the Postgres volume before a downgrade.
@@ -45,6 +45,18 @@ Always back up the Postgres volume before a downgrade.
 
 Step-by-step upgrade to an `owners:` block, keeping history with `aliases: [default]`, and rollback: [MULTI_OWNER.md](MULTI_OWNER.md#upgrade-and-rollback).
 
+<!-- section: m4-container-default -->
+## M4: container backend is the default (hard cut)
+
+`codex.runner_backend` now defaults to **`container`**. There is no warning-only release and no silent fallback to `in_process`.
+
+On upgrade, pick one:
+
+1. **Stay on container (recommended):** keep or add `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create/update `model-proxy.env`, then `./scripts/stack.ps1 up` / `./scripts/stack.sh up` (helper runs `--profile build-review build review-image` and includes the container-runner overlay by default; for non-helper deploys build `review-image` yourself first). If prerequisites are missing, the worker refuses to start (fail-fast).
+2. **Explicit fallback:** set `codex.runner_backend: in_process` in `config.yaml` and start with `./scripts/stack.ps1 -InProcess up` / `./scripts/stack.sh --in-process up` (omit the overlay).
+
+Existing configs that already set `runner_backend: in_process` keep that behavior; configs that omit the key pick up the new default.
+
 <!-- section: m3-container-proxy-rolling -->
 ## Container backend + model-proxy (M3): no rolling mix
 
@@ -53,10 +65,10 @@ rolling-compatible across the M3 proxy-token cut. Upgrade them together:
 
 1. **Drain:** stop intake (pause GitHub Actions / webhook delivery, or scale worker to 0 after
    the current ARQ jobs finish). Wait until no review containers / launcher jobs are active
-   (`docker compose ps`, launcher/reaper logs).
+   (`./scripts/stack.sh status`, launcher/reaper logs).
 2. **Upgrade together:** rebuild and recreate **worker + launcher + model-proxy** from the same
-   checkout (`docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`
-   or `./scripts/stack.ps1 up -Container`). Create/update `model-proxy.env` from
+   checkout (`./scripts/stack.sh up`
+   or `./scripts/stack.ps1 up`). Create/update `model-proxy.env` from
    `model-proxy.env.example` before start; keep real keys out of worker/launcher env.
 3. **Rollback:** symmetric — recreate the same three services from the previous commit (and the
    matching `model-proxy.env`). Do not run a new worker against an old launcher (or the reverse):
@@ -67,7 +79,7 @@ rolling-compatible across the M3 proxy-token cut. Upgrade them together:
 <!-- section: worker-metrics-port-no-longer-published -->
 ## Worker metrics port no longer published
 
-The Compose file no longer maps the worker's metrics port to `127.0.0.1:9100` on the host; it is exposed only on the Docker network, so `docker compose up --scale worker=N` works. If your Prometheus scraped `127.0.0.1:9100` / `localhost:9100`, switch it to the Docker network: attach Prometheus to the stack's network and use the bundled `dns_sd_configs` job from [`observability/prometheus-scrape.yml`](../observability/prometheus-scrape.yml), which scrapes every replica. To keep a host port for a single worker, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (then it can't be scaled). Reload `observability/alerts.yml` too: `OpenPrReviewWorkerDown` keeps `severity: page` but now fires only when no worker replica is discovered or every known worker target is down. The per-replica case (a discovered replica cannot be scraped) moved to the new `OpenPrReviewWorkerTargetDown` with `severity: warning`; add a route for it if you want those notifications.
+The Compose file no longer maps the worker's metrics port to `127.0.0.1:9100` on the host; it is exposed only on the Docker network, so `./scripts/stack.sh compose up -d --scale worker=N` works. If your Prometheus scraped `127.0.0.1:9100` / `localhost:9100`, switch it to the Docker network: attach Prometheus to the stack's network and use the bundled `dns_sd_configs` job from [`observability/prometheus-scrape.yml`](../observability/prometheus-scrape.yml), which scrapes every replica. To keep a host port for a single worker, add a `docker-compose.override.yml` with `ports: ["127.0.0.1:9100:9100"]` on `worker` (then it can't be scaled). Reload `observability/alerts.yml` too: `OpenPrReviewWorkerDown` keeps `severity: page` but now fires only when no worker replica is discovered or every known worker target is down. The per-replica case (a discovered replica cannot be scraped) moved to the new `OpenPrReviewWorkerTargetDown` with `severity: warning`; add a route for it if you want those notifications.
 
 <!-- section: new-github-permissions -->
 ## New GitHub permissions

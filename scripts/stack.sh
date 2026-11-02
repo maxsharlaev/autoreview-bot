@@ -2,56 +2,111 @@
 # Manage the autoreview-bot Compose stack (base + optional overlays).
 # Usage:
 #   ./scripts/stack.sh up
-#   ./scripts/stack.sh up --observability --container
+#   ./scripts/stack.sh --observability up
+#   ./scripts/stack.sh up --observability
+#   ./scripts/stack.sh --in-process up
+#   ./scripts/stack.sh up --in-process
+#   ./scripts/stack.sh compose config
+#   ./scripts/stack.sh compose up -d --scale worker=2
 #   ./scripts/stack.sh status
+# OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
+# ARB36-008/009: first positional non-option is the command. Helper switches may
+# appear before/after non-compose commands; after `compose` args are verbatim.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${OPR_STACK_ROOT:-}" ]]; then
+  ROOT="$(cd "${OPR_STACK_ROOT}" && pwd)"
+else
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$ROOT"
 
-COMMAND=""
 OBSERVABILITY=0
-CONTAINER=0
-REST=()
+# M4: container-runner overlay on by default; --in-process opts out.
+CONTAINER=1
+EXPLICIT_CONTAINER=0
+EXPLICIT_IN_PROCESS=0
 
 usage() {
   cat <<'EOF'
-Usage: stack.sh <up|down|restart|logs|status> [--observability] [--container] [--] [compose-args...]
+Usage: stack.sh [options] <up|down|restart|logs|status|compose> [args...]
+Helper options (before or after non-compose commands; before `compose` only):
+  --observability   Include observability overlay.
+  --container       Include container-runner overlay (default since M4; back-compat).
+  --in-process      Omit container-runner overlay (in_process reviews only).
+  compose           Passthrough to `docker compose` with the same -f files
+                    (no token check / image build); remaining args are verbatim.
 EOF
 }
 
-while [[ $# -gt 0 ]]; do
+is_helper_opt() {
   case "$1" in
-    up|down|restart|logs|status)
-      COMMAND="$1"
-      shift
-      ;;
-    --observability)
-      OBSERVABILITY=1
-      shift
-      ;;
-    --container)
-      CONTAINER=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --)
-      shift
-      REST+=("$@")
-      break
-      ;;
-    *)
-      REST+=("$1")
-      shift
-      ;;
+    --observability|--container|--in-process|-h|--help) return 0 ;;
+    *) return 1 ;;
   esac
+}
+
+apply_helper_opt() {
+  case "$1" in
+    --observability) OBSERVABILITY=1 ;;
+    --container) CONTAINER=1; EXPLICIT_CONTAINER=1 ;;
+    --in-process) CONTAINER=0; EXPLICIT_IN_PROCESS=1 ;;
+    -h|--help) usage; exit 0 ;;
+  esac
+}
+
+COMMAND=""
+REST=()
+seen_command=0
+while [[ $# -gt 0 ]]; do
+  arg="$1"
+  shift
+  if [[ "$seen_command" -eq 0 ]]; then
+    if [[ "$arg" == "--" ]]; then
+      continue
+    fi
+    if is_helper_opt "$arg"; then
+      apply_helper_opt "$arg"
+      continue
+    fi
+    if [[ "$arg" == -* ]]; then
+      echo "Unknown option before command: $arg" >&2
+      usage
+      exit 2
+    fi
+    COMMAND="$arg"
+    seen_command=1
+    continue
+  fi
+
+  # After the command.
+  if [[ "$COMMAND" == "compose" ]]; then
+    REST+=("$arg")
+    continue
+  fi
+  if is_helper_opt "$arg"; then
+    apply_helper_opt "$arg"
+    continue
+  fi
+  REST+=("$arg")
 done
 
 if [[ -z "$COMMAND" ]]; then
   usage
+  exit 2
+fi
+
+case "$COMMAND" in
+  up|down|restart|logs|status|compose) ;;
+  *)
+    echo "Unknown command: $COMMAND" >&2
+    usage
+    exit 2
+    ;;
+esac
+
+if [[ "$EXPLICIT_CONTAINER" -eq 1 && "$EXPLICIT_IN_PROCESS" -eq 1 ]]; then
+  echo "Use either --container (default) or --in-process, not both." >&2
   exit 2
 fi
 
@@ -87,8 +142,8 @@ assert_launcher_token() {
   local token
   token="$(dotenv_get LAUNCHER_TOKEN || true)"
   if [[ -z "$token" || ${#token} -lt 16 ]]; then
-    cat <<'EOF'
-LAUNCHER_TOKEN is missing or shorter than 16 characters (required for --container).
+    cat <<EOF
+LAUNCHER_TOKEN is missing or shorter than 16 characters (required for stack up with the container-runner overlay; default since M4).
 
 Generate one (do not commit it; put it in .env):
 
@@ -100,6 +155,9 @@ Generate one (do not commit it; put it in .env):
 
 Then set in .env:
   LAUNCHER_TOKEN=<paste value>
+
+Or opt out of the overlay: ./scripts/stack.sh --in-process ${COMMAND}
+(and set codex.runner_backend: in_process in config.yaml).
 EOF
     exit 1
   fi
@@ -110,8 +168,19 @@ if [[ "$OBSERVABILITY" -eq 1 ]]; then
   compose_args+=(-f docker-compose.observability.yml)
 fi
 if [[ "$CONTAINER" -eq 1 ]]; then
-  assert_launcher_token
   compose_args+=(-f docker-compose.container-runner.yml)
+fi
+
+# ARB36-007: build review image via compose profile service (no host Python / docker build -f).
+ensure_review_image() {
+  echo "Building review-image (Dockerfile.review → \${OPR_REVIEW_IMAGE:-opr-review:local})..."
+  docker compose "${compose_args[@]}" --profile build-review build review-image
+}
+
+# Credential check + review image build only for helper `up` (not compose up).
+if [[ "$CONTAINER" -eq 1 && "$COMMAND" == "up" ]]; then
+  assert_launcher_token
+  ensure_review_image
 fi
 
 case "$COMMAND" in
@@ -129,5 +198,8 @@ case "$COMMAND" in
     ;;
   status)
     docker compose "${compose_args[@]}" ps "${REST[@]}"
+    ;;
+  compose)
+    docker compose "${compose_args[@]}" "${REST[@]}"
     ;;
 esac

@@ -142,8 +142,8 @@ class CodexYaml(BaseModel):
     # (e.g. userns unavailable). Set True only for trusted private/dev escape hatch.
     # Also gates which sandbox modes are accepted: only read-only unless True.
     allow_unsandboxed: bool = False
-    # M2: in_process (default) or container (dedicated launcher; fail closed, no fallback).
-    runner_backend: str = "in_process"
+    # M4: container is the default (launcher + model-proxy); in_process is an explicit fallback.
+    runner_backend: str = "container"
     timeout_seconds: int = 600
     max_files: int = 100
     max_diff_lines: int = 20000

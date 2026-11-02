@@ -34,9 +34,9 @@ For local checks only, [docker-compose.observability.yml](../docker-compose.obse
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+./scripts/stack.sh --observability up
 # Stop everything (Postgres data is kept)
-docker compose -f docker-compose.yml -f docker-compose.observability.yml down
+./scripts/stack.sh --observability down
 ```
 
 <!-- section: dev-prometheus -->
@@ -54,7 +54,7 @@ Grafana is on `http://127.0.0.1:3000` only. It provisions a `Prometheus` datasou
 
 Loki ([observability/dev/loki.yml](../observability/dev/loki.yml)) runs as a single binary with no host port; Grafana reaches it at `http://loki:3100`. Storage is a 512m tmpfs, and the compactor enforces 24h retention. Alloy ([observability/dev/alloy.alloy](../observability/dev/alloy.alloy)) reads the stdout and stderr of this Compose project's containers through a pinned `wollomatic/socket-proxy` on an internal network (no host ports) and pushes them to Loki with the labels `service` (Compose service name, e.g. `worker`, `api`) and `container`. Explore example: `{service="worker"}`.
 
-The logs contain exactly what `docker compose logs` shows, nothing more, so treat them like those logs: dev only, and do not expose Loki or Grafana beyond `127.0.0.1`. Mounting the Docker socket `:ro` is not an API boundary: only the proxy mounts it. The proxy allowlist permits only GET list/inspect/logs and networks (plus ping/version); archive, export, create, and exec are denied. Alloy filters to this Compose project (the name Compose derives from the directory or `-p` / `COMPOSE_PROJECT_NAME`). On the first start Loki rejects lines older than 7 days from long-running containers, which shows up as `timestamp too old` errors in its log and is harmless.
+The logs contain exactly what `./scripts/stack.sh logs` shows, nothing more, so treat them like those logs: dev only, and do not expose Loki or Grafana beyond `127.0.0.1`. Mounting the Docker socket `:ro` is not an API boundary: only the proxy mounts it. The proxy allowlist permits only GET list/inspect/logs and networks (plus ping/version); archive, export, create, and exec are denied. Alloy filters to this Compose project (the name Compose derives from the directory or `-p` / `COMPOSE_PROJECT_NAME`). On the first start Loki rejects lines older than 7 days from long-running containers, which shows up as `timestamp too old` errors in its log and is harmless.
 
 > **Warning (accepted risk):** the Compose project filter lives only in Alloy's config. A compromised Alloy can call inspect and logs for **every** container on the host through the proxy, including environment variables and secrets of unrelated containers. Do not run this logs overlay on a machine that hosts sensitive containers outside this project. Dev only.
 
@@ -62,9 +62,9 @@ The logs contain exactly what `docker compose logs` shows, nothing more, so trea
 ### Prometheus only and scaling
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --scale worker=2 worker
-docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana loki alloy docker-socket-proxy
+./scripts/stack.sh --observability compose up -d prometheus
+./scripts/stack.sh --observability compose up -d --scale worker=2 worker
+./scripts/stack.sh --observability compose rm -sf prometheus grafana loki alloy docker-socket-proxy
 ```
 
 The first command starts only Prometheus, the second scales workers (all replicas show up under `open-pr-review-worker`), the last removes the observability services.
@@ -79,7 +79,7 @@ The first command starts only Prometheus, the second scales workers (all replica
 <!-- section: loki-existing -->
 ## Loki (existing)
 
-Ship container stdout with **your** agent. Compose sets `OPEN_PR_REVIEW_SERVICE=api|worker`. Set `LOG_FORMAT=json` only if that pipeline wants JSON; default `text` is fine for `docker compose logs`.
+Ship container stdout with **your** agent. Compose sets `OPEN_PR_REVIEW_SERVICE=api|worker`. Set `LOG_FORMAT=json` only if that pipeline wants JSON; default `text` is fine for `./scripts/stack.sh logs`.
 
 <!-- section: env-app-not-the-metrics-stack -->
 ## Env (app, not the metrics stack)

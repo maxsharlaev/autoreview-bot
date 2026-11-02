@@ -126,36 +126,37 @@ Preferred local commands (from the repo root):
 
 ```powershell
 .\scripts\stack.ps1 up
-.\scripts\stack.ps1 up -Observability
-.\scripts\stack.ps1 up -Container
+.\scripts\stack.ps1 -Observability up
+.\scripts\stack.ps1 -InProcess up
+.\scripts\stack.ps1 compose -- config
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
 ```
 
 ```bash
 ./scripts/stack.sh up
-./scripts/stack.sh up --observability
-./scripts/stack.sh up --container
+./scripts/stack.sh --observability up
+./scripts/stack.sh --in-process up
+./scripts/stack.sh compose config
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-`-Container` / `--container` adds `docker-compose.container-runner.yml` and requires `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). Raw `docker compose -f …` commands remain supported as an alternative.
+Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy), builds the `review-image` service (`--profile build-review`, tag `${OPR_REVIEW_IMAGE:-opr-review:local}`), and **requires** `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). `status` / `down` / `restart` / `logs` still use that overlay when not `-InProcess`, but do **not** re-check `LAUNCHER_TOKEN`. Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. `compose` passthrough (`./scripts/stack.sh compose …`) uses the same `-f` files without token/image build. Raw `docker compose -f …` remains a non-helper alternative.
 
 <!-- section: deployment-steps -->
 ## Deployment steps
 
 1. Clone the repository on the host; create `.env` and `config.yaml` as above.
 2. Check that Postgres/Redis are not published on the host, `8000` is reachable by the reverse proxy over loopback, and `9100` only inside the Docker network.
-3. `./scripts/stack.ps1 up` (or `./scripts/stack.sh up`). Wait for `migrate` (exit 0), then `api` and `worker` Up. For `codex.runner_backend: container`: set `LAUNCHER_TOKEN` in `.env`, build the review image (`docker build -f Dockerfile.review -t opr-review:local .`), then `./scripts/stack.ps1 up -Container` (or `./scripts/stack.sh up --container`). Alternative: `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`.
-For `container` + model-proxy (M3): create `model-proxy.env` from `model-proxy.env.example` (restricted perms; never mount on worker/launcher). Restrict the host firewall / cloud security group for Compose `proxy_egress` to the configured upstream model host (`PROXY_UPSTREAM_HOST`). Upgrades of worker, launcher, and model-proxy must be drained and applied together — see [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-no-rolling-mix).
+3. Default backend is `codex.runner_backend: container` (M4). Set `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create `model-proxy.env` from `model-proxy.env.example` (restricted perms; never mount on worker/launcher), then `./scripts/stack.ps1 up` (or `./scripts/stack.sh up`) — the helper runs `docker compose … --profile build-review build review-image` (tag `${OPR_REVIEW_IMAGE:-opr-review:local}`) and includes the container-runner overlay by default. Wait for `migrate` (exit 0), then `api`, `worker`, `launcher`, and `model-proxy` Up. Manual / non-helper deploys still need `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml --profile build-review build review-image` before `docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build`. For the explicit `in_process` fallback: set `codex.runner_backend: in_process` and `./scripts/stack.ps1 -InProcess up` (or `./scripts/stack.sh --in-process up`). Restrict the host firewall / cloud security group for Compose `proxy_egress` to the configured upstream model host (`PROXY_UPSTREAM_HOST`). Upgrades of worker, launcher, and model-proxy must be drained and applied together — see [UPGRADE.md](UPGRADE.md#container-backend--model-proxy-m3-no-rolling-mix).
 
 4. Checks from the host or internal network:
 
    ```bash
    curl -sS https://review.example.com/health
    curl -sS https://review.example.com/is-ready    # "ready", otherwise Postgres/Redis
-   docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
+   ./scripts/stack.sh compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
    ```
 
 5. Reverse proxy and TLS. Check that `/metrics` is **not** reachable from outside.
@@ -213,7 +214,7 @@ The application does **not** push metrics or logs; your scraper pulls.
   - the PR has a sticky comment with the `<!-- open-pr-review -->` marker;
   - `GET /api/v1/ops/status` shows no `CODEX_QUOTA` / `CODEX_AUTH` among recent failures.
 - [ ] Repeating the same SHA reuses the run (webhook, or Action with `force: false`).
-- [ ] `docker compose restart worker` keeps the queue. Never run `docker compose down -v` in production without a volume backup.
+- [ ] `./scripts/stack.sh restart worker` / `.\scripts\stack.ps1 restart worker` keeps the queue. Never run `./scripts/stack.sh down -v` / `.\scripts\stack.ps1 down -v` in production without a volume backup.
 - [ ] The [hardening checklist](../SECURITY.md#deployment-hardening-checklist) is done.
 
 API `202` but no comment: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (`ops/status`, model quota, PAT Contents, allowlist).
@@ -228,8 +229,8 @@ To serve another GitHub organization from the same deployment, add an `owners:` 
 
 | Action | How |
 | --- | --- |
-| Restart the worker | `docker compose restart worker`; the Redis queue survives |
-| Change `.env` / `config.yaml` | `docker compose up -d --force-recreate api worker` |
+| Restart the worker | `./scripts/stack.sh restart worker` / `.\scripts\stack.ps1 restart worker`; the Redis queue survives |
+| Change `.env` / `config.yaml` | `./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker` |
 | Backup | The `postgres_data` volume; Redis is the queue, not the source of truth |
 | Disaster | `down -v` deletes the database and the queue |
 | Upgrade | [UPGRADE.md](UPGRADE.md) |

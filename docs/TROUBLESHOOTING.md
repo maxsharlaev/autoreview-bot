@@ -63,9 +63,9 @@ Changing filters is a commit to the reviewed repository; the worker needs no res
 curl -fsS http://localhost:8000/health
 curl -fsS http://localhost:8000/is-ready
 curl -fsS http://localhost:8000/metrics | grep open_pr_review
-docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
-docker compose ps
-docker compose logs -f worker
+./scripts/stack.sh compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
+./scripts/stack.sh status
+./scripts/stack.sh logs worker
 ```
 
 Queue and recent failures (operator key):
@@ -101,7 +101,7 @@ Worker log lines to look for: `worker ready`, `queued review_run=`, `job start`,
 ### API answers `202`, nothing appears on GitHub
 
 1. `GET /api/v1/ops/status`.
-2. `queue_jobs > 0` and `in_flight.running = 0`: **the worker does not consume the queue.** Is the container up (`docker compose ps`)? Does the log show `worker ready`, or did it fail at startup (an owner config error stops the worker with exit code 1)? Does `:9100/metrics` answer?
+2. `queue_jobs > 0` and `in_flight.running = 0`: **the worker does not consume the queue.** Is the container up (`./scripts/stack.sh status`)? Does the log show `worker ready`, or did it fail at startup (an owner config error stops the worker with exit code 1)? Does `:9100/metrics` answer?
 3. `last_failures[].error_code = CODEX_QUOTA`: **no model quota.** The review does not hang; it fails within about 30–40 s. Top up billing for the key's organization. Until then, repeated requests only add failed runs.
 4. `CODEX_AUTH`: the key does not reach the sandbox. Check `OPENAI_API_KEY` (or the owner's key) in the **worker** environment, then recreate the worker.
 5. `status=completed` right away on the same SHA: the run was reused (webhook, or `force: false`). The manual API defaults to `force: true`; the Actions example sends `force: false`.
@@ -133,7 +133,7 @@ Prometheus must reach `:8000/metrics` and `:9100/metrics` (network, security gro
 <!-- section: metrics-but-no-logs-in-grafana -->
 ### Metrics but no logs in Grafana
 
-The service only writes to stdout; your log agent ships it. Locally: `docker compose logs -f worker`.
+The service only writes to stdout; your log agent ships it. Locally: `./scripts/stack.sh logs worker`.
 
 <!-- section: error-and-skip-codes -->
 ## Error and skip codes
@@ -165,9 +165,9 @@ The service only writes to stdout; your log agent ships it. Locally: `docker com
 
 | Action | How |
 | --- | --- |
-| Restart the worker | `docker compose restart worker`; the queue in Redis survives. |
-| Apply `.env` / `config.yaml` changes | `docker compose up -d --force-recreate api worker` |
+| Restart the worker | `./scripts/stack.sh restart worker` / `.\scripts\stack.ps1 restart worker`; the queue in Redis survives. |
+| Apply `.env` / `config.yaml` changes | `./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker` |
 | Backup | The `postgres_data` volume. Redis holds the queue, not the source of truth. |
-| Never on production without a backup | `docker compose down -v` deletes the database and the queue. |
+| Never on production without a backup | `./scripts/stack.sh down -v` / `.\scripts\stack.ps1 down -v` deletes the database and the queue. |
 
 Back up Postgres before schema upgrades ([UPGRADE.md](UPGRADE.md)).

@@ -1,6 +1,9 @@
-# Opt-in overlay for codex.runner_backend: container (not loaded by default CI/`docker compose`).
-# Usage:
-#   docker build -f Dockerfile.review -t opr-review:local .
+# Container-runner overlay (M4 default via ./scripts/stack.* up; omit with --in-process / -InProcess).
+# Not loaded by bare `docker compose -f docker-compose.yml` or the CI image-build job.
+# Prefer: ./scripts/stack.sh up / .\scripts\stack.ps1 up
+#   (builds profile `build-review` service `review-image` → ${OPR_REVIEW_IMAGE:-opr-review:local}, then compose up).
+# Manual / non-helper:
+#   docker compose -f docker-compose.yml -f docker-compose.container-runner.yml --profile build-review build review-image
 #   # set LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN in .env (openssl rand -hex 32), then:
 #   docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build
 # LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN use non-required interpolation (${VAR:-}) so this file can be
@@ -35,7 +38,7 @@ services:
       LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
       OPR_CHECKOUT_BASE: /var/opr/checkouts
       OPR_CHECKOUT_VOLUME: opr_checkouts
-      OPR_REVIEW_IMAGE: opr-review:local
+      OPR_REVIEW_IMAGE: "${OPR_REVIEW_IMAGE:-opr-review:local}"
       OPR_REVIEW_NETWORK: autoreview_review_egress
       LAUNCHER_APPARMOR_PROFILE: "${LAUNCHER_APPARMOR_PROFILE:-unconfined}"
       LAUNCHER_CANCEL_WAIT_SECONDS: "${LAUNCHER_CANCEL_WAIT_SECONDS:-3}"
@@ -98,6 +101,14 @@ services:
       - internal
       - review_egress
       - proxy_egress
+
+  # Build-only (ARB36-007): never started by `up`/`ps` unless profile build-review is enabled.
+  review-image:
+    profiles: ["build-review"]
+    image: ${OPR_REVIEW_IMAGE:-opr-review:local}
+    build:
+      context: .
+      dockerfile: Dockerfile.review
 
 volumes:
   opr_checkouts:
