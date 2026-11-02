@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+- **ARB36-004 (follow-up):** `scripts/stack.ps1` / `stack.sh` `compose` passthrough silently consumes one optional leading `--` (documented PowerShell form) and does not forward it to `docker compose`; remaining args stay verbatim (no token check / image build).
+
 ### Changed
 - **M4 PR1 container default:** `codex.runner_backend` defaults to **`container`** (hard cut; `in_process` remains an explicit fallback). `./scripts/stack.ps1 up` / `./scripts/stack.sh up` include `docker-compose.container-runner.yml` by default; opt out with `-InProcess` / `--in-process`. Worker fail-fast for missing `LAUNCHER_TOKEN` / `PROXY_ISSUER_TOKEN` / `MODEL_PROXY_URL` unchanged. Docs EN/RU (DEPLOY, ENVIRONMENT, UPGRADE migration, CONFIGURATION, ARCHITECTURE, ROADMAP in progress).
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.

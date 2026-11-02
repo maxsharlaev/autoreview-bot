@@ -274,6 +274,11 @@ def test_stack_ps1_up_inprocess_skips_review_image_build(tmp_path: Path) -> None
     ("passthrough", "needle"),
     [
         (["up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["--", "up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["config"], "config"),
+        (["--", "config"], "config"),
+        (["run", "--rm", "migrate"], "run --rm migrate"),
+        (["--", "run", "--rm", "migrate"], "run --rm migrate"),
         (["down"], "down"),
         (["restart", "worker"], "restart worker"),
         (["logs", "-f", "api"], "logs -f api"),
@@ -288,6 +293,8 @@ def test_stack_ps1_compose_passthrough_verbatim(passthrough: list[str], needle: 
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert needle in recorded
+    # ARB36-004: optional leading `--` after compose must not reach docker compose.
+    assert "container-runner.yml -- " not in recorded
     assert "build-review" not in recorded
     assert "LAUNCHER_TOKEN" not in (completed.stdout + completed.stderr)
 
@@ -401,6 +408,11 @@ def test_stack_sh_up_inprocess_skips_review_image_build(tmp_path: Path) -> None:
     ("passthrough", "needle"),
     [
         (["up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["--", "up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["config"], "config"),
+        (["--", "config"], "config"),
+        (["run", "--rm", "migrate"], "run --rm migrate"),
+        (["--", "run", "--rm", "migrate"], "run --rm migrate"),
         (["down"], "down"),
         (["restart", "worker"], "restart worker"),
         (["logs", "-f", "api"], "logs -f api"),
@@ -417,6 +429,8 @@ def test_stack_sh_compose_passthrough_verbatim(passthrough: list[str], needle: s
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert needle in recorded
+    # ARB36-004: optional leading `--` after compose must not reach docker compose.
+    assert "container-runner.yml -- " not in recorded
     assert "build-review" not in recorded
     assert "LAUNCHER_TOKEN" not in (completed.stdout + completed.stderr)
 

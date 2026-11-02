@@ -7,11 +7,14 @@
 #   ./scripts/stack.sh --in-process up
 #   ./scripts/stack.sh up --in-process
 #   ./scripts/stack.sh compose config
+#   ./scripts/stack.sh compose -- config
 #   ./scripts/stack.sh compose up -d --scale worker=2
+#   ./scripts/stack.sh compose -- up -d --scale worker=2
 #   ./scripts/stack.sh status
 # OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
 # ARB36-008/009: first positional non-option is the command. Helper switches may
-# appear before/after non-compose commands; after `compose` args are verbatim.
+# appear before/after non-compose commands; after `compose` args are verbatim
+# (one optional leading `--` is consumed, ARB36-004).
 set -euo pipefail
 
 if [[ -n "${OPR_STACK_ROOT:-}" ]]; then
@@ -35,7 +38,8 @@ Helper options (before or after non-compose commands; before `compose` only):
   --container       Include container-runner overlay (default since M4; back-compat).
   --in-process      Omit container-runner overlay (in_process reviews only).
   compose           Passthrough to `docker compose` with the same -f files
-                    (no token check / image build); remaining args are verbatim.
+                    (no token check / image build); remaining args are verbatim
+                    (one optional leading `--` after `compose` is consumed).
 EOF
 }
 
@@ -81,6 +85,11 @@ while [[ $# -gt 0 ]]; do
 
   # After the command.
   if [[ "$COMMAND" == "compose" ]]; then
+    # ARB36-004: optional leading `--` after `compose` is a helper separator only;
+    # do not forward it to docker compose (matches stack.ps1 / documented forms).
+    if [[ ${#REST[@]} -eq 0 && "$arg" == "--" ]]; then
+      continue
+    fi
     REST+=("$arg")
     continue
   fi

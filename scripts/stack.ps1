@@ -14,7 +14,8 @@
   .\scripts\stack.ps1 status
 #>
 # ARB36-008/009/010: first positional non-option is the command. Helper switches
-# may appear before/after non-compose commands; after `compose` args are verbatim.
+# may appear before/after non-compose commands; after `compose` args are verbatim
+# (one optional leading `--` is consumed, ARB36-004).
 # Use $args directly so PowerShell does not steal compose flags like -d (= -Debug).
 # Plain if/elseif loop (no switch+continue+break) so every option is processed.
 $ArgList = @($args)
@@ -36,7 +37,8 @@ Helper options (before or after non-compose commands; before `compose` only):
   -Container       Include container-runner overlay (default since M4; back-compat).
   -InProcess       Omit container-runner overlay (in_process reviews only).
   compose          Passthrough to docker compose with the same -f files
-                   (no token check / image build); remaining args are verbatim.
+                   (no token check / image build); remaining args are verbatim
+                   (one optional leading `--` after `compose` is consumed).
 "@
 }
 
@@ -99,6 +101,11 @@ foreach ($a in $argv) {
     }
 
     if ($Command -eq "compose") {
+        # ARB36-004: optional leading `--` after `compose` is a helper separator only
+        # (documented for PowerShell); do not forward it to docker compose.
+        if ($Rest.Count -eq 0 -and $a -eq "--") {
+            continue
+        }
         [void]$Rest.Add($a)
         continue
     }

@@ -129,6 +129,7 @@ Preferred local commands (from the repo root):
 .\scripts\stack.ps1 -Observability up
 .\scripts\stack.ps1 -InProcess up
 .\scripts\stack.ps1 compose -- config
+.\scripts\stack.ps1 compose config
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
 ```
@@ -138,11 +139,12 @@ Preferred local commands (from the repo root):
 ./scripts/stack.sh --observability up
 ./scripts/stack.sh --in-process up
 ./scripts/stack.sh compose config
+./scripts/stack.sh compose -- config
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy), builds the `review-image` service (`--profile build-review`, tag `${OPR_REVIEW_IMAGE:-opr-review:local}`), and **requires** `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). `status` / `down` / `restart` / `logs` still use that overlay when not `-InProcess`, but do **not** re-check `LAUNCHER_TOKEN`. Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. `compose` passthrough (`./scripts/stack.sh compose …`) uses the same `-f` files without token/image build. Raw `docker compose -f …` remains a non-helper alternative.
+Since M4, `up` **includes** `docker-compose.container-runner.yml` by default (launcher + model-proxy), builds the `review-image` service (`--profile build-review`, tag `${OPR_REVIEW_IMAGE:-opr-review:local}`), and **requires** `LAUNCHER_TOKEN` (≥ 16 chars) in the environment or `.env` (the script prints how to generate one; it never prints the value). `status` / `down` / `restart` / `logs` still use that overlay when not `-InProcess`, but do **not** re-check `LAUNCHER_TOKEN`. Opt out with `-InProcess` / `--in-process` and set `codex.runner_backend: in_process`. `-Container` / `--container` remain accepted no-ops for back-compat. `compose` passthrough (`./scripts/stack.sh compose …` / `.\scripts\stack.ps1 compose -- …`) uses the same `-f` files without token/image build; an optional leading `--` after `compose` is consumed (not forwarded to `docker compose`). Raw `docker compose -f …` remains a non-helper alternative.
 
 <!-- section: deployment-steps -->
 ## Deployment steps
