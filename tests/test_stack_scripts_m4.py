@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -10,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 PS1 = ROOT / "scripts" / "stack.ps1"
@@ -23,6 +25,7 @@ def test_stack_ps1_defaults_to_container_overlay_with_inprocess_opt_out() -> Non
     assert "$UseContainerOverlay = -not $InProcess" in text
     assert "docker-compose.container-runner.yml" in text
     assert '$Command -eq "up"' in text
+    assert '"compose"' in text or "'compose'" in text
 
 
 def test_stack_sh_defaults_to_container_overlay_with_inprocess_opt_out() -> None:
@@ -31,6 +34,9 @@ def test_stack_sh_defaults_to_container_overlay_with_inprocess_opt_out() -> None
     assert "--in-process" in text
     assert "docker-compose.container-runner.yml" in text
     assert '"$COMMAND" == "up"' in text
+    assert "compose)" in text
+    assert "config --format json" in text
+    assert "dotenv_get OPR_REVIEW_IMAGE" not in text
 
 
 def test_config_example_defaults_to_container_backend() -> None:
@@ -66,8 +72,23 @@ def _prepare_stack_home(tmp_path: Path) -> tuple[Path, Path]:
 
 def _write_docker_stub_windows(bin_dir: Path, log: Path) -> None:
     stub = bin_dir / "docker.cmd"
+    # Logs argv; for `compose config --format json` prints launcher image JSON (ARB36-005).
     stub.write_text(
-        f'@echo off\r\n>>"{log}" echo %*\r\nexit /b 0\r\n',
+        "\r\n".join(
+            [
+                "@echo off",
+                f'>>"{log}" echo %*',
+                'echo %*| findstr /I /C:"config" >nul',
+                "if errorlevel 1 goto :done",
+                'echo %*| findstr /I /C:"json" >nul',
+                "if errorlevel 1 goto :done",
+                "if not defined OPR_STUB_REVIEW_IMAGE set OPR_STUB_REVIEW_IMAGE=opr-review:local",
+                ('echo {"services":{"launcher":{"environment":{"OPR_REVIEW_IMAGE":"%OPR_STUB_REVIEW_IMAGE%"}}}}'),
+                ":done",
+                "exit /b 0",
+                "",
+            ]
+        ),
         encoding="utf-8",
         newline="\r\n",
     )
@@ -75,8 +96,26 @@ def _write_docker_stub_windows(bin_dir: Path, log: Path) -> None:
 
 def _write_docker_stub_posix(bin_dir: Path, log: Path) -> Path:
     stub = bin_dir / "docker"
+    log_posix = log.as_posix()
     stub.write_text(
-        f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{log.as_posix()}"\nexit 0\n',
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f'printf \'%s\\n\' "$*" >> "{log_posix}"',
+                'case "$*" in',
+                "  *config*json*|*config*--format*)",
+                '    img="${OPR_STUB_REVIEW_IMAGE:-opr-review:local}"',
+                (
+                    "    printf '%s\\n' "
+                    '"{\\"services\\":{\\"launcher\\":{\\"environment\\":'
+                    '{\\"OPR_REVIEW_IMAGE\\":\\"$img\\"}}}}"'
+                ),
+                "    ;;",
+                "esac",
+                "exit 0",
+                "",
+            ]
+        ),
         encoding="utf-8",
         newline="\n",
     )
@@ -120,7 +159,7 @@ def _run_ps1(
         capture_output=True,
         text=True,
         check=False,
-        timeout=30,
+        timeout=60,
     )
 
 
@@ -150,7 +189,7 @@ def _run_sh(
         capture_output=True,
         text=True,
         check=False,
-        timeout=30,
+        timeout=60,
     )
 
 
@@ -193,7 +232,9 @@ def test_stack_ps1_up_with_launcher_token_invokes_compose(tmp_path: Path) -> Non
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert "up -d --build" in recorded
+    assert "config --format json" in recorded
     assert "build -f Dockerfile.review -t opr-review:local ." in recorded
+    assert recorded.index("config --format json") < recorded.index("build -f Dockerfile.review")
     assert recorded.index("build -f Dockerfile.review") < recorded.index("up -d --build")
 
 
@@ -242,7 +283,9 @@ def test_stack_sh_up_with_launcher_token_invokes_compose(tmp_path: Path) -> None
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert "up -d --build" in recorded
+    assert "config --format json" in recorded
     assert "build -f Dockerfile.review -t opr-review:local ." in recorded
+    assert recorded.index("config --format json") < recorded.index("build -f Dockerfile.review")
     assert recorded.index("build -f Dockerfile.review") < recorded.index("up -d --build")
 
 
@@ -255,6 +298,7 @@ def test_stack_ps1_up_inprocess_skips_review_image_build(tmp_path: Path) -> None
     assert completed.returncode == 0, completed.stdout + completed.stderr
     recorded = log.read_text(encoding="utf-8")
     assert "Dockerfile.review" not in recorded
+    assert "config --format json" not in recorded
     assert "docker-compose.container-runner.yml" not in recorded
     assert "up -d --build" in recorded
 
@@ -269,11 +313,16 @@ def test_stack_ps1_lifecycle_skips_review_image_build(command: str, tmp_path: Pa
     assert completed.returncode == 0, completed.stdout + completed.stderr
     recorded = log.read_text(encoding="utf-8")
     assert "Dockerfile.review" not in recorded
+    assert "config --format json" not in recorded
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
-def test_stack_ps1_up_respects_opr_review_image_env(tmp_path: Path) -> None:
+def test_stack_ps1_up_uses_compose_config_image_not_dotenv(tmp_path: Path) -> None:
     home, log = _prepare_stack_home(tmp_path)
+    (home / ".env").write_text(
+        "OPR_REVIEW_IMAGE=wrong-from-dotenv:tag # should be ignored by helper\n",
+        encoding="utf-8",
+    )
     bin_dir = tmp_path / "bin"
     _write_docker_stub_windows(bin_dir, log)
     completed = _run_ps1(
@@ -282,12 +331,39 @@ def test_stack_ps1_up_respects_opr_review_image_env(tmp_path: Path) -> None:
         bin_dir=bin_dir,
         env_extra={
             "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
-            "OPR_REVIEW_IMAGE": "custom-review:test",
+            "OPR_STUB_REVIEW_IMAGE": "from-compose:tag",
         },
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     recorded = log.read_text(encoding="utf-8")
-    assert "build -f Dockerfile.review -t custom-review:test ." in recorded
+    assert "build -f Dockerfile.review -t from-compose:tag ." in recorded
+    assert "wrong-from-dotenv" not in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_passthrough_uses_overlay_without_build(tmp_path: Path) -> None:
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1("compose", home=home, bin_dir=bin_dir, extra_args=["config"])
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "docker-compose.container-runner.yml" in recorded
+    assert " config" in recorded or recorded.strip().endswith("config")
+    assert "Dockerfile.review" not in recorded
+    assert "up -d --build" not in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_inprocess_omits_overlay(tmp_path: Path) -> None:
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1("compose", home=home, bin_dir=bin_dir, extra_args=["-InProcess", "config"])
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "docker-compose.container-runner.yml" not in recorded
+    assert "docker-compose.yml" in recorded
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
@@ -301,6 +377,7 @@ def test_stack_sh_up_inprocess_skips_review_image_build(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
     recorded = log.read_text(encoding="utf-8")
     assert "Dockerfile.review" not in recorded
+    assert "config --format json" not in recorded
     assert "docker-compose.container-runner.yml" not in recorded
     assert "up -d --build" in recorded
 
@@ -317,13 +394,18 @@ def test_stack_sh_lifecycle_skips_review_image_build(command: str, tmp_path: Pat
     assert completed.returncode == 0, completed.stdout + completed.stderr
     recorded = log.read_text(encoding="utf-8")
     assert "Dockerfile.review" not in recorded
+    assert "config --format json" not in recorded
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
-def test_stack_sh_up_respects_opr_review_image_env(tmp_path: Path) -> None:
+def test_stack_sh_up_uses_compose_config_image_not_dotenv(tmp_path: Path) -> None:
     bash = _git_bash() or shutil.which("bash")
     assert bash
     home, log = _prepare_stack_home(tmp_path)
+    (home / ".env").write_text(
+        "OPR_REVIEW_IMAGE=wrong-from-dotenv:tag # should be ignored by helper\n",
+        encoding="utf-8",
+    )
     bin_dir = tmp_path / "bin"
     _write_docker_stub_posix(bin_dir, log)
     completed = _run_sh(
@@ -333,9 +415,147 @@ def test_stack_sh_up_respects_opr_review_image_env(tmp_path: Path) -> None:
         bash=bash,
         env_extra={
             "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
-            "OPR_REVIEW_IMAGE": "custom-review:test",
+            "OPR_STUB_REVIEW_IMAGE": "from-compose:tag",
         },
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     recorded = log.read_text(encoding="utf-8")
-    assert "build -f Dockerfile.review -t custom-review:test ." in recorded
+    assert "build -f Dockerfile.review -t from-compose:tag ." in recorded
+    assert "wrong-from-dotenv" not in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_passthrough_uses_overlay_without_build(tmp_path: Path) -> None:
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh("compose", home=home, bin_dir=bin_dir, bash=bash, extra_args=["config"])
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "docker-compose.container-runner.yml" in recorded
+    assert "config" in recorded
+    assert "Dockerfile.review" not in recorded
+    assert "up -d --build" not in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_inprocess_omits_overlay(tmp_path: Path) -> None:
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["--in-process", "config"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "docker-compose.container-runner.yml" not in recorded
+    assert "docker-compose.yml" in recorded
+
+
+def _compose_available() -> bool:
+    return shutil.which("docker") is not None
+
+
+def _env_map(svc_env: object) -> dict[str, str]:
+    if isinstance(svc_env, dict):
+        return {str(k): str(v) for k, v in svc_env.items()}
+    if isinstance(svc_env, list):
+        out: dict[str, str] = {}
+        for item in svc_env:
+            text = str(item)
+            if "=" in text:
+                k, v = text.split("=", 1)
+                out[k] = v
+        return out
+    return {}
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker not available")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_compose_config_worker_has_model_proxy_url() -> None:
+    """ARB36-004: stack compose config with overlay exposes worker MODEL_PROXY_URL."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    env = {
+        **os.environ,
+        "LAUNCHER_TOKEN": os.environ.get("LAUNCHER_TOKEN") or "test-launcher-token-32chars-ok",
+        "POSTGRES_PASSWORD": os.environ.get("POSTGRES_PASSWORD") or "test-postgres-password",
+    }
+    completed = subprocess.run(
+        [bash, str(SH), "compose", "config"],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        pytest.skip(f"stack compose config failed: {completed.stderr[-400:]}")
+    data = yaml.safe_load(completed.stdout)
+    worker_env = _env_map((data.get("services") or {}).get("worker", {}).get("environment"))
+    assert worker_env.get("MODEL_PROXY_URL"), worker_env
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker not available")
+def test_compose_config_resolves_opr_review_image_interpolation_and_comment(tmp_path: Path) -> None:
+    """ARB36-005: compose interpolates ${REGISTRY} and strips inline .env comments."""
+    home = tmp_path / "compose-home"
+    home.mkdir()
+    (home / "docker-compose.yml").write_text(
+        "services:\n  placeholder:\n    image: alpine:3.20\n",
+        encoding="utf-8",
+    )
+    (home / "docker-compose.container-runner.yml").write_text(
+        "\n".join(
+            [
+                "services:",
+                "  launcher:",
+                "    image: alpine:3.20",
+                "    environment:",
+                '      OPR_REVIEW_IMAGE: "${OPR_REVIEW_IMAGE:-opr-review:local}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    (home / ".env").write_text(
+        "OPR_REVIEW_IMAGE=${REGISTRY}/opr-review:local # inline comment\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    env = {**os.environ, "REGISTRY": "example.com"}
+    env.pop("OPR_REVIEW_IMAGE", None)
+    rendered = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.container-runner.yml",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=str(home),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if rendered.returncode != 0:
+        pytest.skip(f"docker compose config failed: {rendered.stderr[-400:]}")
+    data = json.loads(rendered.stdout)
+    launcher_env = _env_map(data["services"]["launcher"]["environment"])
+    assert launcher_env.get("OPR_REVIEW_IMAGE") == "example.com/opr-review:local"

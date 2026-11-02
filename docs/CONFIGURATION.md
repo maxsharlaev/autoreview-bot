@@ -6,7 +6,7 @@
 - The file path is `CONFIG_PATH` (default `config.yaml`, relative to the working directory; `/app/config.yaml` in the Compose images).
 - A missing file means all defaults below.
 - Unknown top-level keys are ignored, so an older image can read a newer file. Inside `owners.<id>` unknown keys are rejected.
-- The API and the worker read the file once at startup. **Restart both after any change** (`docker compose up -d --force-recreate api worker`). A prompt file named in the config is re-read on every review.
+- The API and the worker read the file once at startup. **Restart both after any change** (`./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker`). A prompt file named in the config is re-read on every review.
 - An invalid file (wrong type, value out of range, bad owner block) stops the API and the worker at startup with an error naming the field. Secret values are never printed.
 
 Column **Owner** says whether the key can be overridden in an `owners.<id>` block (see [MULTI_OWNER.md](MULTI_OWNER.md)). Overrides are partial and deep-merged over the top-level value; the merged section is validated like the global one.

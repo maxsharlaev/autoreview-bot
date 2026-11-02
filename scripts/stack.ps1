@@ -7,12 +7,13 @@
   .\scripts\stack.ps1 up
   .\scripts\stack.ps1 up -Observability
   .\scripts\stack.ps1 up -InProcess
+  .\scripts\stack.ps1 compose -- config
   .\scripts\stack.ps1 status
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("up", "down", "restart", "logs", "status")]
+    [ValidateSet("up", "down", "restart", "logs", "status", "compose")]
     [string]$Command,
 
     [switch]$Observability,
@@ -101,16 +102,36 @@ function Get-ComposeArgs {
     return $composeArgs
 }
 
-function Get-ReviewImage {
-    $img = Get-DotEnvValue "OPR_REVIEW_IMAGE"
-    if ([string]::IsNullOrWhiteSpace($img)) {
+function Resolve-ReviewImage([string[]]$ComposeArgs) {
+    $raw = & docker compose @ComposeArgs config --format json
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Failed to render compose config for review image."
+        exit $LASTEXITCODE
+    }
+    $data = $raw | ConvertFrom-Json
+    $envMap = $data.services.launcher.environment
+    $image = $null
+    if ($null -eq $envMap) {
+        $image = ""
+    } elseif ($envMap -is [System.Array]) {
+        foreach ($item in $envMap) {
+            $text = [string]$item
+            if ($text.StartsWith("OPR_REVIEW_IMAGE=")) {
+                $image = $text.Substring("OPR_REVIEW_IMAGE=".Length)
+                break
+            }
+        }
+    } else {
+        $image = [string]$envMap.OPR_REVIEW_IMAGE
+    }
+    if ([string]::IsNullOrWhiteSpace($image)) {
         return "opr-review:local"
     }
-    return $img
+    return $image.Trim()
 }
 
-function Ensure-ReviewImage {
-    $image = Get-ReviewImage
+function Ensure-ReviewImage([string[]]$ComposeArgs) {
+    $image = Resolve-ReviewImage -ComposeArgs $ComposeArgs
     Write-Host "Building review image $image (Dockerfile.review)..."
     & docker build -f Dockerfile.review -t $image .
     if ($LASTEXITCODE -ne 0) {
@@ -118,14 +139,14 @@ function Ensure-ReviewImage {
     }
 }
 
+$composeArgs = Get-ComposeArgs
+
 # Credential check + review image build only for up (ARB36-001 / ARB36-002).
-# Lifecycle commands still use the overlay but do not rebuild.
+# Lifecycle / compose passthrough still use the overlay but do not rebuild.
 if ($UseContainerOverlay -and $Command -eq "up") {
     Assert-LauncherToken
-    Ensure-ReviewImage
+    Ensure-ReviewImage -ComposeArgs $composeArgs
 }
-
-$composeArgs = Get-ComposeArgs
 
 switch ($Command) {
     "up" {
@@ -146,6 +167,10 @@ switch ($Command) {
     }
     "status" {
         & docker compose @composeArgs ps @Rest
+        exit $LASTEXITCODE
+    }
+    "compose" {
+        & docker compose @composeArgs @Rest
         exit $LASTEXITCODE
     }
 }

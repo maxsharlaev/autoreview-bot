@@ -34,9 +34,9 @@
 
 ```bash
 # Full stack with Prometheus, Grafana and Loki
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+./scripts/stack.sh up --observability
 # Stop everything (Postgres data is kept)
-docker compose -f docker-compose.yml -f docker-compose.observability.yml down
+./scripts/stack.sh down --observability
 ```
 
 <!-- section: dev-prometheus -->
@@ -54,7 +54,7 @@ Grafana доступна только на `http://127.0.0.1:3000`. Она со�
 
 Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работает одним бинарником без порта на хосте; Grafana обращается к нему по `http://loki:3100`. Хранилище — tmpfs на 512 МБ, компактор держит ретеншн 24 часа. Alloy ([observability/dev/alloy.alloy](../../observability/dev/alloy.alloy)) читает stdout и stderr контейнеров этого Compose-проекта через закреплённый `wollomatic/socket-proxy` во внутренней сети (без портов на хосте) и отправляет их в Loki с метками `service` (имя Compose-сервиса, например `worker`, `api`) и `container`. Пример для Explore: `{service="worker"}`.
 
-В логах ровно то, что показывает `docker compose logs`, и ничего больше, поэтому обращайтесь с ними так же: только для разработки, не открывайте Loki и Grafana дальше `127.0.0.1`. Монтирование Docker socket с `:ro` — не граница API: socket монтирует только proxy. Allowlist proxy разрешает только GET list/inspect/logs и networks (плюс ping/version); archive, export, create и exec запрещены. Alloy фильтрует по этому Compose-проекту (имя, которое Compose выводит из каталога или `-p` / `COMPOSE_PROJECT_NAME`). При первом запуске Loki отклоняет строки старше 7 дней от давно работающих контейнеров; это видно как ошибки `timestamp too old` в его логе и не страшно.
+В логах ровно то, что показывает `./scripts/stack.sh logs`, и ничего больше, поэтому обращайтесь с ними так же: только для разработки, не открывайте Loki и Grafana дальше `127.0.0.1`. Монтирование Docker socket с `:ro` — не граница API: socket монтирует только proxy. Allowlist proxy разрешает только GET list/inspect/logs и networks (плюс ping/version); archive, export, create и exec запрещены. Alloy фильтрует по этому Compose-проекту (имя, которое Compose выводит из каталога или `-p` / `COMPOSE_PROJECT_NAME`). При первом запуске Loki отклоняет строки старше 7 дней от давно работающих контейнеров; это видно как ошибки `timestamp too old` в его логе и не страшно.
 
 > **Предупреждение (принятый риск):** фильтр Compose-проекта живёт только в конфиге Alloy. Скомпрометированный Alloy через proxy может вызывать inspect и logs для **всех** контейнеров на хосте, включая переменные окружения и секреты посторонних контейнеров. Не запускайте этот logs overlay на машине с чувствительными контейнерами вне этого проекта. Только для разработки.
 
@@ -62,9 +62,9 @@ Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работ
 ### Только Prometheus и масштабирование
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d prometheus
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --scale worker=2 worker
-docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf prometheus grafana loki alloy docker-socket-proxy
+./scripts/stack.sh compose --observability up -d prometheus
+./scripts/stack.sh compose --observability up -d --scale worker=2 worker
+./scripts/stack.sh compose --observability rm -sf prometheus grafana loki alloy docker-socket-proxy
 ```
 
 Первая команда запускает только Prometheus, вторая масштабирует worker'ы (все реплики видны в `open-pr-review-worker`), последняя удаляет сервисы наблюдаемости.
@@ -79,7 +79,7 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml rm -sf 
 <!-- section: loki-existing -->
 ## Loki (существующий)
 
-Отправляйте stdout контейнеров **вашим** агентом. Compose задаёт `OPEN_PR_REVIEW_SERVICE=api|worker`. Задавайте `LOG_FORMAT=json`, только если ваш конвейер ждёт JSON; значение по умолчанию `text` подходит для `docker compose logs`.
+Отправляйте stdout контейнеров **вашим** агентом. Compose задаёт `OPEN_PR_REVIEW_SERVICE=api|worker`. Задавайте `LOG_FORMAT=json`, только если ваш конвейер ждёт JSON; значение по умолчанию `text` подходит для `./scripts/stack.sh logs`.
 
 <!-- section: env-app-not-the-metrics-stack -->
 ## Env (приложения, не стека метрик)

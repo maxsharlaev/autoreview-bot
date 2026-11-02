@@ -114,7 +114,7 @@ github:
 
 Каждый прогон — отдельная job очереди. ARQ worker берёт до `WORKER_MAX_JOBS` job одновременно (по умолчанию **4**); разные PR выполняются параллельно. Повтор того же `head_sha` переиспользует прогон, новый SHA отменяет незавершённый, а конкурентные доставки по одному PR сериализуются ([API.md](API.md#гарантии-конкурентности)).
 
-Чтобы масштабироваться, увеличьте `WORKER_MAX_JOBS` и/или запустите больше реплик worker'а: `docker compose up -d --scale worker=N`. Метрики worker'а не публикуются на хосте, а поставляемый scrape job находит каждую реплику по имени сервиса ([OBSERVABILITY.md](OBSERVABILITY.md)). Ограничения — квота модели и клонирование, а не FastAPI.
+Чтобы масштабироваться, увеличьте `WORKER_MAX_JOBS` и/или запустите больше реплик worker'а: `./scripts/stack.sh compose up -d --scale worker=N` / `.\scripts\stack.ps1 compose -- up -d --scale worker=N`. Метрики worker'а не публикуются на хосте, а поставляемый scrape job находит каждую реплику по имени сервиса ([OBSERVABILITY.md](OBSERVABILITY.md)). Ограничения — квота модели и клонирование, а не FastAPI.
 
 <!-- section: several-owners -->
 ## Несколько owner'ов

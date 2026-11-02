@@ -5,7 +5,7 @@ Secrets and process settings come from the environment. Non-secret behaviour is 
 
 - Variables are read from the process environment, then from a `.env` file in the working directory. Compose passes `.env` to `migrate`, `api` and `worker` with `env_file`. The opt-in **launcher** does **not** use `env_file` — only `LAUNCHER_TOKEN` and explicit non-secret launcher settings (host `.env` is still used for `${LAUNCHER_TOKEN:-}` interpolation).
 - Names are case-insensitive for the settings below; the `OWNER_<ID>_*` names must be upper case.
-- Values are read once at startup. Recreate the containers after a change (`docker compose up -d --force-recreate api worker`); `restart` does not reload `env_file`.
+- Values are read once at startup. Recreate the containers after a change (`./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker`); `restart` does not reload `env_file`.
 - Never commit `.env`. Secret values are never printed in startup errors; the error names the variable.
 
 Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migrate` (Alembic). "all" means all three.

@@ -5,7 +5,7 @@
 
 - Переменные читаются из окружения процесса, затем из файла `.env` в рабочем каталоге. Compose передаёт `.env` в `migrate`, `api` и `worker` через `env_file`. Opt-in **launcher** **не** использует `env_file` — только `LAUNCHER_TOKEN` и явные несекретные настройки (host `.env` по-прежнему нужен для интерполяции `${LAUNCHER_TOKEN:-}`).
 - Для настроек ниже имена нечувствительны к регистру; имена `OWNER_<ID>_*` должны быть в верхнем регистре.
-- Значения читаются один раз при старте. После изменения пересоздайте контейнеры (`docker compose up -d --force-recreate api worker`); `restart` не перечитывает `env_file`.
+- Значения читаются один раз при старте. После изменения пересоздайте контейнеры (`./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker`); `restart` не перечитывает `env_file`.
 - Никогда не коммитьте `.env`. Значения секретов не печатаются в ошибках старта; ошибка называет переменную.
 
 Колонка **Читает**: `api` (FastAPI), `worker` (ARQ worker и запуски Codex), `migrate` (Alembic). «все» — все три.

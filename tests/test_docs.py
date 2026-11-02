@@ -308,19 +308,19 @@ def test_russian_mirror_has_the_same_section_ids(name: str) -> None:
     assert len(english) == len(russian), f"docs/ru/{name}: {len(russian)} sections, docs/{name} has {len(english)}"
 
 
-# --- Onboarding: stack helper required (ARB36-002) ----------------------------
+# --- Onboarding: stack helper required (ARB36-002 / ARB36-004) -----------------
 
 _BARE_COMPOSE_UP = re.compile(r"(?i)docker(?:\s+|-)compose\s+up(?:\s+(?:-d\s+)?--build)?\b")
 
 
 def _bare_compose_up_instructions(text: str) -> list[str]:
-    """Lines that tell readers to start the stack with bare compose (no -f / stack helper)."""
+    """Lines that tell readers to start the stack with bare compose (no stack helper)."""
     bad: list[str] = []
     for line in text.splitlines():
         if not _BARE_COMPOSE_UP.search(line):
             continue
-        # Allowed: explicit compose file list (overlay), scale, recreate named services.
-        if re.search(r"(?i)(-f\s|stack\.(?:sh|ps1)|--scale|--force-recreate)", line):
+        # Allowed only when the stack helper is named on the same line.
+        if re.search(r"(?i)stack\.(?:sh|ps1)", line):
             continue
         bad.append(line.strip())
     return bad
@@ -335,6 +335,16 @@ def _bare_compose_up_instructions(text: str) -> list[str]:
         RU / "GITHUB_SETUP.md",
         DOCS / "UPGRADE.md",
         RU / "UPGRADE.md",
+        DOCS / "CONFIGURATION.md",
+        RU / "CONFIGURATION.md",
+        DOCS / "ENVIRONMENT.md",
+        RU / "ENVIRONMENT.md",
+        DOCS / "DEPLOY.md",
+        RU / "DEPLOY.md",
+        DOCS / "TROUBLESHOOTING.md",
+        RU / "TROUBLESHOOTING.md",
+        DOCS / "OBSERVABILITY.md",
+        RU / "OBSERVABILITY.md",
     ],
     ids=lambda p: str(p.relative_to(ROOT)),
 )

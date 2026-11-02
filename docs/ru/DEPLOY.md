@@ -128,6 +128,7 @@ features:
 .\scripts\stack.ps1 up
 .\scripts\stack.ps1 up -Observability
 .\scripts\stack.ps1 up -InProcess
+.\scripts\stack.ps1 compose -- config
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
 ```
@@ -136,11 +137,12 @@ features:
 ./scripts/stack.sh up
 ./scripts/stack.sh up --observability
 ./scripts/stack.sh up --in-process
+./scripts/stack.sh compose config
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy), собирает `opr-review:local` из `Dockerfile.review` (переопределение через `OPR_REVIEW_IMAGE`) и **требует** `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). `status` / `down` / `restart` / `logs` по-прежнему используют этот overlay без `-InProcess`, но **не** перепроверяют `LAUNCHER_TOKEN`. Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). «Сырые» команды `docker compose -f …` остаются запасным вариантом.
+С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy), собирает `opr-review:local` из `Dockerfile.review` (переопределение через `OPR_REVIEW_IMAGE`) и **требует** `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). `status` / `down` / `restart` / `logs` по-прежнему используют этот overlay без `-InProcess`, но **не** перепроверяют `LAUNCHER_TOKEN`. Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). Passthrough `compose` (`./scripts/stack.sh compose …`) использует те же `-f` без проверки токена/сборки образа. «Сырые» `docker compose -f …` — запасной non-helper вариант.
 
 <!-- section: deployment-steps -->
 ## Шаги деплоя
@@ -154,7 +156,7 @@ features:
    ```bash
    curl -sS https://review.example.com/health
    curl -sS https://review.example.com/is-ready    # "ready", otherwise Postgres/Redis
-   docker compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
+   ./scripts/stack.sh compose exec worker python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:9100/metrics').read().decode()[:200])"
    ```
 
 5. Reverse proxy и TLS. Проверьте, что `/metrics` **не** доступен снаружи.
@@ -212,7 +214,7 @@ Webhook GitHub App (или репозитория) на `/api/v1/pull-request`. 
   - в PR есть sticky-комментарий с маркером `<!-- open-pr-review -->`;
   - `GET /api/v1/ops/status` не показывает `CODEX_QUOTA` / `CODEX_AUTH` среди недавних ошибок.
 - [ ] Повтор того же SHA переиспользует прогон (webhook или Action с `force: false`).
-- [ ] `docker compose restart worker` сохраняет очередь. Никогда не выполняйте `docker compose down -v` на production без резервной копии томов.
+- [ ] `./scripts/stack.sh restart worker` / `.\scripts\stack.ps1 restart worker` сохраняет очередь. Никогда не выполняйте `./scripts/stack.sh down -v` / `.\scripts\stack.ps1 down -v` на production без резервной копии томов.
 - [ ] [Чеклист hardening](../../SECURITY.md#deployment-hardening-checklist) выполнен.
 
 API `202`, но комментария нет: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (`ops/status`, квота модели, PAT Contents, allowlist).
@@ -227,8 +229,8 @@ API `202`, но комментария нет: [TROUBLESHOOTING.md](TROUBLESHOOT
 
 | Действие | Как |
 | --- | --- |
-| Перезапустить worker | `docker compose restart worker`; очередь Redis сохраняется |
-| Изменить `.env` / `config.yaml` | `docker compose up -d --force-recreate api worker` |
+| Перезапустить worker | `./scripts/stack.sh restart worker` / `.\scripts\stack.ps1 restart worker`; очередь Redis сохраняется |
+| Изменить `.env` / `config.yaml` | `./scripts/stack.sh compose up -d --force-recreate api worker` / `.\scripts\stack.ps1 compose -- up -d --force-recreate api worker` |
 | Резервная копия | Том `postgres_data`; Redis — очередь, а не источник истины |
 | Авария | `down -v` удаляет базу и очередь |
 | Обновление | [UPGRADE.md](UPGRADE.md) |

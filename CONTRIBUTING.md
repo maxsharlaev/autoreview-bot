@@ -36,7 +36,7 @@ source .venv/bin/activate   # Linux/macOS
 pip install -e ".[dev]"
 ```
 
-You still need PostgreSQL and Redis running (via Docker or locally). Set `DATABASE_URL` and `REDIS_URL` in your environment or `.env`.
+You still need PostgreSQL and Redis running (via Docker or locally). Set `DATABASE_URL` and `REDIS_URL` in your environment or `.env`. For reviews without the container-runner stack, set `codex.runner_backend: in_process` in `config.yaml` (or start launcher/model-proxy with `./scripts/stack.sh up` / `.\scripts\stack.ps1 up`).
 
 ```bash
 alembic upgrade head
