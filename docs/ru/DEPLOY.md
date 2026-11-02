@@ -224,6 +224,52 @@ API `202`, но комментария нет: [TROUBLESHOOTING.md](TROUBLESHOOT
 
 Чтобы обслуживать ещё одну организацию GitHub из того же деплоя, добавьте блок `owners:` в `config.yaml` и его переменные `OWNER_<ID>_*` в `.env`, затем пересоздайте `api` и `worker`. Пока вы этого не сделали, ничего не меняется: деплой без `owners:` сохраняет одного owner'а `default` и пишет `owner=default`. Всё остальное: [MULTI_OWNER.md](MULTI_OWNER.md).
 
+<!-- section: manual-real-model-e2e -->
+## Manual real-model E2E (opt-in)
+
+Happy-path проверка, что ревью через backend **container** + **model-proxy** завершается с реальной upstream-моделью. Skipped unless you set `OPR_REAL_MODEL_E2E=1`. **Never runs in CI** (default skip; CI stays green without any model key).
+
+<!-- section: real-model-e2e-prerequisites -->
+### Prerequisites
+
+- Docker Engine available to the host (same as local `stack up`).
+- A **separate low-limit** OpenAI (or compatible) API key used **only** for this test.
+- Put that key in `model-proxy.env` as `OPENAI_API_KEY=...` (gitignored; copy from `model-proxy.env.example`), **or** export `OPENAI_API_KEY` in the shell that runs pytest. Do **not** put the key in `.env` for this test path, and never commit it.
+- Optional: `OPR_REAL_MODEL` (default `gpt-4o-mini`) to pick a cheap chat model.
+
+<!-- section: real-model-e2e-how-to-run -->
+### How to run
+
+From the repo root (PowerShell):
+
+```powershell
+$env:OPR_REAL_MODEL_E2E = "1"
+# optional: $env:OPENAI_API_KEY = "<low-limit-key>"   # or rely on model-proxy.env
+python -m pytest tests/test_real_model_e2e.py -q
+```
+
+Bash:
+
+```bash
+OPR_REAL_MODEL_E2E=1 python -m pytest tests/test_real_model_e2e.py -q
+```
+
+Without the flag the test is collected and skipped (safe for CI / full suite).
+
+<!-- section: real-model-e2e-expected-cost -->
+### Expected cost
+
+One short review against a small fixture (default `gpt-4o-mini`, low reasoning). Expect on the order of **a few cents** per run; use a key with a hard spend cap.
+
+<!-- section: real-model-e2e-what-it-checks -->
+### What it checks
+
+- Launcher + model-proxy + real `Dockerfile.review` image path completes with `status=ok` and schema-valid JSON.
+- Review container env has `CODEX_API_KEY` starting with `opr_job_` and **no** `OPENAI_API_KEY` / upstream `sk-` value in the launch spec.
+- Proxy / launcher logs and model-proxy `/metrics` do **not** contain the upstream key value (asserted without printing it).
+
+No TTL / negative-path coverage here — happy path only.
+
 <!-- section: after-rollout -->
 ## После выката
 

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+- **M4 PR2 real-model E2E (opt-in):** `tests/test_real_model_e2e.py` happy-path review through launcher + model-proxy + real review image; gated by `OPR_REAL_MODEL_E2E=1` (skipped by default / never CI). Asserts `CODEX_API_KEY` is an `opr_job_` token, no upstream key in launch env/spec/logs/metrics. Runbook in DEPLOY (EN/RU); `OPR_CONTAINER_E2E` / `OPR_REAL_MODEL_E2E` / `OPR_REAL_MODEL` in ENVIRONMENT; ROADMAP M4 marked **done**.
+
 ### Changed
 - **M4 PR1 container default:** `codex.runner_backend` defaults to **`container`** (hard cut; `in_process` remains an explicit fallback). `./scripts/stack.ps1 up` / `./scripts/stack.sh up` include `docker-compose.container-runner.yml` by default; opt out with `-InProcess` / `--in-process`. Worker fail-fast for missing `LAUNCHER_TOKEN` / `PROXY_ISSUER_TOKEN` / `MODEL_PROXY_URL` unchanged. Docs EN/RU (DEPLOY, ENVIRONMENT, UPGRADE migration, CONFIGURATION, ARCHITECTURE, ROADMAP in progress).
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
