@@ -62,6 +62,7 @@ apply_helper_opt() {
 COMMAND=""
 REST=()
 seen_command=0
+compose_sep_consumed=0
 while [[ $# -gt 0 ]]; do
   arg="$1"
   shift
@@ -85,9 +86,10 @@ while [[ $# -gt 0 ]]; do
 
   # After the command.
   if [[ "$COMMAND" == "compose" ]]; then
-    # ARB36-004: optional leading `--` after `compose` is a helper separator only;
-    # do not forward it to docker compose (matches stack.ps1 / documented forms).
-    if [[ ${#REST[@]} -eq 0 && "$arg" == "--" ]]; then
+    # ARB36-004 / ARB38-001: consume at most one leading `--` after `compose`
+    # (helper separator). Further `--` are forwarded to docker compose.
+    if [[ "$compose_sep_consumed" -eq 0 && "$arg" == "--" ]]; then
+      compose_sep_consumed=1
       continue
     fi
     REST+=("$arg")

@@ -300,6 +300,34 @@ def test_stack_ps1_compose_passthrough_verbatim(passthrough: list[str], needle: 
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_double_dash_forwards_second(tmp_path: Path) -> None:
+    """ARB38-001: only the first `--` after compose is consumed; a second is forwarded."""
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        extra_args=["--", "--", "up", "-d"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "--",
+        "up",
+        "-d",
+    ], recorded
+    assert "build-review" not in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
 def test_stack_ps1_compose_up_does_not_hijack_helper_up(tmp_path: Path) -> None:
     """ARB36-008: `compose up` must not become helper up (no token / no profile build)."""
     home, log = _prepare_stack_home(tmp_path)
@@ -433,6 +461,37 @@ def test_stack_sh_compose_passthrough_verbatim(passthrough: list[str], needle: s
     assert "container-runner.yml -- " not in recorded
     assert "build-review" not in recorded
     assert "LAUNCHER_TOKEN" not in (completed.stdout + completed.stderr)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_double_dash_forwards_second(tmp_path: Path) -> None:
+    """ARB38-001: only the first `--` after compose is consumed; a second is forwarded."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["--", "--", "up", "-d"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "--",
+        "up",
+        "-d",
+    ], recorded
+    assert "build-review" not in recorded
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")

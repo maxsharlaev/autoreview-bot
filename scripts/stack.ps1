@@ -71,6 +71,7 @@ if ($null -ne $ArgList) { $argv = @($ArgList) }
 $Command = $null
 $Rest = New-Object System.Collections.Generic.List[string]
 $seenCommand = $false
+$composeSepConsumed = $false
 
 foreach ($a in $argv) {
     if (-not $seenCommand) {
@@ -101,9 +102,10 @@ foreach ($a in $argv) {
     }
 
     if ($Command -eq "compose") {
-        # ARB36-004: optional leading `--` after `compose` is a helper separator only
-        # (documented for PowerShell); do not forward it to docker compose.
-        if ($Rest.Count -eq 0 -and $a -eq "--") {
+        # ARB36-004 / ARB38-001: consume at most one leading `--` after `compose`
+        # (helper separator; documented for PowerShell). Further `--` are forwarded.
+        if (-not $composeSepConsumed -and $a -eq "--") {
+            $composeSepConsumed = $true
             continue
         }
         [void]$Rest.Add($a)
