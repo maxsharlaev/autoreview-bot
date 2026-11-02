@@ -38,7 +38,7 @@ services:
       LAUNCHER_TOKEN: "${LAUNCHER_TOKEN:-}"
       OPR_CHECKOUT_BASE: /var/opr/checkouts
       OPR_CHECKOUT_VOLUME: opr_checkouts
-      OPR_REVIEW_IMAGE: opr-review:local
+      OPR_REVIEW_IMAGE: "${OPR_REVIEW_IMAGE:-opr-review:local}"
       OPR_REVIEW_NETWORK: autoreview_review_egress
       LAUNCHER_APPARMOR_PROFILE: "${LAUNCHER_APPARMOR_PROFILE:-unconfined}"
       LAUNCHER_CANCEL_WAIT_SECONDS: "${LAUNCHER_CANCEL_WAIT_SECONDS:-3}"
