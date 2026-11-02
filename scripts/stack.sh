@@ -3,13 +3,15 @@
 # Usage:
 #   ./scripts/stack.sh up
 #   ./scripts/stack.sh --observability up
+#   ./scripts/stack.sh up --observability
 #   ./scripts/stack.sh --in-process up
+#   ./scripts/stack.sh up --in-process
 #   ./scripts/stack.sh compose config
 #   ./scripts/stack.sh compose up -d --scale worker=2
 #   ./scripts/stack.sh status
 # OPR_STACK_ROOT is a test hook so behavioral tests can isolate .env / docker.
-# ARB36-008: command is the first positional; options only before it; after
-# `compose` all remaining args are passed verbatim to docker compose.
+# ARB36-008/009: first positional non-option is the command. Helper switches may
+# appear before/after non-compose commands; after `compose` args are verbatim.
 set -euo pipefail
 
 if [[ -n "${OPR_STACK_ROOT:-}" ]]; then
@@ -28,7 +30,7 @@ EXPLICIT_IN_PROCESS=0
 usage() {
   cat <<'EOF'
 Usage: stack.sh [options] <up|down|restart|logs|status|compose> [args...]
-Options (only before the command):
+Helper options (before or after non-compose commands; before `compose` only):
   --observability   Include observability overlay.
   --container       Include container-runner overlay (default since M4; back-compat).
   --in-process      Omit container-runner overlay (in_process reviews only).
@@ -37,50 +39,62 @@ Options (only before the command):
 EOF
 }
 
-# Leading options only (ARB36-008).
-while [[ $# -gt 0 ]]; do
+is_helper_opt() {
   case "$1" in
-    --observability)
-      OBSERVABILITY=1
-      shift
-      ;;
-    --container)
-      CONTAINER=1
-      EXPLICIT_CONTAINER=1
-      shift
-      ;;
-    --in-process)
-      CONTAINER=0
-      EXPLICIT_IN_PROCESS=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      echo "Unknown option: $1 (options must appear before the command)." >&2
+    --observability|--container|--in-process|-h|--help) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+apply_helper_opt() {
+  case "$1" in
+    --observability) OBSERVABILITY=1 ;;
+    --container) CONTAINER=1; EXPLICIT_CONTAINER=1 ;;
+    --in-process) CONTAINER=0; EXPLICIT_IN_PROCESS=1 ;;
+    -h|--help) usage; exit 0 ;;
+  esac
+}
+
+COMMAND=""
+REST=()
+seen_command=0
+while [[ $# -gt 0 ]]; do
+  arg="$1"
+  shift
+  if [[ "$seen_command" -eq 0 ]]; then
+    if [[ "$arg" == "--" ]]; then
+      continue
+    fi
+    if is_helper_opt "$arg"; then
+      apply_helper_opt "$arg"
+      continue
+    fi
+    if [[ "$arg" == -* ]]; then
+      echo "Unknown option before command: $arg" >&2
       usage
       exit 2
-      ;;
-    *)
-      break
-      ;;
-  esac
+    fi
+    COMMAND="$arg"
+    seen_command=1
+    continue
+  fi
+
+  # After the command.
+  if [[ "$COMMAND" == "compose" ]]; then
+    REST+=("$arg")
+    continue
+  fi
+  if is_helper_opt "$arg"; then
+    apply_helper_opt "$arg"
+    continue
+  fi
+  REST+=("$arg")
 done
 
-if [[ $# -lt 1 ]]; then
+if [[ -z "$COMMAND" ]]; then
   usage
   exit 2
 fi
-
-COMMAND="$1"
-shift
-REST=("$@")
 
 case "$COMMAND" in
   up|down|restart|logs|status|compose) ;;

@@ -27,6 +27,8 @@ def test_stack_ps1_defaults_to_container_overlay_with_inprocess_opt_out() -> Non
     assert "review-image" in text
     assert "Resolve-ReviewImage" not in text
     assert "config --format json" not in text
+    assert "switch -Regex" not in text
+    assert "foreach" in text
 
 
 def test_stack_sh_defaults_to_container_overlay_with_inprocess_opt_out() -> None:
@@ -39,7 +41,8 @@ def test_stack_sh_defaults_to_container_overlay_with_inprocess_opt_out() -> None
     assert "resolve_review_image" not in text
     assert "config --format json" not in text
     assert "python -c" not in text
-    assert 'COMMAND="$1"' in text
+    assert "seen_command" in text
+    assert "is_helper_opt" in text
 
 
 def test_config_example_defaults_to_container_backend() -> None:
@@ -72,6 +75,7 @@ def _prepare_stack_home(tmp_path: Path) -> tuple[Path, Path]:
     home = tmp_path / "stack-home"
     home.mkdir()
     (home / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (home / "docker-compose.observability.yml").write_text("services: {}\n", encoding="utf-8")
     (home / "docker-compose.container-runner.yml").write_text(
         "\n".join(
             [
@@ -592,3 +596,177 @@ def test_compose_config_resolves_opr_review_image_interpolation_and_comment(tmp_
     launcher_env = _env_map(data["services"]["launcher"]["environment"])
     assert launcher_env.get("OPR_REVIEW_IMAGE") == "example.com/opr-review:local"
     assert data["services"]["review-image"]["image"] == "example.com/opr-review:local"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize(
+    ("options_before", "options_after", "expect_overlay", "expect_obs"),
+    [
+        (["--container"], [], True, False),
+        ([], ["--container"], True, False),
+        (["--observability"], [], True, True),
+        ([], ["--observability"], True, True),
+        (["--in-process"], [], False, False),
+        ([], ["--in-process"], False, False),
+        (["--observability", "--in-process"], [], False, True),
+        (["--observability"], ["--in-process"], False, True),
+    ],
+)
+def test_stack_sh_helper_options_before_or_after_command(
+    options_before: list[str],
+    options_after: list[str],
+    expect_overlay: bool,
+    expect_obs: bool,
+    tmp_path: Path,
+) -> None:
+    """ARB36-009: known helper switches work before or after non-compose commands."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    env_extra = {"LAUNCHER_TOKEN": "test-launcher-token-32chars-ok"} if expect_overlay else None
+    completed = _run_sh(
+        "up",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        options=options_before,
+        extra_args=options_after,
+        env_extra=env_extra,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    if expect_overlay:
+        assert "docker-compose.container-runner.yml" in recorded
+        assert "--profile build-review build review-image" in recorded
+    else:
+        assert "docker-compose.container-runner.yml" not in recorded
+        assert "build-review" not in recorded
+    if expect_obs:
+        assert "docker-compose.observability.yml" in recorded
+    else:
+        assert "docker-compose.observability.yml" not in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_container_and_inprocess_conflict(tmp_path: Path) -> None:
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "up",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        options=["--container", "--in-process"],
+    )
+    assert completed.returncode == 2
+    out = (completed.stdout + completed.stderr).lower()
+    assert "not both" in out or "either" in out
+    assert log.read_text(encoding="utf-8").strip() == ""
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_keeps_looking_like_helper_opts_verbatim(tmp_path: Path) -> None:
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["--in-process", "config"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "docker-compose.container-runner.yml" in recorded
+    assert "--in-process" in recorded
+    assert "build-review" not in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+@pytest.mark.parametrize(
+    ("options_before", "options_after", "expect_overlay", "expect_obs"),
+    [
+        (["-Container"], [], True, False),
+        ([], ["-Container"], True, False),
+        (["-Observability"], [], True, True),
+        ([], ["-Observability"], True, True),
+        (["-InProcess"], [], False, False),
+        ([], ["-InProcess"], False, False),
+    ],
+)
+def test_stack_ps1_helper_options_before_or_after_command(
+    options_before: list[str],
+    options_after: list[str],
+    expect_overlay: bool,
+    expect_obs: bool,
+    tmp_path: Path,
+) -> None:
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    env_extra = {"LAUNCHER_TOKEN": "test-launcher-token-32chars-ok"} if expect_overlay else None
+    completed = _run_ps1(
+        "up",
+        home=home,
+        bin_dir=bin_dir,
+        options=options_before,
+        extra_args=options_after,
+        env_extra=env_extra,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    if expect_overlay:
+        assert "docker-compose.container-runner.yml" in recorded
+        assert "--profile build-review build review-image" in recorded
+    else:
+        assert "docker-compose.container-runner.yml" not in recorded
+        assert "build-review" not in recorded
+    if expect_obs:
+        assert "docker-compose.observability.yml" in recorded
+    else:
+        assert "docker-compose.observability.yml" not in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_observability_and_inprocess_both_applied(tmp_path: Path) -> None:
+    """ARB36-010: every leading option is processed (no switch+break bug)."""
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "up",
+        home=home,
+        bin_dir=bin_dir,
+        options=["-Observability", "-InProcess"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "docker-compose.observability.yml" in recorded
+    assert "docker-compose.container-runner.yml" not in recorded
+    assert "build-review" not in recorded
+    assert "up -d --build" in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_container_and_inprocess_conflict(tmp_path: Path) -> None:
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "up",
+        home=home,
+        bin_dir=bin_dir,
+        options=["-Container", "-InProcess"],
+    )
+    assert completed.returncode == 2
+    out = (completed.stdout + completed.stderr).lower()
+    assert "not both" in out or "either" in out
+    assert log.read_text(encoding="utf-8").strip() == ""

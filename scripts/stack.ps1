@@ -6,14 +6,17 @@
 .EXAMPLE
   .\scripts\stack.ps1 up
   .\scripts\stack.ps1 -Observability up
+  .\scripts\stack.ps1 up -Observability
   .\scripts\stack.ps1 -InProcess up
+  .\scripts\stack.ps1 up -InProcess
   .\scripts\stack.ps1 compose -- config
   .\scripts\stack.ps1 compose -- up -d --scale worker=2
   .\scripts\stack.ps1 status
 #>
-# ARB36-008: parse argv manually so options apply only before the command and
-# everything after `compose` is passed verbatim (no second command hijack).
+# ARB36-008/009/010: first positional non-option is the command. Helper switches
+# may appear before/after non-compose commands; after `compose` args are verbatim.
 # Use $args directly so PowerShell does not steal compose flags like -d (= -Debug).
+# Plain if/elseif loop (no switch+continue+break) so every option is processed.
 $ArgList = @($args)
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +31,7 @@ Set-Location $Root
 function Show-Usage {
     Write-Host @"
 Usage: stack.ps1 [options] <up|down|restart|logs|status|compose> [args...]
-Options (only before the command):
+Helper options (before or after non-compose commands; before `compose` only):
   -Observability   Include observability overlay.
   -Container       Include container-runner overlay (default since M4; back-compat).
   -InProcess       Omit container-runner overlay (in_process reviews only).
@@ -37,41 +40,87 @@ Options (only before the command):
 "@
 }
 
+function Test-HelperOpt([string]$Name) {
+    return @(
+        "-Observability", "-Container", "-InProcess",
+        "-h", "-Help", "--help"
+    ) -contains $Name
+}
+
+function Apply-HelperOpt([string]$Name) {
+    if ($Name -eq "-Observability") {
+        $script:Observability = $true
+    } elseif ($Name -eq "-Container") {
+        $script:Container = $true
+    } elseif ($Name -eq "-InProcess") {
+        $script:InProcess = $true
+    } elseif ($Name -eq "-h" -or $Name -eq "-Help" -or $Name -eq "--help") {
+        Show-Usage
+        exit 0
+    }
+}
+
 $Observability = $false
 $Container = $false
 $InProcess = $false
 $argv = @()
 if ($null -ne $ArgList) { $argv = @($ArgList) }
 
-$i = 0
-while ($i -lt $argv.Count) {
-    $a = $argv[$i]
-    switch -Regex ($a) {
-        '^(?i)-Observability$' { $Observability = $true; $i++; continue }
-        '^(?i)-Container$' { $Container = $true; $i++; continue }
-        '^(?i)-InProcess$' { $InProcess = $true; $i++; continue }
-        '^(?i)-h$|^(?i)-Help$|^(?i)--help$' { Show-Usage; exit 0 }
-        '^--$' { $i++; break }
-        '^-' {
-            Write-Host "Unknown option: $a (options must appear before the command)."
+$Command = $null
+$Rest = New-Object System.Collections.Generic.List[string]
+$seenCommand = $false
+
+foreach ($a in $argv) {
+    if (-not $seenCommand) {
+        if ($a -eq "--") {
+            continue
+        }
+        # Case-insensitive helper option match
+        $norm = $a
+        if ($a -match '^(?i)-Observability$') { $norm = "-Observability" }
+        elseif ($a -match '^(?i)-Container$') { $norm = "-Container" }
+        elseif ($a -match '^(?i)-InProcess$') { $norm = "-InProcess" }
+        elseif ($a -match '^(?i)-h$') { $norm = "-h" }
+        elseif ($a -match '^(?i)-Help$') { $norm = "-Help" }
+        elseif ($a -eq "--help") { $norm = "--help" }
+
+        if (Test-HelperOpt $norm) {
+            Apply-HelperOpt $norm
+            continue
+        }
+        if ($a.StartsWith("-")) {
+            Write-Host "Unknown option before command: $a"
             Show-Usage
             exit 2
         }
-        default { break }
+        $Command = $a
+        $seenCommand = $true
+        continue
     }
-    break
+
+    if ($Command -eq "compose") {
+        [void]$Rest.Add($a)
+        continue
+    }
+
+    $norm = $a
+    if ($a -match '^(?i)-Observability$') { $norm = "-Observability" }
+    elseif ($a -match '^(?i)-Container$') { $norm = "-Container" }
+    elseif ($a -match '^(?i)-InProcess$') { $norm = "-InProcess" }
+    elseif ($a -match '^(?i)-h$') { $norm = "-h" }
+    elseif ($a -match '^(?i)-Help$') { $norm = "-Help" }
+    elseif ($a -eq "--help") { $norm = "--help" }
+
+    if (Test-HelperOpt $norm) {
+        Apply-HelperOpt $norm
+        continue
+    }
+    [void]$Rest.Add($a)
 }
 
-if ($i -ge $argv.Count) {
+if ([string]::IsNullOrWhiteSpace($Command)) {
     Show-Usage
     exit 2
-}
-
-$Command = $argv[$i]
-$i++
-$Rest = @()
-if ($i -lt $argv.Count) {
-    $Rest = @($argv[$i..($argv.Count - 1)])
 }
 
 $valid = @("up", "down", "restart", "logs", "status", "compose")
@@ -88,6 +137,7 @@ if ($Container -and $InProcess) {
 
 # M4: container-runner overlay is on unless -InProcess.
 $UseContainerOverlay = -not $InProcess
+$Rest = @($Rest)
 
 function Get-DotEnvValue([string]$Name) {
     $envVal = [Environment]::GetEnvironmentVariable($Name)
