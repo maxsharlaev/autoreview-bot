@@ -138,9 +138,21 @@ if [[ "$CONTAINER" -eq 1 ]]; then
   compose_args+=(-f docker-compose.container-runner.yml)
 fi
 
-# Credential check only for up (ARB36-001). Lifecycle commands still use the overlay.
+# Credential check + review image build only for up (ARB36-001 / ARB36-002).
+# Lifecycle commands still use the overlay but do not rebuild.
+ensure_review_image() {
+  local image
+  image="$(dotenv_get OPR_REVIEW_IMAGE || true)"
+  if [[ -z "$image" ]]; then
+    image="opr-review:local"
+  fi
+  echo "Building review image ${image} (Dockerfile.review)..."
+  docker build -f Dockerfile.review -t "$image" .
+}
+
 if [[ "$CONTAINER" -eq 1 && "$COMMAND" == "up" ]]; then
   assert_launcher_token
+  ensure_review_image
 fi
 
 case "$COMMAND" in

@@ -101,9 +101,28 @@ function Get-ComposeArgs {
     return $composeArgs
 }
 
-# Credential check only for up (ARB36-001). Lifecycle commands still use the overlay.
+function Get-ReviewImage {
+    $img = Get-DotEnvValue "OPR_REVIEW_IMAGE"
+    if ([string]::IsNullOrWhiteSpace($img)) {
+        return "opr-review:local"
+    }
+    return $img
+}
+
+function Ensure-ReviewImage {
+    $image = Get-ReviewImage
+    Write-Host "Building review image $image (Dockerfile.review)..."
+    & docker build -f Dockerfile.review -t $image .
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
+# Credential check + review image build only for up (ARB36-001 / ARB36-002).
+# Lifecycle commands still use the overlay but do not rebuild.
 if ($UseContainerOverlay -and $Command -eq "up") {
     Assert-LauncherToken
+    Ensure-ReviewImage
 }
 
 $composeArgs = Get-ComposeArgs

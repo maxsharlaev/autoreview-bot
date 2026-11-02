@@ -29,7 +29,7 @@ cp model-proxy.env.example model-proxy.env
 #       LAUNCHER_TOKEN (>= 16 chars), PROXY_ISSUER_TOKEN (>= 16 chars)
 # model-proxy.env: OPENAI_API_KEY (and optional per-owner keys); never mount this on worker/launcher
 # config.yaml: github.allowed_repos; disable Jira features unless Jira is configured
-./scripts/stack.sh up            # Linux/macOS (includes container-runner overlay by default)
+./scripts/stack.sh up            # Linux/macOS (builds opr-review:local, then compose + container-runner overlay)
 # .\scripts\stack.ps1 up         # Windows
 curl -fsS http://localhost:8000/is-ready
 ```

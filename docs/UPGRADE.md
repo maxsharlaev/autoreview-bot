@@ -52,7 +52,7 @@ Step-by-step upgrade to an `owners:` block, keeping history with `aliases: [defa
 
 On upgrade, pick one:
 
-1. **Stay on container (recommended):** keep or add `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create/update `model-proxy.env`, build `opr-review:local`, then `./scripts/stack.ps1 up` / `./scripts/stack.sh up` (container-runner overlay is included by default). If prerequisites are missing, the worker refuses to start (fail-fast).
+1. **Stay on container (recommended):** keep or add `LAUNCHER_TOKEN` and `PROXY_ISSUER_TOKEN` in `.env`, create/update `model-proxy.env`, then `./scripts/stack.ps1 up` / `./scripts/stack.sh up` (helper builds `opr-review:local` from `Dockerfile.review` and includes the container-runner overlay by default; for non-helper deploys build the image yourself first). If prerequisites are missing, the worker refuses to start (fail-fast).
 2. **Explicit fallback:** set `codex.runner_backend: in_process` in `config.yaml` and start with `./scripts/stack.ps1 up -InProcess` / `./scripts/stack.sh up --in-process` (omit the overlay).
 
 Existing configs that already set `runner_backend: in_process` keep that behavior; configs that omit the key pick up the new default.

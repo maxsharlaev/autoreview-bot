@@ -1,6 +1,8 @@
 # Container-runner overlay (M4 default via ./scripts/stack.* up; omit with --in-process / -InProcess).
 # Not loaded by bare `docker compose -f docker-compose.yml` or the CI image-build job.
-# Usage:
+# Prefer: ./scripts/stack.sh up / .\scripts\stack.ps1 up
+#   (builds OPR_REVIEW_IMAGE / opr-review:local from Dockerfile.review, then compose up).
+# Manual / non-helper:
 #   docker build -f Dockerfile.review -t opr-review:local .
 #   # set LAUNCHER_TOKEN / PROXY_ISSUER_TOKEN in .env (openssl rand -hex 32), then:
 #   docker compose -f docker-compose.yml -f docker-compose.container-runner.yml up -d --build

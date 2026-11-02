@@ -18,7 +18,7 @@ cp config.example.yaml config.yaml
 cp model-proxy.env.example model-proxy.env
 # .env: POSTGRES_PASSWORD, REVIEW_API_KEY, plus LAUNCHER_TOKEN and PROXY_ISSUER_TOKEN (>= 16 chars each)
 # model-proxy.env: OPENAI_API_KEY (restrict file perms; never mount on worker/launcher)
-./scripts/stack.sh up            # Linux/macOS (container-runner overlay on by default)
+./scripts/stack.sh up            # Linux/macOS (builds opr-review:local, then compose + container-runner overlay)
 # .\scripts\stack.ps1 up         # Windows
 ```
 

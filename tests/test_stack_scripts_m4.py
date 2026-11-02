@@ -85,27 +85,36 @@ def _write_docker_stub_posix(bin_dir: Path, log: Path) -> Path:
 
 
 def _run_ps1(
-    command: str, *, home: Path, bin_dir: Path, env_extra: dict[str, str] | None = None
+    command: str,
+    *,
+    home: Path,
+    bin_dir: Path,
+    env_extra: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("LAUNCHER_TOKEN", None)
+    env.pop("OPR_REVIEW_IMAGE", None)
     env["OPR_STACK_ROOT"] = str(home)
     # Prefer our docker.cmd stub over Docker Desktop's docker.exe (PATHEXT order).
     env["PATHEXT"] = ".CMD;.BAT;.COM;.EXE" + os.pathsep + env.get("PATHEXT", "")
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
     if env_extra:
         env.update(env_extra)
+    argv = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(PS1),
+        command,
+    ]
+    if extra_args:
+        argv.extend(extra_args)
     return subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(PS1),
-            command,
-        ],
+        argv,
         cwd=str(home),
         env=env,
         capture_output=True,
@@ -116,16 +125,26 @@ def _run_ps1(
 
 
 def _run_sh(
-    command: str, *, home: Path, bin_dir: Path, bash: str, env_extra: dict[str, str] | None = None
+    command: str,
+    *,
+    home: Path,
+    bin_dir: Path,
+    bash: str,
+    env_extra: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("LAUNCHER_TOKEN", None)
+    env.pop("OPR_REVIEW_IMAGE", None)
     env["OPR_STACK_ROOT"] = str(home)
     env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
     if env_extra:
         env.update(env_extra)
+    argv = [bash, str(SH), command]
+    if extra_args:
+        argv.extend(extra_args)
     return subprocess.run(
-        [bash, str(SH), command],
+        argv,
         cwd=str(home),
         env=env,
         capture_output=True,
@@ -174,6 +193,8 @@ def test_stack_ps1_up_with_launcher_token_invokes_compose(tmp_path: Path) -> Non
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert "up -d --build" in recorded
+    assert "build -f Dockerfile.review -t opr-review:local ." in recorded
+    assert recorded.index("build -f Dockerfile.review") < recorded.index("up -d --build")
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
@@ -221,3 +242,100 @@ def test_stack_sh_up_with_launcher_token_invokes_compose(tmp_path: Path) -> None
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert "up -d --build" in recorded
+    assert "build -f Dockerfile.review -t opr-review:local ." in recorded
+    assert recorded.index("build -f Dockerfile.review") < recorded.index("up -d --build")
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_up_inprocess_skips_review_image_build(tmp_path: Path) -> None:
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1("up", home=home, bin_dir=bin_dir, extra_args=["-InProcess"])
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "Dockerfile.review" not in recorded
+    assert "docker-compose.container-runner.yml" not in recorded
+    assert "up -d --build" in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+@pytest.mark.parametrize("command", ["status", "down", "restart", "logs"])
+def test_stack_ps1_lifecycle_skips_review_image_build(command: str, tmp_path: Path) -> None:
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(command, home=home, bin_dir=bin_dir)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "Dockerfile.review" not in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_up_respects_opr_review_image_env(tmp_path: Path) -> None:
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "up",
+        home=home,
+        bin_dir=bin_dir,
+        env_extra={
+            "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
+            "OPR_REVIEW_IMAGE": "custom-review:test",
+        },
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "build -f Dockerfile.review -t custom-review:test ." in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_up_inprocess_skips_review_image_build(tmp_path: Path) -> None:
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh("up", home=home, bin_dir=bin_dir, bash=bash, extra_args=["--in-process"])
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "Dockerfile.review" not in recorded
+    assert "docker-compose.container-runner.yml" not in recorded
+    assert "up -d --build" in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+@pytest.mark.parametrize("command", ["status", "down", "restart", "logs"])
+def test_stack_sh_lifecycle_skips_review_image_build(command: str, tmp_path: Path) -> None:
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(command, home=home, bin_dir=bin_dir, bash=bash)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "Dockerfile.review" not in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_up_respects_opr_review_image_env(tmp_path: Path) -> None:
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "up",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        env_extra={
+            "LAUNCHER_TOKEN": "test-launcher-token-32chars-ok",
+            "OPR_REVIEW_IMAGE": "custom-review:test",
+        },
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert "build -f Dockerfile.review -t custom-review:test ." in recorded
