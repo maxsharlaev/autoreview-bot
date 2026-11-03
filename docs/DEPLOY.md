@@ -236,7 +236,7 @@ Happy-path check that a review through the **container** backend + **model-proxy
 
 - Docker Engine available to the host (same as local `stack up`).
 - A **separate low-limit** OpenAI (or compatible) API key used **only** for this test.
-- Put that key in `model-proxy.env` as `OPENAI_API_KEY=...` (gitignored; copy from `model-proxy.env.example`), **or** export `OPENAI_API_KEY` in the shell that runs pytest. Do **not** put the key in `.env` for this test path, and never commit it.
+- Put that key in `model-proxy.env` as `OPENAI_API_KEY=...` (gitignored; copy from `model-proxy.env.example`). The test reads **only** that file (ambient `OPENAI_API_KEY` is ignored). Do **not** put the key in `.env` for this test path, and never commit it.
 - Optional: `OPR_REAL_MODEL` (default `gpt-4o-mini`) to pick a cheap chat model.
 
 <!-- section: real-model-e2e-how-to-run -->
@@ -246,13 +246,14 @@ From the repo root (PowerShell):
 
 ```powershell
 $env:OPR_REAL_MODEL_E2E = "1"
-# optional: $env:OPENAI_API_KEY = "<low-limit-key>"   # or rely on model-proxy.env
+# key must be in model-proxy.env only (ambient OPENAI_API_KEY ignored)
 python -m pytest tests/test_real_model_e2e.py -q
 ```
 
 Bash:
 
 ```bash
+# key must be in model-proxy.env only (ambient OPENAI_API_KEY ignored)
 OPR_REAL_MODEL_E2E=1 python -m pytest tests/test_real_model_e2e.py -q
 ```
 

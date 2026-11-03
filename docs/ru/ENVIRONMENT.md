@@ -159,5 +159,5 @@ Worker запускает `git` и `codex` с окружением из allowlis
 | --- | --- |
 | `TEST_DATABASE_URL` | URL Postgres для тестов с базой; без него они пропускаются. См. [CONTRIBUTING.md](../../CONTRIBUTING.md). |
 | `OPR_CONTAINER_E2E` | Установите `1`, чтобы запустить stub container E2E (`tests/test_container_e2e.py`). По умолчанию выкл.; не для CI. |
-| `OPR_REAL_MODEL_E2E` | Установите `1`, чтобы запустить opt-in real-model E2E (`tests/test_real_model_e2e.py`). По умолчанию выкл.; никогда не включайте в CI. Нужны Docker и upstream-ключ с низким лимитом (см. [DEPLOY.md](DEPLOY.md#manual-real-model-e2e-opt-in)). |
+| `OPR_REAL_MODEL_E2E` | Установите `1`, чтобы запустить opt-in real-model E2E (`tests/test_real_model_e2e.py`). По умолчанию выкл.; никогда не включайте в CI. Нужны Docker и `OPENAI_API_KEY` только в `model-proxy.env` (ambient `OPENAI_API_KEY` игнорируется; см. [DEPLOY.md](DEPLOY.md#manual-real-model-e2e-opt-in)). |
 | `OPR_REAL_MODEL` | Опциональный id модели для real-model E2E (по умолчанию `gpt-4o-mini`). |
