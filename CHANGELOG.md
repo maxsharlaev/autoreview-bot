@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
 
 ### Fixed
+- **ARB37-007:** real-model E2E validates full review output with `jsonschema.validate` against `schemas/review_output.json` and asserts `reviewed_head_sha` matches the fixture HEAD SHA.
+- **ARB37-008:** real-model E2E cleanup attempts every removal, then fails teardown listing resources that remain; only a confirmed-missing container is treated as success (no retry loop).
 - **ARB37-006:** real-model E2E forced-skips when `CI` or `GITHUB_ACTIONS` is set, even with `OPR_REAL_MODEL_E2E=1` (decorator + fixture); runbook EN/RU note.
 - **ARB37-003 (reopened):** real-model E2E registers proxy/launcher container names in the resource tracker **before** `docker run`; container removal is idempotent if the name is missing.
 - **ARB37-005:** real-model E2E runbook (DEPLOY EN/RU) states an **OpenAI-issued** key only (`PROXY_PROVIDER=openai` / `api.openai.com`); removed “or compatible” wording.

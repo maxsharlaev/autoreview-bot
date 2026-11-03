@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
+import jsonschema
 import pytest
 
 docker = shutil.which("docker")
@@ -77,17 +78,27 @@ def _run(
     return subprocess.run(args, check=check, capture_output=True, text=True, env=env)
 
 
-def _rm_container_idempotent(name: str) -> None:
-    """Best-effort `docker rm -f`; missing container is not an error (ARB37-003)."""
+def _rm_container_idempotent(name: str) -> str | None:
+    """``docker rm -f``; confirmed missing is OK (ARB37-003 / ARB37-008).
+
+    Returns ``None`` on success or confirmed missing; otherwise a ``container:<name>``
+    label for teardown failure reporting. Does not retry.
+    """
     if not docker or not name:
-        return
+        return None
     result = _run([docker, "rm", "-f", name])
     if result.returncode == 0:
-        return
+        return None
     err = f"{result.stderr or ''}{result.stdout or ''}".lower()
     if "no such container" in err:
-        return
-    # Still do not raise from cleanup paths.
+        return None
+    return f"container:{name}"
+
+
+def validate_review_output(output: object) -> None:
+    """Validate parsed review JSON against ``schemas/review_output.json`` (ARB37-007)."""
+    schema = json.loads(REVIEW_SCHEMA.read_text(encoding="utf-8"))
+    jsonschema.validate(instance=output, schema=schema)
 
 
 def load_upstream_key_from_model_proxy_env(env_file: Path) -> str:
@@ -135,21 +146,40 @@ class ResourceTracker:
     review_job_ids: list[str] = field(default_factory=list)
 
     def cleanup(self) -> None:
+        """Attempt every removal; then fail listing resources that did not go away (ARB37-008).
+
+        Confirmed-missing containers are success. No retries — loud failure is enough.
+        """
         if not docker:
             return
+        failures: list[str] = []
         # Review containers for jobs this fixture/test owns (scoped; not global opr.review).
         for job_id in reversed(self.review_job_ids):
             listed = _run([docker, "ps", "-aq", *review_job_id_filters(job_id)])
+            if listed.returncode != 0:
+                failures.append(f"review_ps:job_id={job_id}")
             for cid in [c.strip() for c in listed.stdout.splitlines() if c.strip()]:
-                _rm_container_idempotent(cid)
+                label = _rm_container_idempotent(cid)
+                if label:
+                    failures.append(label)
         for name in reversed(self.containers):
-            _rm_container_idempotent(name)
+            label = _rm_container_idempotent(name)
+            if label:
+                failures.append(label)
         for name in reversed(self.networks):
-            _run([docker, "network", "rm", name])
+            result = _run([docker, "network", "rm", name])
+            if result.returncode != 0:
+                failures.append(f"network:{name}")
         for name in reversed(self.volumes):
-            _run([docker, "volume", "rm", name])
+            result = _run([docker, "volume", "rm", name])
+            if result.returncode != 0:
+                failures.append(f"volume:{name}")
         for name in reversed(self.images):
-            _run([docker, "rmi", "-f", name])
+            result = _run([docker, "rmi", "-f", name])
+            if result.returncode != 0:
+                failures.append(f"image:{name}")
+        if failures:
+            raise RuntimeError("real-model E2E cleanup failed for: " + ", ".join(failures))
 
 
 def _assert_secret_absent(blob: str, secret: str, *, where: str) -> None:
@@ -482,8 +512,8 @@ async def test_real_model_review_via_proxy_happy_path(real_model_stack) -> None:
     output_raw = data.get("output") or ""
     _assert_secret_absent(output_raw, upstream_key, where="review output")
     output = json.loads(output_raw)
-    assert output.get("schema_version") == 1
-    assert isinstance(output.get("findings"), list)
+    validate_review_output(output)
+    assert output.get("reviewed_head_sha") == HEAD_SHA
 
     env_list = sink.get("env") or []
     assert env_list, "did not observe review container env (container finished too fast?)"

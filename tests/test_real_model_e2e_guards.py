@@ -15,6 +15,7 @@ from tests.test_real_model_e2e import (
     load_upstream_key_from_model_proxy_env,
     real_model_e2e_skip_reason,
     review_job_id_filters,
+    validate_review_output,
 )
 
 
@@ -158,7 +159,7 @@ def test_rm_container_idempotent_ignores_missing(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
     monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
-    _rm_container_idempotent("ghost")  # must not raise
+    assert _rm_container_idempotent("ghost") is None  # confirmed missing is OK
     assert calls == [["/usr/bin/docker", "rm", "-f", "ghost"]]
 
 
@@ -221,3 +222,95 @@ def test_ci_falsey_tokens_do_not_block() -> None:
     env = {"OPR_REAL_MODEL_E2E": "1", "CI": "0", "GITHUB_ACTIONS": "false"}
     assert not is_ci_environment(env)
     assert real_model_e2e_skip_reason(environ=env, docker_bin="/usr/bin/docker") is None
+
+
+def test_cleanup_continues_after_failure_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-008: attempt every removal, then raise listing failed resource names."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+        joined = " ".join(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if "rm -f ctr-fail" in joined or joined.endswith("rm -f ctr-fail"):
+            R.returncode = 1
+            R.stderr = "Error: permission denied"
+            return R()
+        if "rm -f ctr-missing" in joined or joined.endswith("rm -f ctr-missing"):
+            R.returncode = 1
+            R.stderr = "Error: No such container: ctr-missing"
+            return R()
+        if "network rm net-fail" in joined:
+            R.returncode = 1
+            R.stderr = "Error: network is in use"
+            return R()
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+
+    tracker = ResourceTracker()
+    tracker.containers.extend(["ctr-fail", "ctr-missing"])
+    tracker.networks.extend(["net-fail", "net-ok"])
+    tracker.volumes.append("vol-ok")
+
+    with pytest.raises(RuntimeError, match="cleanup failed") as excinfo:
+        tracker.cleanup()
+    msg = str(excinfo.value)
+    assert "container:ctr-fail" in msg
+    assert "network:net-fail" in msg
+    assert "ctr-missing" not in msg  # confirmed missing is success
+    assert "vol-ok" not in msg
+    joined = [" ".join(c) for c in calls]
+    # Continued after first failure: both containers and both networks attempted.
+    assert any(j.endswith("rm -f ctr-fail") for j in joined)
+    assert any(j.endswith("rm -f ctr-missing") for j in joined)
+    assert any("network rm net-fail" in j for j in joined)
+    assert any("network rm net-ok" in j for j in joined)
+    assert any("volume rm vol-ok" in j for j in joined)
+
+
+def test_rm_container_unexpected_failure_returns_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "Error: cannot remove"
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    assert _rm_container_idempotent("stuck") == "container:stuck"
+
+
+def test_validate_review_output_rejects_missing_required_field() -> None:
+    """ARB37-007: schema helper rejects output missing a required field."""
+    import jsonschema
+
+    incomplete = {
+        "schema_version": 1,
+        # reviewed_head_sha missing
+        "previous_reviewed_head_sha": None,
+        "summary": "x",
+        "task_alignment": {
+            "issue_key": None,
+            "status": "satisfied",
+            "unmet_acceptance_criteria": [],
+        },
+        "previous_findings": [],
+        "findings": [],
+        "coverage": {
+            "files_total": 1,
+            "files_reviewed": 1,
+            "truncated": False,
+            "skipped_paths": [],
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validate_review_output(incomplete)
