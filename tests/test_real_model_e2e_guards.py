@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from tests.test_real_model_e2e import (
     ResourceTracker,
+    _rm_container_idempotent,
     docker_env_passing_openai_key,
     load_upstream_key_from_model_proxy_env,
     review_job_id_filters,
@@ -137,3 +138,53 @@ def test_resource_tracker_cleanup_on_partial_setup(monkeypatch: pytest.MonkeyPat
     assert any("network rm net-only" in j for j in joined)
     # Nothing else registered
     assert not any("rmi" in j for j in joined)
+
+
+def test_rm_container_idempotent_ignores_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "Error: No such container: ghost"
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    _rm_container_idempotent("ghost")  # must not raise
+    assert calls == [["/usr/bin/docker", "rm", "-f", "ghost"]]
+
+
+def test_tracker_removes_name_registered_before_failed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-003: name registered before docker run is still cleaned up if run fails."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
+        class R:
+            returncode = 1 if len(args) > 1 and args[1] == "run" else 0
+            stdout = ""
+            stderr = "simulated docker run failure" if len(args) > 1 and args[1] == "run" else ""
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+
+    from tests import test_real_model_e2e as mod
+
+    tracker = ResourceTracker()
+    name = "opr-proxy-e2e-arb37003"
+    # Mirror fixture: register BEFORE run.
+    tracker.containers.append(name)
+    run = mod._run(
+        ["/usr/bin/docker", "run", "-d", "--name", name, "img"],
+    )
+    assert run.returncode != 0
+    tracker.cleanup()
+    assert any(args == ["/usr/bin/docker", "rm", "-f", name] for args in calls)

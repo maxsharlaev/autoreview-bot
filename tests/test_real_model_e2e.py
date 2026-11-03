@@ -41,6 +41,19 @@ def _run(
     return subprocess.run(args, check=check, capture_output=True, text=True, env=env)
 
 
+def _rm_container_idempotent(name: str) -> None:
+    """Best-effort `docker rm -f`; missing container is not an error (ARB37-003)."""
+    if not docker or not name:
+        return
+    result = _run([docker, "rm", "-f", name])
+    if result.returncode == 0:
+        return
+    err = f"{result.stderr or ''}{result.stdout or ''}".lower()
+    if "no such container" in err:
+        return
+    # Still do not raise from cleanup paths.
+
+
 def load_upstream_key_from_model_proxy_env(env_file: Path) -> str:
     """Return OPENAI_API_KEY from model-proxy.env only (never from os.environ)."""
     if not env_file.is_file():
@@ -92,9 +105,9 @@ class ResourceTracker:
         for job_id in reversed(self.review_job_ids):
             listed = _run([docker, "ps", "-aq", *review_job_id_filters(job_id)])
             for cid in [c.strip() for c in listed.stdout.splitlines() if c.strip()]:
-                _run([docker, "rm", "-f", cid])
+                _rm_container_idempotent(cid)
         for name in reversed(self.containers):
-            _run([docker, "rm", "-f", name])
+            _rm_container_idempotent(name)
         for name in reversed(self.networks):
             _run([docker, "network", "rm", name])
         for name in reversed(self.volumes):
@@ -215,13 +228,16 @@ def real_model_stack(upstream_key: str):
             proxy_image,
         ]
         assert upstream_key not in " ".join(proxy_argv)
+        # ARB37-003: register deterministic name before run so cleanup works if create fails mid-flight.
+        tracker.containers.append(proxy_name)
         proxy_run = _run(proxy_argv, env=proxy_cli_env)
         assert proxy_run.returncode == 0, proxy_run.stderr[-500:]
-        tracker.containers.append(proxy_name)
 
         connect = _run([docker, "network", "connect", net_proxy, proxy_name])
         assert connect.returncode == 0, connect.stderr[-300:]
 
+        # ARB37-003: register deterministic name before run so cleanup works if create fails mid-flight.
+        tracker.containers.append(launcher_name)
         launcher_run = _run(
             [
                 docker,
@@ -255,7 +271,6 @@ def real_model_stack(upstream_key: str):
             ]
         )
         assert launcher_run.returncode == 0, launcher_run.stderr[-500:]
-        tracker.containers.append(launcher_name)
 
         proxy_port = _published_port(proxy_name, 8081)
         launcher_port = _published_port(launcher_name, 8080)
