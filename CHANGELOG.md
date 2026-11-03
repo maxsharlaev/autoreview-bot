@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **Admin finding suppression (PR1):** `findings.current_status` may be `accepted` or `false_positive`; suppressed findings are omitted from model previous context, not carried open, not reopened/regressed when re-reported, and not shown as new/regressed on the sticky comment. Helpers `set_finding_suppression` / `clear_finding_suppression` (clear → `open`). Admin JSON API/UI deferred.
 - **M4 PR2 real-model E2E (opt-in):** `tests/test_real_model_e2e.py` happy-path review through launcher + model-proxy + real review image; gated by `OPR_REAL_MODEL_E2E=1` (skipped by default / never CI). Asserts `CODEX_API_KEY` is an `opr_job_` token, no upstream key in launch env/spec/logs/metrics. Runbook in DEPLOY (EN/RU); `OPR_CONTAINER_E2E` / `OPR_REAL_MODEL_E2E` / `OPR_REAL_MODEL` in ENVIRONMENT; ROADMAP M4 marked **done**.
 
 ### Changed

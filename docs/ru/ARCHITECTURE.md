@@ -86,6 +86,7 @@ Codex вызывается через `ReviewExecutor` (`app/services/review_exe
 - `pull_requests` — номер, SHA, ключ задачи, автор, исполнитель, состояние, заголовок бота
 - `review_runs` — триггер, SHA, статус, версии, длительность, код ошибки/пропуска, статус прогресса
 - `findings` — stable id, серьёзность, расположение, доказательства, видимость
+- `findings.current_status` — `open` / `resolved` / `obsolete` / `needs_human` / `accepted` / `false_positive` (подавления админом; не поднимаются снова на следующих push)
 - `finding_transitions` — new / resolved / still_open / regressed / obsolete / needs_human
 - `task_snapshots` — ключ Jira и был ли сделан комментарий/переход
 - `digest_runs` — снимок дайджеста
