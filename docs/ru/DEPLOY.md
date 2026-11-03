@@ -259,7 +259,7 @@ OPR_REAL_MODEL_E2E=1 python -m pytest tests/test_real_model_e2e.py -q
 
 Without the flag the test is collected and skipped (safe for CI / full suite).
 
-Only **one** real-model E2E run per host at a time (OS exclusive lock; a second run fails fast). If a run crashes, leftover containers labeled `opr.e2e=1` are removed on the next run after the lock is acquired; or remove the listed containers manually. Review containers are scoped by `opr.job_id` (the launcher does not set `opr.e2e`).
+The E2E talks only to the **local** Docker daemon (do not point `DOCKER_HOST` at a shared/remote daemon for this test). Only **one** real-model E2E run per host at a time (OS exclusive lock; a second run fails fast). If a run crashes, leftover containers labeled `opr.e2e=1` are removed on the next run after the lock is acquired; or remove the listed containers manually. Review containers are scoped by `opr.job_id` (the launcher does not set `opr.e2e`).
 
 <!-- section: real-model-e2e-expected-cost -->
 ### Expected cost

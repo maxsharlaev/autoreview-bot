@@ -185,26 +185,37 @@ class RealModelE2EHostLock:
 
 
 def reap_all_e2e_containers() -> list[str]:
-    """Remove every container labeled ``opr.e2e=1`` (ARB37-010).
+    """Remove every container labeled ``opr.e2e=1`` (ARB37-010 / ARB37-011).
 
     Call only while holding ``RealModelE2EHostLock``. Never touches containers
     without that label. Uses ``_rm_container_idempotent`` (short retries).
+    Listing or removal failures raise before the fixture creates anything;
+    messages name container ids only (never docker command output).
     """
     if not docker:
         return []
     listed = _run([docker, "ps", "-aq", "--filter", f"label={E2E_LABEL}={E2E_LABEL_VALUE}"])
     if listed.returncode != 0:
-        return []
+        raise RuntimeError("real-model E2E reaper: failed to list opr.e2e containers")
     removed: list[str] = []
+    failures: list[str] = []
     for cid in [c.strip() for c in listed.stdout.splitlines() if c.strip()]:
         fail = _rm_container_idempotent(cid)
         if fail is None:
             removed.append(cid)
+        else:
+            failures.append(cid)
+    if failures:
+        raise RuntimeError("real-model E2E reaper: failed to remove containers: " + ", ".join(failures))
     return removed
 
 
 def prepare_real_model_e2e_host(path: Path | None = None) -> RealModelE2EHostLock:
-    """Acquire the host lock, then reap all ``opr.e2e`` leftovers (ARB37-010)."""
+    """Acquire the host lock, then reap all ``opr.e2e`` leftovers (ARB37-010/011).
+
+    If reaping fails, the lock is released and the error propagates so the
+    fixture does not create new resources.
+    """
     lock = RealModelE2EHostLock.acquire(path=path)
     try:
         reap_all_e2e_containers()

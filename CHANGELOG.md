@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
 
 ### Fixed
+- **ARB37-011:** real-model E2E reaper fails closed on `docker ps` or persistent `docker rm` failures (container ids only in the message; no docker output); `prepare_real_model_e2e_host` does not proceed.
+- **ARB37-010 (docs):** real-model E2E runbook (EN/RU) states local Docker daemon only (no shared/remote daemon) and one run per host.
 - **ARB37-010:** real-model E2E allows only one run per host via an OS exclusive lock (`fcntl` / `msvcrt`); after acquire, reaps **all** `opr.e2e=1` leftovers (age threshold / ARB37-009 margins removed).
 - **ARB37-009:** real-model E2E reaper age threshold uses E2E constants (job timeout 180s + startup/request margins), not ambient `OPR_MAX_REVIEW_TIMEOUT_SECONDS`.
 - **ARB37-008 (rm retries):** container removal retries unexpected failures up to 3 times with a fixed 1s backoff; still collects failures and raises listing remaining names.

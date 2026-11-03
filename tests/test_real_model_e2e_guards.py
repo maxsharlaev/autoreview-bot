@@ -473,3 +473,67 @@ def test_prepare_reaps_only_after_acquiring_lock(tmp_path: Path, monkeypatch: py
         assert E2E_LOCK_BUSY_MESSAGE
     finally:
         lock.release()
+
+
+def test_reaper_ps_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-011: docker ps nonzero => raise (no docker output in message)."""
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        class R:
+            returncode = 1
+            stdout = "SECRET_SHOULD_NOT_APPEAR"
+            stderr = "docker daemon exploded SECRET_SHOULD_NOT_APPEAR"
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    with pytest.raises(RuntimeError, match="failed to list opr.e2e containers") as excinfo:
+        reap_all_e2e_containers()
+    assert "SECRET_SHOULD_NOT_APPEAR" not in str(excinfo.value)
+
+
+def test_reaper_persistent_rm_failure_raises_with_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-011: after retries, raise naming the container id only."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if "ps" in args and "-aq" in args:
+            R.stdout = "cid-stuck\n"
+            return R()
+        # rm fails every attempt
+        R.returncode = 1
+        R.stderr = "Error: cannot remove SECRET_SHOULD_NOT_APPEAR"
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    monkeypatch.setattr("tests.test_real_model_e2e._rm_sleep", lambda _s: None)
+    with pytest.raises(RuntimeError, match="failed to remove containers: cid-stuck") as excinfo:
+        reap_all_e2e_containers()
+    msg = str(excinfo.value)
+    assert "cid-stuck" in msg
+    assert "SECRET_SHOULD_NOT_APPEAR" not in msg
+    assert sum(1 for c in calls if "rm" in c and "-f" in c) == _RM_CONTAINER_MAX_ATTEMPTS
+
+
+def test_prepare_does_not_proceed_when_reaper_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-011: prepare releases lock and does not return when reap raises."""
+    lock_path = tmp_path / "opr-real-model-e2e.lock"
+
+    def boom() -> list[str]:
+        raise RuntimeError("real-model E2E reaper: failed to list opr.e2e containers")
+
+    monkeypatch.setattr("tests.test_real_model_e2e.reap_all_e2e_containers", boom)
+    with pytest.raises(RuntimeError, match="failed to list"):
+        prepare_real_model_e2e_host(path=lock_path)
+    # Lock must be free again so a new acquire succeeds.
+    again = RealModelE2EHostLock.acquire(path=lock_path)
+    again.release()
