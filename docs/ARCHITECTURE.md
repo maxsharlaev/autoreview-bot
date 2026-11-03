@@ -87,6 +87,7 @@ Requests for one PR are serialized with a Postgres advisory lock, ARQ job ids ar
 - `pull_requests` — number, SHAs, issue key, author, assignee, state, bot title
 - `review_runs` — trigger, SHAs, status, versions, duration, error/skip code, progress status
 - `findings` — stable id, severity, location, evidence, visibility
+- `findings.current_status` — `open` / `resolved` / `obsolete` / `needs_human` / `accepted` / `false_positive` (admin suppressions; not re-raised on later pushes)
 - `finding_transitions` — new / resolved / still_open / regressed / obsolete / needs_human
 - `task_snapshots` — Jira key and whether a comment/transition was done
 - `digest_runs` — digest snapshot

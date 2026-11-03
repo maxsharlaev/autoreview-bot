@@ -32,7 +32,7 @@ What works today on `main`, and the honest limits of each area.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| **Admin panel (runs, queue, finding management)** | **planned** | **Nearest target.** Optional (`ADMIN_UI_ENABLED=false`); queue/runs, filters, safe retry, audit log. Finding management: mark false positives and accepted risk so they are **not re-raised** on later pushes; sensitive-comment cleanup (`has_sensitive_content`). Authz separate from the public API |
+| **Admin panel (runs, queue, finding management)** | **in progress** | Optional (`ADMIN_UI_ENABLED=false`); queue/runs, filters, safe retry, audit log. Finding suppression statuses `accepted` / `false_positive` (orchestrator: not re-raised); admin JSON API / UI and sensitive-comment cleanup (`has_sensitive_content`) still to ship. Authz separate from the public API |
 
 <!-- section: container-strict-review-path -->
 ### Container / strict review path

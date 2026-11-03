@@ -50,6 +50,11 @@ from app.services.constants import (
     WRITE_PERMISSIONS,
 )
 from app.services.context_builder import PreviousFinding, build_context
+from app.services.finding_status import (
+    STORED_OPEN_FINDING_STATUSES,
+    findings_for_model_previous,
+    is_suppressed_status,
+)
 from app.services.git_clone import (
     CloneBudgetExhausted,
     GitCloneError,
@@ -654,7 +659,7 @@ async def _run_review(
     owner_findings = _filter_findings_for_owner(pr.findings, owner_id, legacy_default_owner)
 
     previous = []
-    for item in owner_findings:
+    for item in findings_for_model_previous(owner_findings):
         expose_details = visibility == "private" or getattr(item, "details_visibility", None) == "public"
         previous.append(
             PreviousFinding(
@@ -1565,7 +1570,7 @@ async def _previous_head(
 
 
 _OPEN_PREVIOUS = {"still_open", "regressed", "needs_human"}
-_STORED_OPEN = {"open", "needs_human", "still_open"}
+_STORED_OPEN = set(STORED_OPEN_FINDING_STATUSES)
 
 
 def _carry_open_previous(
@@ -1593,6 +1598,8 @@ def _carry_open_previous(
     decided = {item.stable_id: item.status for item in verified.previous_findings}
     for item in stored:
         if item.stable_id in present:
+            continue
+        if is_suppressed_status(item.current_status):
             continue
         if decided.get(item.stable_id) in {"resolved", "obsolete"}:
             continue
@@ -1664,8 +1671,13 @@ async def _store_findings(
     previous_map = {item.stable_id: item for item in verified.previous_findings}
     transitions: list[FindingTransitionView] = []
 
+    suppressed_fresh_ids: set[str] = set()
     for view in verified.findings:
         prior = existing.get(view.stable_id)
+        if prior is not None and is_suppressed_status(prior.current_status):
+            # Keep accepted / false_positive; do not reopen or emit sticky transitions.
+            suppressed_fresh_ids.add(view.stable_id)
+            continue
         if prior is None:
             prior = Finding(
                 pull_request_id=pr.id,
@@ -1730,9 +1742,14 @@ async def _store_findings(
         )
         transitions.append(_transition_view(prior, status, view.evidence))
 
+    if suppressed_fresh_ids:
+        verified.findings = [item for item in verified.findings if item.stable_id not in suppressed_fresh_ids]
+
     for prev in verified.previous_findings:
         finding = existing.get(prev.stable_id)
         if finding is None or prev.stable_id in {item.stable_id for item in verified.findings}:
+            continue
+        if is_suppressed_status(finding.current_status):
             continue
         if prev.status == "resolved":
             finding.current_status = "resolved"

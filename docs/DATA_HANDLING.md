@@ -32,7 +32,7 @@ For a public repository the review and PR text models do not receive Jira issue 
 | `repositories` | Full name, owner, comment author identities. |
 | `pull_requests` | Number, URL, title, bot title and its source hash, author, assignee, state, SHAs, head branch, issue key, draft/fork flags. |
 | `review_runs` | Trigger, SHAs, status, model/prompt versions, duration, error/skip codes, ARQ job id, summary JSON, comment URL, `has_sensitive_content`, progress status bookkeeping. |
-| `findings` | Severity, category, path, line, title, scenario, evidence, recommendation, visibility, confidence, status. Evidence can quote code. |
+| `findings` | Severity, category, path, line, title, scenario, evidence, recommendation, visibility, confidence, status (`open` / `resolved` / `obsolete` / `needs_human` / `accepted` / `false_positive`). Evidence can quote code. Admin `accepted` / `false_positive` are not re-raised on later pushes. |
 | `finding_transitions` | Status history with evidence. |
 | `task_snapshots` | Jira key, Jira status, warning, whether a comment or transition was done. Not the issue text. |
 | `digest_runs` | Digest bookkeeping. |
