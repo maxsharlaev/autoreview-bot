@@ -1,10 +1,10 @@
 """Opt-in real-model E2E: container backend + model-proxy happy path (M4 PR2).
 
 The happy-path test is skipped unless ``OPR_REAL_MODEL_E2E=1`` (and Docker is
-available). Forced skip when ``CI`` or ``GITHUB_ACTIONS`` is set, even with the
-flag. Upstream key is read **only** from ``model-proxy.env`` (ambient
-``OPENAI_API_KEY`` is ignored). The key value is never printed on failure and
-is never placed on the docker argv.
+available). Forced skip when a CI indicator is set, even with the flag. Only one
+run per host (OS exclusive lock). Upstream key is read **only** from
+``model-proxy.env`` (ambient ``OPENAI_API_KEY`` is ignored). The key value is
+never printed on failure and is never placed on the docker argv.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -51,9 +50,8 @@ E2E_LABEL = "opr.e2e"
 E2E_LABEL_VALUE = "1"
 # Happy-path job timeout (job.json / token issue / review POST).
 E2E_JOB_TIMEOUT_SECONDS = 180
-# Reaper age = job timeout + these margins (never ambient OPR_MAX_REVIEW_TIMEOUT_SECONDS).
-E2E_REAPER_STARTUP_MARGIN_SECONDS = 120  # image builds + health waits
-E2E_REAPER_REQUEST_MARGIN_SECONDS = 90  # review HTTP / docker wait slack
+E2E_LOCK_PATH = Path(tempfile.gettempdir()) / "opr-real-model-e2e.lock"
+E2E_LOCK_BUSY_MESSAGE = "another real-model E2E run is already active on this host"
 _RM_CONTAINER_MAX_ATTEMPTS = 3
 _RM_CONTAINER_BACKOFF_SECONDS = 1.0
 
@@ -131,83 +129,89 @@ def validate_review_output(output: object) -> None:
     jsonschema.validate(instance=output, schema=schema)
 
 
-def e2e_reaper_max_age_seconds() -> int:
-    """Stale threshold from E2E constants only (ARB37-009).
+class RealModelE2EHostLock:
+    """OS-level exclusive lock: one real-model E2E per host (ARB37-010).
 
-    Does **not** read ambient ``OPR_MAX_REVIEW_TIMEOUT_SECONDS``.
+    Uses ``fcntl.flock`` on POSIX and ``msvcrt.locking`` on Windows. The OS
+    releases the lock when the process dies, so no stale-lock handling.
     """
-    return (
-        int(E2E_JOB_TIMEOUT_SECONDS) + int(E2E_REAPER_STARTUP_MARGIN_SECONDS) + int(E2E_REAPER_REQUEST_MARGIN_SECONDS)
-    )
 
+    def __init__(self, fh: object) -> None:
+        self._fh = fh
+        self._released = False
 
-def parse_docker_created_epoch(created: str) -> float:
-    """Parse Docker ``Created`` RFC3339 into UTC epoch seconds."""
-    text = (created or "").strip()
-    if not text:
-        raise ValueError("empty Created timestamp")
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    if "." in text:
-        head, rest = text.split(".", 1)
-        digits = ""
-        tz = ""
-        for i, ch in enumerate(rest):
-            if ch.isdigit():
-                digits += ch
+    @classmethod
+    def acquire(cls, path: Path | None = None) -> RealModelE2EHostLock:
+        lock_path = path if path is not None else E2E_LOCK_PATH
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                fh.seek(0)
+                if fh.read(1) != b"\0":
+                    fh.seek(0)
+                    fh.truncate(0)
+                    fh.write(b"\0")
+                    fh.flush()
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
             else:
-                tz = rest[i:]
-                break
-        text = f"{head}.{(digits + '000000')[:6]}{tz}"
-    return datetime.fromisoformat(text).timestamp()
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            raise RuntimeError(E2E_LOCK_BUSY_MESSAGE) from None
+        return cls(fh)
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
 
 
-def e2e_container_is_stale(
-    *,
-    created_epoch: float,
-    now_epoch: float,
-    max_age_seconds: int,
-) -> bool:
-    return (now_epoch - created_epoch) > max_age_seconds
+def reap_all_e2e_containers() -> list[str]:
+    """Remove every container labeled ``opr.e2e=1`` (ARB37-010).
 
-
-def reap_stale_e2e_containers(
-    *,
-    now_epoch: float | None = None,
-    max_age_seconds: int | None = None,
-) -> list[str]:
-    """Remove ``opr.e2e=1`` containers older than the E2E-owned age threshold.
-
-    Never touches containers without that label. Container rm uses short retries
-    (see ``_rm_container_idempotent``). Returns ids removed or confirmed missing.
+    Call only while holding ``RealModelE2EHostLock``. Never touches containers
+    without that label. Uses ``_rm_container_idempotent`` (short retries).
     """
     if not docker:
         return []
-    age_limit = e2e_reaper_max_age_seconds() if max_age_seconds is None else int(max_age_seconds)
-    now = time.time() if now_epoch is None else float(now_epoch)
     listed = _run([docker, "ps", "-aq", "--filter", f"label={E2E_LABEL}={E2E_LABEL_VALUE}"])
     if listed.returncode != 0:
         return []
     removed: list[str] = []
     for cid in [c.strip() for c in listed.stdout.splitlines() if c.strip()]:
-        insp = _run([docker, "inspect", "-f", "{{.Created}}", cid])
-        if insp.returncode != 0:
-            continue
-        try:
-            created_epoch = parse_docker_created_epoch(insp.stdout or "")
-        except ValueError:
-            continue
-        if not e2e_container_is_stale(
-            created_epoch=created_epoch,
-            now_epoch=now,
-            max_age_seconds=age_limit,
-        ):
-            continue
-        # Confirmed missing after rm counts as success for reaper bookkeeping.
         fail = _rm_container_idempotent(cid)
         if fail is None:
             removed.append(cid)
     return removed
+
+
+def prepare_real_model_e2e_host(path: Path | None = None) -> RealModelE2EHostLock:
+    """Acquire the host lock, then reap all ``opr.e2e`` leftovers (ARB37-010)."""
+    lock = RealModelE2EHostLock.acquire(path=path)
+    try:
+        reap_all_e2e_containers()
+    except BaseException:
+        lock.release()
+        raise
+    return lock
 
 
 def load_upstream_key_from_model_proxy_env(env_file: Path) -> str:
@@ -331,8 +335,8 @@ def real_model_stack(upstream_key: str):
     if reason:
         pytest.skip(reason)
 
-    # ARB37-008: reap leftover E2E-labeled containers before creating anything.
-    reap_stale_e2e_containers()
+    # ARB37-010: one run per host; reap all opr.e2e leftovers only after lock.
+    host_lock = prepare_real_model_e2e_host()
 
     suffix = uuid.uuid4().hex[:8]
     volume = f"opr_e2e_real_co_{suffix}"
@@ -494,7 +498,10 @@ def real_model_stack(upstream_key: str):
             "tracker": tracker,
         }
     finally:
-        tracker.cleanup()
+        try:
+            tracker.cleanup()
+        finally:
+            host_lock.release()
 
 
 def _stage_fixture(volume: str, job_id: str) -> None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -11,21 +10,18 @@ from tests.test_real_model_e2e import (
     _RM_CONTAINER_MAX_ATTEMPTS,
     CI_INDICATOR_ENV_VARS,
     CI_SKIP_REASON,
-    E2E_JOB_TIMEOUT_SECONDS,
     E2E_LABEL,
     E2E_LABEL_VALUE,
-    E2E_REAPER_REQUEST_MARGIN_SECONDS,
-    E2E_REAPER_STARTUP_MARGIN_SECONDS,
+    E2E_LOCK_BUSY_MESSAGE,
+    RealModelE2EHostLock,
     ResourceTracker,
     _rm_container_idempotent,
     docker_env_passing_openai_key,
-    e2e_container_is_stale,
-    e2e_reaper_max_age_seconds,
     is_ci_environment,
     load_upstream_key_from_model_proxy_env,
-    parse_docker_created_epoch,
+    prepare_real_model_e2e_host,
     real_model_e2e_skip_reason,
-    reap_stale_e2e_containers,
+    reap_all_e2e_containers,
     review_job_id_filters,
     validate_review_output,
 )
@@ -337,80 +333,6 @@ def test_validate_review_output_rejects_missing_required_field() -> None:
         validate_review_output(incomplete)
 
 
-def test_e2e_container_stale_helper() -> None:
-    assert e2e_container_is_stale(created_epoch=0.0, now_epoch=1000.0, max_age_seconds=100)
-    assert not e2e_container_is_stale(created_epoch=950.0, now_epoch=1000.0, max_age_seconds=100)
-
-
-def test_parse_docker_created_epoch_z() -> None:
-    ts = parse_docker_created_epoch("2020-01-01T00:00:00.123456789Z")
-    assert ts == parse_docker_created_epoch("2020-01-01T00:00:00.123456+00:00")
-
-
-def test_reaper_removes_only_stale_e2e_containers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ARB37-008 reaper: only stale opr.e2e containers; fresh kept; filter excludes non-e2e."""
-    calls: list[list[str]] = []
-    # id-stale created long ago; id-fresh recent. Non-e2e never returned by label filter.
-    created = {
-        "id-stale": "2020-01-01T00:00:00.000000000Z",
-        "id-fresh": "2099-01-01T00:00:00.000000000Z",
-    }
-
-    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
-        calls.append(list(args))
-        joined = " ".join(args)
-
-        class R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        if "ps" in args and "-aq" in args:
-            assert f"label={E2E_LABEL}={E2E_LABEL_VALUE}" in joined
-            R.stdout = "id-stale\nid-fresh\n"
-            return R()
-        if "inspect" in args:
-            cid = args[-1]
-            R.stdout = created[cid] + "\n"
-            return R()
-        if "rm" in args and "-f" in args:
-            R.returncode = 0
-            return R()
-        return R()
-
-    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
-    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
-
-    removed = reap_stale_e2e_containers(now_epoch=1_700_000_000.0, max_age_seconds=600)
-    assert removed == ["id-stale"]
-    joined = [" ".join(c) for c in calls]
-    assert any(j.endswith("rm -f id-stale") for j in joined)
-    assert not any(j.endswith("rm -f id-fresh") for j in joined)
-    # Filter never lists non-e2e ids.
-    assert not any("id-other" in j for j in joined)
-
-
-def test_reaper_ignores_fresh_and_does_not_query_without_label(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[list[str]] = []
-
-    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
-        calls.append(list(args))
-
-        class R:
-            returncode = 0
-            stdout = "fresh-only\n" if "ps" in args else "2099-06-01T12:00:00Z\n"
-            stderr = ""
-
-        return R()
-
-    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
-    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
-    assert reap_stale_e2e_containers(now_epoch=1_700_000_000.0, max_age_seconds=600) == []
-    assert any(f"label={E2E_LABEL}={E2E_LABEL_VALUE}" in " ".join(c) for c in calls)
-
-
 def test_rm_container_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """ARB37-008: transient rm failure then success => no error label."""
     calls: list[list[str]] = []
@@ -461,33 +383,93 @@ def test_rm_container_persistent_failure_attempts_then_label(
     assert len(sleeps) == 2
 
 
-def test_reaper_threshold_ignores_ambient_max_review_timeout(
+def test_e2e_host_lock_second_acquire_fails(tmp_path: Path) -> None:
+    """ARB37-010: non-blocking second acquire fails while first is held."""
+    lock_path = tmp_path / "opr-real-model-e2e.lock"
+    first = RealModelE2EHostLock.acquire(path=lock_path)
+    try:
+        with pytest.raises(RuntimeError, match="another real-model E2E run"):
+            RealModelE2EHostLock.acquire(path=lock_path)
+    finally:
+        first.release()
+
+
+def test_e2e_host_lock_released_allows_reacquire(tmp_path: Path) -> None:
+    """ARB37-010: after release/close, another acquire succeeds."""
+    lock_path = tmp_path / "opr-real-model-e2e.lock"
+    first = RealModelE2EHostLock.acquire(path=lock_path)
+    first.release()
+    second = RealModelE2EHostLock.acquire(path=lock_path)
+    second.release()
+
+
+def test_reaper_removes_all_e2e_containers_regardless_of_age(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ARB37-009: ambient OPR_MAX_REVIEW_TIMEOUT_SECONDS must not change threshold."""
-    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "1")
-    expected = E2E_JOB_TIMEOUT_SECONDS + E2E_REAPER_STARTUP_MARGIN_SECONDS + E2E_REAPER_REQUEST_MARGIN_SECONDS
-    assert e2e_reaper_max_age_seconds() == expected
-
+    """ARB37-010: reaper removes every opr.e2e container (no age filter)."""
     calls: list[list[str]] = []
-    # Created just under threshold ago relative to now_epoch.
-    now = 1_700_000_000.0
-    age = expected - 10
-    from datetime import datetime
-
-    created = datetime.fromtimestamp(now - age, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
 
     def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
         calls.append(list(args))
 
         class R:
             returncode = 0
-            stdout = "young-e2e\n" if "ps" in args else created + "\n"
+            stdout = "id-old\nid-new\n" if "ps" in args else ""
             stderr = ""
 
         return R()
 
     monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
     monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
-    assert reap_stale_e2e_containers(now_epoch=now) == []
-    assert not any("rm -f young-e2e" in " ".join(c) for c in calls)
+    monkeypatch.setattr("tests.test_real_model_e2e._rm_sleep", lambda _s: None)
+    removed = reap_all_e2e_containers()
+    assert removed == ["id-old", "id-new"]
+    joined = [" ".join(c) for c in calls]
+    assert any(f"label={E2E_LABEL}={E2E_LABEL_VALUE}" in j for j in joined)
+    assert any(j.endswith("rm -f id-old") for j in joined)
+    assert any(j.endswith("rm -f id-new") for j in joined)
+
+
+def test_reaper_ignores_containers_without_e2e_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
+        class R:
+            returncode = 0
+            stdout = ""  # label filter returns nothing for non-e2e
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    assert reap_all_e2e_containers() == []
+    assert any(f"label={E2E_LABEL}={E2E_LABEL_VALUE}" in " ".join(c) for c in calls)
+    assert not any("rm -f" in " ".join(c) for c in calls)
+
+
+def test_prepare_reaps_only_after_acquiring_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-010: reaper is not invoked without the host lock."""
+    order: list[str] = []
+    lock_path = tmp_path / "opr-real-model-e2e.lock"
+
+    real_acquire = RealModelE2EHostLock.acquire
+
+    def tracking_acquire(path: Path | None = None) -> RealModelE2EHostLock:
+        order.append("acquire")
+        return real_acquire(path=path if path is not None else lock_path)
+
+    def tracking_reap() -> list[str]:
+        order.append("reap")
+        return []
+
+    monkeypatch.setattr(RealModelE2EHostLock, "acquire", staticmethod(tracking_acquire))
+    monkeypatch.setattr("tests.test_real_model_e2e.reap_all_e2e_containers", tracking_reap)
+    lock = prepare_real_model_e2e_host(path=lock_path)
+    try:
+        assert order == ["acquire", "reap"]
+        assert E2E_LOCK_BUSY_MESSAGE
+    finally:
+        lock.release()
