@@ -129,6 +129,7 @@ features:
 .\scripts\stack.ps1 -Observability up
 .\scripts\stack.ps1 -InProcess up
 .\scripts\stack.ps1 compose -- config
+.\scripts\stack.ps1 compose config
 .\scripts\stack.ps1 status
 .\scripts\stack.ps1 down
 ```
@@ -138,11 +139,12 @@ features:
 ./scripts/stack.sh --observability up
 ./scripts/stack.sh --in-process up
 ./scripts/stack.sh compose config
+./scripts/stack.sh compose -- config
 ./scripts/stack.sh status
 ./scripts/stack.sh down
 ```
 
-С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy), собирает сервис `review-image` (`--profile build-review`, тег `${OPR_REVIEW_IMAGE:-opr-review:local}`) и **требует** `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). `status` / `down` / `restart` / `logs` по-прежнему используют этот overlay без `-InProcess`, но **не** перепроверяют `LAUNCHER_TOKEN`. Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). Passthrough `compose` (`./scripts/stack.sh compose …`) использует те же `-f` без проверки токена/сборки образа. «Сырые» `docker compose -f …` — запасной non-helper вариант.
+С M4 команда `up` **по умолчанию** подключает `docker-compose.container-runner.yml` (launcher + model-proxy), собирает сервис `review-image` (`--profile build-review`, тег `${OPR_REVIEW_IMAGE:-opr-review:local}`) и **требует** `LAUNCHER_TOKEN` (≥ 16 символов) в окружении или `.env` (скрипт печатает, как сгенерировать токен; само значение не печатает). `status` / `down` / `restart` / `logs` по-прежнему используют этот overlay без `-InProcess`, но **не** перепроверяют `LAUNCHER_TOKEN`. Отказ от overlay: `-InProcess` / `--in-process` и `codex.runner_backend: in_process`. `-Container` / `--container` оставлены для совместимости (no-op). Passthrough `compose` (`./scripts/stack.sh compose …` / `.\scripts\stack.ps1 compose -- …`) использует те же `-f` без проверки токена/сборки образа; один необязательный ведущий `--` после `compose` поглощается (не передаётся в `docker compose`). «Сырые» `docker compose -f …` — запасной non-helper вариант.
 
 <!-- section: deployment-steps -->
 ## Шаги деплоя

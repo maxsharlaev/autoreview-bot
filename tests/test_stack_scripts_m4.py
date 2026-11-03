@@ -274,6 +274,11 @@ def test_stack_ps1_up_inprocess_skips_review_image_build(tmp_path: Path) -> None
     ("passthrough", "needle"),
     [
         (["up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["--", "up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["config"], "config"),
+        (["--", "config"], "config"),
+        (["run", "--rm", "migrate"], "run --rm migrate"),
+        (["--", "run", "--rm", "migrate"], "run --rm migrate"),
         (["down"], "down"),
         (["restart", "worker"], "restart worker"),
         (["logs", "-f", "api"], "logs -f api"),
@@ -288,8 +293,93 @@ def test_stack_ps1_compose_passthrough_verbatim(passthrough: list[str], needle: 
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert needle in recorded
+    # ARB36-004: optional leading `--` after compose must not reach docker compose.
+    assert "container-runner.yml -- " not in recorded
     assert "build-review" not in recorded
     assert "LAUNCHER_TOKEN" not in (completed.stdout + completed.stderr)
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_double_dash_forwards_second(tmp_path: Path) -> None:
+    """ARB38-001: only the first `--` after compose is consumed; a second is forwarded."""
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        extra_args=["--", "--", "up", "-d"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "--",
+        "up",
+        "-d",
+    ], recorded
+    assert "build-review" not in recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_non_leading_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: a `--` that is not the first arg after compose must be forwarded."""
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        extra_args=["run", "app", "command", "--", "--literal"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "run",
+        "app",
+        "command",
+        "--",
+        "--literal",
+    ], recorded
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
+def test_stack_ps1_compose_trailing_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: trailing `--` after a real subcommand is forwarded."""
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_windows(bin_dir, log)
+    completed = _run_ps1(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        extra_args=["config", "--"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "config",
+        "--",
+    ], recorded
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="stack.ps1 behavioral tests need Windows PowerShell")
@@ -401,6 +491,11 @@ def test_stack_sh_up_inprocess_skips_review_image_build(tmp_path: Path) -> None:
     ("passthrough", "needle"),
     [
         (["up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["--", "up", "-d", "--scale", "worker=2"], "up -d --scale worker=2"),
+        (["config"], "config"),
+        (["--", "config"], "config"),
+        (["run", "--rm", "migrate"], "run --rm migrate"),
+        (["--", "run", "--rm", "migrate"], "run --rm migrate"),
         (["down"], "down"),
         (["restart", "worker"], "restart worker"),
         (["logs", "-f", "api"], "logs -f api"),
@@ -417,8 +512,102 @@ def test_stack_sh_compose_passthrough_verbatim(passthrough: list[str], needle: s
     recorded = log.read_text(encoding="utf-8")
     assert "docker-compose.container-runner.yml" in recorded
     assert needle in recorded
+    # ARB36-004: optional leading `--` after compose must not reach docker compose.
+    assert "container-runner.yml -- " not in recorded
     assert "build-review" not in recorded
     assert "LAUNCHER_TOKEN" not in (completed.stdout + completed.stderr)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_double_dash_forwards_second(tmp_path: Path) -> None:
+    """ARB38-001: only the first `--` after compose is consumed; a second is forwarded."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["--", "--", "up", "-d"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "--",
+        "up",
+        "-d",
+    ], recorded
+    assert "build-review" not in recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_non_leading_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: a `--` that is not the first arg after compose must be forwarded."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["run", "app", "command", "--", "--literal"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "run",
+        "app",
+        "command",
+        "--",
+        "--literal",
+    ], recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_stack_sh_compose_trailing_double_dash(tmp_path: Path) -> None:
+    """ARB38-002: trailing `--` after a real subcommand is forwarded."""
+    bash = _git_bash() or shutil.which("bash")
+    assert bash
+    home, log = _prepare_stack_home(tmp_path)
+    bin_dir = tmp_path / "bin"
+    _write_docker_stub_posix(bin_dir, log)
+    completed = _run_sh(
+        "compose",
+        home=home,
+        bin_dir=bin_dir,
+        bash=bash,
+        extra_args=["config", "--"],
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recorded = log.read_text(encoding="utf-8").strip()
+    tokens = recorded.split()
+    assert tokens == [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.container-runner.yml",
+        "config",
+        "--",
+    ], recorded
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
