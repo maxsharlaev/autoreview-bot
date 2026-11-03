@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import secrets
 from dataclasses import dataclass
@@ -11,15 +9,20 @@ from typing import Literal
 
 from redis.asyncio import Redis
 
+# Re-export for callers / tests
+from app.services.admin_root_crypto import (  # noqa: F401
+    clear_root_fingerprint_cache,
+    compute_root_fingerprint,
+    get_root_fingerprint,
+    warm_root_fingerprint_cache,
+)
+
 AdminRole = Literal["admin", "viewer"]
 AdminKind = Literal["root", "user"]
 
 SESSION_KEY_PREFIX = "admin:session:"
 RATE_LOGIN_PREFIX = "admin:rl:login:"
 RATE_IP_PREFIX = "admin:rl:ip:"
-
-# Application pepper for root credential fingerprints (not a password; never logged).
-_ROOT_FINGERPRINT_PEPPER = b"opr-admin-root-fingerprint-v1"
 
 
 @dataclass(frozen=True)
@@ -35,12 +38,6 @@ class AdminSession:
 
 def _session_key(token: str) -> str:
     return f"{SESSION_KEY_PREFIX}{token}"
-
-
-def compute_root_fingerprint(login: str, password: str) -> str:
-    """HMAC-SHA256 of root login+password; never store the password itself."""
-    material = f"{login}\0{password}".encode()
-    return hmac.new(_ROOT_FINGERPRINT_PEPPER, material, hashlib.sha256).hexdigest()
 
 
 async def create_session(
@@ -126,10 +123,7 @@ async def check_and_bump_rate_limit(
     per_ip: int,
     window_seconds: int,
 ) -> bool:
-    """Return True if the attempt is allowed; bump counters either way when under limit.
-
-    Returns False when limited (caller should not reveal which bucket tripped).
-    """
+    """Return True if the attempt is allowed; bump counters either way when under limit."""
     login_key = f"{RATE_LOGIN_PREFIX}{(login or '').strip().lower() or '_'}"
     ip_key = f"{RATE_IP_PREFIX}{(ip or '').strip() or '_'}"
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from app.services.admin_passwords import MIN_ADMIN_PASSWORD_LENGTH, password_too_short
+from app.services.admin_passwords import MIN_ROOT_PASSWORD_LENGTH, root_password_too_short
+from app.services.admin_root_crypto import clear_root_fingerprint_cache, warm_root_fingerprint_cache
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,9 +25,10 @@ def validate_admin_env(settings: Settings) -> None:
 
     When ADMIN_API_ENABLED is false, root env vars are ignored (no startup failure).
     When enabled: root is optional, but login/password must be both set or both empty,
-    and a set password must be at least MIN_ADMIN_PASSWORD_LENGTH characters.
+    and a set password must be at least MIN_ROOT_PASSWORD_LENGTH characters.
     """
     if settings.admin_api_enabled is not True:
+        clear_root_fingerprint_cache()
         return
 
     raw_login = settings.admin_root_login
@@ -38,8 +40,13 @@ def validate_admin_env(settings: Settings) -> None:
 
     if has_login ^ has_password:
         raise AdminApiConfigError("ADMIN_ROOT_LOGIN and ADMIN_ROOT_PASSWORD must both be set, or both empty")
-    if has_password and password_too_short(password):
-        raise AdminApiConfigError(f"ADMIN_ROOT_PASSWORD must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters")
+    if has_password and root_password_too_short(password):
+        raise AdminApiConfigError(f"ADMIN_ROOT_PASSWORD must be at least {MIN_ROOT_PASSWORD_LENGTH} characters")
+
+    if has_login and has_password:
+        warm_root_fingerprint_cache(login, password)
+    else:
+        clear_root_fingerprint_cache()
 
 
 def log_admin_root_status(settings: Settings) -> None:

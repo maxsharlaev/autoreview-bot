@@ -152,14 +152,14 @@ Opt-in JSON under `/api/v1/admin` (`ADMIN_API_ENABLED`, default `false`). When d
 CSRF: cookie is `SameSite=Strict` and mutating endpoints accept JSON bodies only — keep the admin origin first-party; no separate CSRF token in this MVP.
 
 **Principals:**
-- **Root** from `ADMIN_ROOT_LOGIN` + `ADMIN_ROOT_PASSWORD` (env only, never inserted into `admin_users`). Role `admin`. Stays usable even when DB users exist (password-recovery path). Disable by removing both env vars and restarting. Startup fails if only one of the pair is set, if the password is shorter than 12 characters, or if the root login collides with a DB user login.
+- **Root** from `ADMIN_ROOT_LOGIN` + `ADMIN_ROOT_PASSWORD` (env only, never inserted into `admin_users`). Role `admin`. Stays usable even when DB users exist (password-recovery path). Disable by removing both env vars and restarting. Startup fails if only one of the pair is set, if the password is shorter than 16 characters, or if the root login collides with a DB user login.
 - **DB users** in `admin_users` (argon2 hashes): roles `admin` or `viewer`. `admin` may list/create/update users and reset passwords; deactivating a user invalidates their Redis sessions. `viewer` may only call read-only endpoints.
 
 **Read-only (viewer+):** `GET /runs` (filters `owner_id`, `repo`, `status`, `limit`, `offset`; newest first; safe fields only — no summaries/tokens), `GET /runs/{id}`, `GET /queue` (reuses `ops_snapshot`, optional `owner_id`).
 
-Sessions carry a `session_version` (DB users) or a root credential fingerprint (HMAC of current `ADMIN_ROOT_*`); password reset, role change, and deactivation bump the version so older cookies stop working. Changing or clearing root env invalidates root sessions the same way.
+Sessions carry a `session_version` (DB users) or a root credential fingerprint (argon2-derived key + HMAC of current `ADMIN_ROOT_*`); password reset, role change, and deactivation bump the version so older cookies stop working. Changing or clearing root env invalidates root sessions the same way.
 
-Login rate limiting keys the IP from `request.client.host` only. Behind a reverse proxy enable uvicorn `--proxy-headers` via `UVICORN_PROXY_HEADERS=1` and set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy (see ENVIRONMENT).
+Login rate limiting keys the IP from `request.client.host` only. By default the API process uses uvicorn `--no-proxy-headers`. Behind a reverse proxy enable `--proxy-headers` via `UVICORN_PROXY_HEADERS=1` and set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy (see ENVIRONMENT).
 
 Login failures use a generic `401 invalid credentials`; rate limits return `429`. `REVIEW_API_KEY` / owner API keys never authenticate the admin API.
 

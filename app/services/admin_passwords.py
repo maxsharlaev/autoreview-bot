@@ -7,7 +7,10 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 
 _HASHER = PasswordHasher()
 
+# DB admin users
 MIN_ADMIN_PASSWORD_LENGTH = 12
+# Env-only root (startup validation)
+MIN_ROOT_PASSWORD_LENGTH = 16
 
 
 def hash_password(password: str) -> str:
@@ -21,5 +24,9 @@ def verify_password(password_hash: str, password: str) -> bool:
         return False
 
 
-def password_too_short(password: str) -> bool:
-    return len(password or "") < MIN_ADMIN_PASSWORD_LENGTH
+def password_too_short(password: str, *, minimum: int = MIN_ADMIN_PASSWORD_LENGTH) -> bool:
+    return len(password or "") < minimum
+
+
+def root_password_too_short(password: str) -> bool:
+    return password_too_short(password, minimum=MIN_ROOT_PASSWORD_LENGTH)

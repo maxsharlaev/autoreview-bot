@@ -1,11 +1,12 @@
 #!/bin/sh
-# Launch the FastAPI process. Proxy headers stay off unless explicitly enabled.
+# Launch the FastAPI process.
+# Default: --no-proxy-headers (do not trust X-Forwarded-* from the peer).
+# Enable only with UVICORN_PROXY_HEADERS=1 and UVICORN_FORWARDED_ALLOW_IPS=<proxy>.
 set -eu
-EXTRA=""
+EXTRA="--no-proxy-headers"
 case "${UVICORN_PROXY_HEADERS:-0}" in
   1|true|TRUE|yes|YES)
-    EXTRA="$EXTRA --proxy-headers"
-    # Empty allow-list would trust all; require an explicit allow list when enabling.
+    EXTRA="--proxy-headers"
     if [ -n "${UVICORN_FORWARDED_ALLOW_IPS:-}" ]; then
       EXTRA="$EXTRA --forwarded-allow-ips=${UVICORN_FORWARDED_ALLOW_IPS}"
     else

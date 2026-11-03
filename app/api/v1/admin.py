@@ -35,12 +35,13 @@ from app.services.admin_passwords import (
     password_too_short,
     verify_password,
 )
+from app.services.admin_root_crypto import get_root_fingerprint
 from app.services.admin_sessions import (
     check_and_bump_rate_limit,
-    compute_root_fingerprint,
     create_session,
     destroy_session,
 )
+from app.services.admin_user_ops import reset_password_atomic, update_user_atomic
 
 router = APIRouter()
 
@@ -166,7 +167,7 @@ async def login(
             authenticated_kind = "root"
             role = "admin"
             user_id = None
-            root_fingerprint = compute_root_fingerprint(root_login, expected)
+            root_fingerprint = get_root_fingerprint(root_login, expected)
     else:
         db_user = (await session.execute(select(AdminUser).where(AdminUser.login == login_name))).scalar_one_or_none()
         dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -285,20 +286,31 @@ async def update_user(
     if user is None:
         raise HTTPException(status_code=404, detail="user not found")
 
+    new_role = None
+    new_active = None
     bump = False
     if body.role is not None and body.role != user.role:
-        user.role = body.role
+        new_role = body.role
         bump = True
     if body.is_active is not None and body.is_active != user.is_active:
-        user.is_active = body.is_active
+        new_active = body.is_active
         if not body.is_active:
             bump = True
-    if bump:
-        user.session_version = int(user.session_version) + 1
 
+    if new_role is None and new_active is None:
+        return _user_public(user)
+
+    updated = await update_user_atomic(
+        session,
+        user_id=user_id,
+        role=new_role,
+        is_active=new_active,
+        bump_session=bump,
+    )
     await session.commit()
-    await session.refresh(user)
-    return _user_public(user)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    return _user_public(updated)
 
 
 @router.post("/users/{user_id}/reset-password", response_model=AdminUserPublic)
@@ -315,14 +327,15 @@ async def reset_password(
             status_code=422,
             detail=f"password must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters",
         )
-    user = (await session.execute(select(AdminUser).where(AdminUser.id == user_id))).scalar_one_or_none()
-    if user is None:
+    updated = await reset_password_atomic(
+        session,
+        user_id=user_id,
+        password_hash=hash_password(body.password),
+    )
+    if updated is None:
         raise HTTPException(status_code=404, detail="user not found")
-    user.password_hash = hash_password(body.password)
-    user.session_version = int(user.session_version) + 1
     await session.commit()
-    await session.refresh(user)
-    return _user_public(user)
+    return _user_public(updated)
 
 
 @router.get("/runs", response_model=AdminRunListResponse)

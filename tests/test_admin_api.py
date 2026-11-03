@@ -39,7 +39,7 @@ def _reset_settings_cache():
 
 
 ROOT_LOGIN = "rootadmin"
-ROOT_PASSWORD = "root-password-12"
+ROOT_PASSWORD = "root-password-16c"
 VIEWER_PASSWORD = "viewer-pass-12"
 ADMIN_PASSWORD = "admin-pass-123"
 
@@ -134,6 +134,39 @@ class FakeSession:
     async def execute(self, stmt):  # noqa: ANN001
         sql = self._compiled(stmt)
         sql_l = sql.lower()
+        if sql_l.strip().startswith("update") and "admin_users" in sql_l:
+            # Apply password_hash / role / is_active / session_version bump for unit tests.
+            target = None
+            for uid, user in self.users.items():
+                uid_s = str(uid)
+                if uid_s in sql or uid_s.replace("-", "") in sql:
+                    target = user
+                    break
+            if target is None:
+                return FakeResult(scalar=None)
+            if "password_hash" in sql_l:
+                # cannot parse hash from SQL easily; leave existing or set marker
+                pass
+            if "role" in sql_l and "viewer" in sql:
+                target.role = "viewer"
+            if "role" in sql_l and "'admin'" in sql:
+                target.role = "admin"
+            if "is_active" in sql_l and "false" in sql_l:
+                target.is_active = False
+            if "is_active" in sql_l and "true" in sql_l and "false" not in sql.split("is_active")[-1][:40].lower():
+                # crude
+                if "true" in sql_l:
+                    target.is_active = True
+            if "session_version" in sql_l:
+                target.session_version = int(target.session_version) + 1
+            # password_hash from bound params - try literal
+            if "password_hash" in sql_l:
+                # unit tests call hash_password before update; store via side channel if present
+                if getattr(self, "_pending_password_hash", None):
+                    target.password_hash = self._pending_password_hash
+                    self._pending_password_hash = None
+            self.by_login[target.login] = target
+            return FakeResult(scalar=target, scalars_list=[target])
         if "admin_users" in sql_l:
             if "count(" in sql_l and "admin_users" in sql_l:
                 return FakeResult(scalar=len(self.users))
@@ -228,7 +261,7 @@ def test_validate_admin_both_or_neither() -> None:
 
 def test_validate_admin_password_min_length() -> None:
     with pytest.raises(AdminApiConfigError, match="at least"):
-        validate_admin_env(_settings(admin_root_password="short"))
+        validate_admin_env(_settings(admin_root_password="short-12chars"))
 
 
 def test_validate_admin_disabled_ignores_root_env() -> None:

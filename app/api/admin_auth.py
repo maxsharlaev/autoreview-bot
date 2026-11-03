@@ -10,11 +10,8 @@ from typing import Annotated, Literal
 from fastapi import Cookie, Depends, HTTPException, Request
 
 from app.config import get_settings
-from app.services.admin_sessions import (
-    compute_root_fingerprint,
-    destroy_session,
-    load_session,
-)
+from app.services.admin_root_crypto import get_root_fingerprint
+from app.services.admin_sessions import destroy_session, load_session
 
 AdminRole = Literal["admin", "viewer"]
 
@@ -39,6 +36,12 @@ async def get_admin_session_token(
     return opr_admin_session
 
 
+def _hmac_eq(left: str, right: str) -> bool:
+    if len(left) != len(right):
+        return False
+    return hmac.compare_digest(left, right)
+
+
 async def require_admin_principal(
     request: Request,
     token: Annotated[str | None, Depends(get_admin_session_token)],
@@ -58,9 +61,9 @@ async def require_admin_principal(
         if not root_login or not root_password:
             await destroy_session(redis, token)
             raise HTTPException(status_code=401, detail="not authenticated")
-        expected = compute_root_fingerprint(root_login, root_password)
+        expected = get_root_fingerprint(root_login, root_password)
         presented = session.root_fingerprint or ""
-        if not hmac_compare(expected, presented) or not hmac_compare(session.login, root_login):
+        if not _hmac_eq(expected, presented) or not _hmac_eq(session.login, root_login):
             await destroy_session(redis, token)
             raise HTTPException(status_code=401, detail="not authenticated")
         return AdminPrincipal(
@@ -98,12 +101,6 @@ async def require_admin_principal(
         user_id=str(user.id),
         session_token=session.token,
     )
-
-
-def hmac_compare(left: str, right: str) -> bool:
-    if len(left) != len(right):
-        return False
-    return hmac.compare_digest(left, right)
 
 
 def require_admin_role(principal: AdminPrincipal) -> AdminPrincipal:

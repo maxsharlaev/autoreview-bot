@@ -152,14 +152,14 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 CSRF: cookie `SameSite=Strict`, мутирующие методы принимают только JSON — держите админку first-party; отдельный CSRF-токен в этом MVP не вводим.
 
 **Principals:**
-- **Root** из `ADMIN_ROOT_LOGIN` + `ADMIN_ROOT_PASSWORD` (только env, никогда не пишется в `admin_users`). Роль `admin`. Остаётся доступен даже при наличии DB-пользователей (recovery). Отключение — убрать оба env и перезапустить. Старт падает, если задан только один из пары, пароль короче 12 символов, или login root совпадает с DB-пользователем.
+- **Root** из `ADMIN_ROOT_LOGIN` + `ADMIN_ROOT_PASSWORD` (только env, никогда не пишется в `admin_users`). Роль `admin`. Остаётся доступен даже при наличии DB-пользователей (recovery). Отключение — убрать оба env и перезапустить. Старт падает, если задан только один из пары, пароль короче 16 символов, или login root совпадает с DB-пользователем.
 - **DB-пользователи** в `admin_users` (хеши argon2): роли `admin` или `viewer`. `admin` управляет пользователями; деактивация инвалидирует их Redis-сессии. `viewer` — только read-only.
 
 **Read-only (viewer+):** `GET /runs` (фильтры `owner_id`, `repo`, `status`, `limit`, `offset`; сначала новые; только безопасные поля), `GET /runs/{id}`, `GET /queue` (`ops_snapshot`, опциональный `owner_id`).
 
-В сессии хранится `session_version` (DB-пользователи) или fingerprint root (HMAC текущих `ADMIN_ROOT_*`); сброс пароля, смена роли и деактивация увеличивают версию — старые cookie перестают работать. Смена/очистка root env инвалидирует root-сессии так же.
+В сессии хранится `session_version` (DB-пользователи) или fingerprint root (argon2-ключ + HMAC текущих `ADMIN_ROOT_*`); сброс пароля, смена роли и деактивация увеличивают версию — старые cookie перестают работать. Смена/очистка root env инвалидирует root-сессии так же.
 
-Rate limit по IP берёт только `request.client.host`. За reverse proxy включите uvicorn `--proxy-headers` через `UVICORN_PROXY_HEADERS=1` и задайте `UVICORN_FORWARDED_ALLOW_IPS` (см. ENVIRONMENT).
+Rate limit по IP берёт только `request.client.host`. По умолчанию API использует uvicorn `--no-proxy-headers`. За reverse proxy включите `--proxy-headers` через `UVICORN_PROXY_HEADERS=1` и задайте `UVICORN_FORWARDED_ALLOW_IPS` (см. ENVIRONMENT).
 
 Ошибки логина — общий `401 invalid credentials`; лимиты — `429`. `REVIEW_API_KEY` / owner API keys админку не аутентифицируют.
 
