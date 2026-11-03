@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -27,7 +28,7 @@ import pytest
 docker = shutil.which("docker")
 enabled = os.environ.get("OPR_REAL_MODEL_E2E", "").strip().lower() in {"1", "true", "yes"}
 
-CI_SKIP_REASON = "real-model E2E is blocked when CI or GITHUB_ACTIONS is set (even with OPR_REAL_MODEL_E2E=1)"
+CI_SKIP_REASON = "real-model E2E is blocked when a CI indicator is set (even with OPR_REAL_MODEL_E2E=1)"
 OPT_IN_SKIP_REASON = "Set OPR_REAL_MODEL_E2E=1 with Docker available (manual; not for CI)"
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,19 @@ REVIEW_SCHEMA = ROOT / "schemas" / "review_output.json"
 DEFAULT_MODEL = os.environ.get("OPR_REAL_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 HEAD_SHA = "deadbeefcafebabe0123456789abcdef01234567"
 MODEL_PROXY_ENV_NAME = "model-proxy.env"
+
+CI_INDICATOR_ENV_VARS = (
+    "CI",
+    "GITHUB_ACTIONS",
+    "JENKINS_URL",
+    "TF_BUILD",
+    "TEAMCITY_VERSION",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "CIRCLECI",
+)
+E2E_LABEL = "opr.e2e"
+E2E_LABEL_VALUE = "1"
 
 
 def _env_truthy(value: str | None) -> bool:
@@ -48,9 +62,9 @@ def _env_truthy(value: str | None) -> bool:
 
 
 def is_ci_environment(environ: dict[str, str] | None = None) -> bool:
-    """True when ``CI`` or ``GITHUB_ACTIONS`` is set/truthy (ARB37-006)."""
+    """True when a standard CI indicator env var is set/truthy (ARB37-006)."""
     env = os.environ if environ is None else environ
-    return _env_truthy(env.get("CI")) or _env_truthy(env.get("GITHUB_ACTIONS"))
+    return any(_env_truthy(env.get(name)) for name in CI_INDICATOR_ENV_VARS)
 
 
 def real_model_e2e_skip_reason(
@@ -99,6 +113,82 @@ def validate_review_output(output: object) -> None:
     """Validate parsed review JSON against ``schemas/review_output.json`` (ARB37-007)."""
     schema = json.loads(REVIEW_SCHEMA.read_text(encoding="utf-8"))
     jsonschema.validate(instance=output, schema=schema)
+
+
+def e2e_reaper_max_age_seconds() -> int:
+    """Stale threshold: max review timeout + orphan grace (ARB37-008 reaper)."""
+    from app.launcher.timeouts import min_review_container_orphan_ttl_seconds
+
+    return int(min_review_container_orphan_ttl_seconds())
+
+
+def parse_docker_created_epoch(created: str) -> float:
+    """Parse Docker ``Created`` RFC3339 into UTC epoch seconds."""
+    text = (created or "").strip()
+    if not text:
+        raise ValueError("empty Created timestamp")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    if "." in text:
+        head, rest = text.split(".", 1)
+        digits = ""
+        tz = ""
+        for i, ch in enumerate(rest):
+            if ch.isdigit():
+                digits += ch
+            else:
+                tz = rest[i:]
+                break
+        text = f"{head}.{(digits + '000000')[:6]}{tz}"
+    return datetime.fromisoformat(text).timestamp()
+
+
+def e2e_container_is_stale(
+    *,
+    created_epoch: float,
+    now_epoch: float,
+    max_age_seconds: int,
+) -> bool:
+    return (now_epoch - created_epoch) > max_age_seconds
+
+
+def reap_stale_e2e_containers(
+    *,
+    now_epoch: float | None = None,
+    max_age_seconds: int | None = None,
+) -> list[str]:
+    """Remove ``opr.e2e=1`` containers older than max review timeout + margin.
+
+    Never touches containers without that label. Best-effort; no retries.
+    Returns ids that were successfully removed (or confirmed missing after rm).
+    """
+    if not docker:
+        return []
+    age_limit = e2e_reaper_max_age_seconds() if max_age_seconds is None else int(max_age_seconds)
+    now = time.time() if now_epoch is None else float(now_epoch)
+    listed = _run([docker, "ps", "-aq", "--filter", f"label={E2E_LABEL}={E2E_LABEL_VALUE}"])
+    if listed.returncode != 0:
+        return []
+    removed: list[str] = []
+    for cid in [c.strip() for c in listed.stdout.splitlines() if c.strip()]:
+        insp = _run([docker, "inspect", "-f", "{{.Created}}", cid])
+        if insp.returncode != 0:
+            continue
+        try:
+            created_epoch = parse_docker_created_epoch(insp.stdout or "")
+        except ValueError:
+            continue
+        if not e2e_container_is_stale(
+            created_epoch=created_epoch,
+            now_epoch=now,
+            max_age_seconds=age_limit,
+        ):
+            continue
+        # Confirmed missing after rm counts as success for reaper bookkeeping.
+        fail = _rm_container_idempotent(cid)
+        if fail is None:
+            removed.append(cid)
+    return removed
 
 
 def load_upstream_key_from_model_proxy_env(env_file: Path) -> str:
@@ -222,6 +312,9 @@ def real_model_stack(upstream_key: str):
     if reason:
         pytest.skip(reason)
 
+    # ARB37-008: reap leftover E2E-labeled containers before creating anything.
+    reap_stale_e2e_containers()
+
     suffix = uuid.uuid4().hex[:8]
     volume = f"opr_e2e_real_co_{suffix}"
     net_review = f"opr_e2e_real_review_{suffix}"
@@ -292,6 +385,8 @@ def real_model_stack(upstream_key: str):
             "PROXY_UPSTREAM_HOST=api.openai.com",
             "-p",
             "127.0.0.1::8081",
+            "--label",
+            f"{E2E_LABEL}={E2E_LABEL_VALUE}",
             proxy_image,
         ]
         assert upstream_key not in " ".join(proxy_argv)
@@ -334,6 +429,8 @@ def real_model_stack(upstream_key: str):
                 f"{volume}:/var/opr/checkouts",
                 "-p",
                 "127.0.0.1::8080",
+                "--label",
+                f"{E2E_LABEL}={E2E_LABEL_VALUE}",
                 launcher_image,
             ]
         )

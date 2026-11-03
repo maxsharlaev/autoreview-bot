@@ -229,7 +229,7 @@ To serve another GitHub organization from the same deployment, add an `owners:` 
 <!-- section: manual-real-model-e2e -->
 ## Manual real-model E2E (opt-in)
 
-Happy-path check that a review through the **container** backend + **model-proxy** completes with a real upstream model. Skipped unless you set `OPR_REAL_MODEL_E2E=1`. **Never runs in CI** (forced skip when `CI`/`GITHUB_ACTIONS` is set, even with the flag; CI stays green without any model key).
+Happy-path check that a review through the **container** backend + **model-proxy** completes with a real upstream model. Skipped unless you set `OPR_REAL_MODEL_E2E=1`. **Never runs in CI** (forced skip when a standard CI indicator is set — `CI`, `GITHUB_ACTIONS`, `JENKINS_URL`, `TF_BUILD`, `TEAMCITY_VERSION`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI` — even with the flag; CI stays green without any model key).
 
 <!-- section: real-model-e2e-prerequisites -->
 ### Prerequisites
@@ -258,6 +258,8 @@ OPR_REAL_MODEL_E2E=1 python -m pytest tests/test_real_model_e2e.py -q
 ```
 
 Without the flag the test is collected and skipped (safe for CI / full suite).
+
+If cleanup fails, leftover containers labeled `opr.e2e=1` are removed on the next run when older than max review timeout + margin; or remove the listed containers manually. Review containers are scoped by `opr.job_id` (the launcher does not set `opr.e2e`).
 
 <!-- section: real-model-e2e-expected-cost -->
 ### Expected cost

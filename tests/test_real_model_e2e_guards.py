@@ -7,13 +7,19 @@ from typing import Any
 
 import pytest
 from tests.test_real_model_e2e import (
+    CI_INDICATOR_ENV_VARS,
     CI_SKIP_REASON,
+    E2E_LABEL,
+    E2E_LABEL_VALUE,
     ResourceTracker,
     _rm_container_idempotent,
     docker_env_passing_openai_key,
+    e2e_container_is_stale,
     is_ci_environment,
     load_upstream_key_from_model_proxy_env,
+    parse_docker_created_epoch,
     real_model_e2e_skip_reason,
+    reap_stale_e2e_containers,
     review_job_id_filters,
     validate_review_output,
 )
@@ -194,18 +200,18 @@ def test_tracker_removes_name_registered_before_failed_run(monkeypatch: pytest.M
     assert any(args == ["/usr/bin/docker", "rm", "-f", name] for args in calls)
 
 
-@pytest.mark.parametrize(
-    "ci_env",
-    [
-        {"CI": "true"},
-        {"CI": "1"},
-        {"GITHUB_ACTIONS": "true"},
-        {"CI": "true", "GITHUB_ACTIONS": "true"},
-    ],
-)
-def test_flag_plus_ci_skips_real_model_e2e(ci_env: dict[str, str]) -> None:
-    """ARB37-006: OPR_REAL_MODEL_E2E=1 still skips when CI indicators are set."""
-    env = {"OPR_REAL_MODEL_E2E": "1", **ci_env}
+def _ci_indicator_sample(name: str) -> str:
+    if name == "JENKINS_URL":
+        return "https://jenkins.example/"
+    if name == "TEAMCITY_VERSION":
+        return "2024.1"
+    return "true"
+
+
+@pytest.mark.parametrize("ci_key", list(CI_INDICATOR_ENV_VARS))
+def test_flag_plus_ci_skips_real_model_e2e(ci_key: str) -> None:
+    """ARB37-006: OPR_REAL_MODEL_E2E=1 still skips when each CI indicator is set."""
+    env = {"OPR_REAL_MODEL_E2E": "1", ci_key: _ci_indicator_sample(ci_key)}
     assert is_ci_environment(env)
     reason = real_model_e2e_skip_reason(environ=env, docker_bin="/usr/bin/docker")
     assert reason == CI_SKIP_REASON
@@ -314,3 +320,77 @@ def test_validate_review_output_rejects_missing_required_field() -> None:
     }
     with pytest.raises(jsonschema.ValidationError):
         validate_review_output(incomplete)
+
+
+def test_e2e_container_stale_helper() -> None:
+    assert e2e_container_is_stale(created_epoch=0.0, now_epoch=1000.0, max_age_seconds=100)
+    assert not e2e_container_is_stale(created_epoch=950.0, now_epoch=1000.0, max_age_seconds=100)
+
+
+def test_parse_docker_created_epoch_z() -> None:
+    ts = parse_docker_created_epoch("2020-01-01T00:00:00.123456789Z")
+    assert ts == parse_docker_created_epoch("2020-01-01T00:00:00.123456+00:00")
+
+
+def test_reaper_removes_only_stale_e2e_containers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-008 reaper: only stale opr.e2e containers; fresh kept; filter excludes non-e2e."""
+    calls: list[list[str]] = []
+    # id-stale created long ago; id-fresh recent. Non-e2e never returned by label filter.
+    created = {
+        "id-stale": "2020-01-01T00:00:00.000000000Z",
+        "id-fresh": "2099-01-01T00:00:00.000000000Z",
+    }
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+        joined = " ".join(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if "ps" in args and "-aq" in args:
+            assert f"label={E2E_LABEL}={E2E_LABEL_VALUE}" in joined
+            R.stdout = "id-stale\nid-fresh\n"
+            return R()
+        if "inspect" in args:
+            cid = args[-1]
+            R.stdout = created[cid] + "\n"
+            return R()
+        if "rm" in args and "-f" in args:
+            R.returncode = 0
+            return R()
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+
+    removed = reap_stale_e2e_containers(now_epoch=1_700_000_000.0, max_age_seconds=600)
+    assert removed == ["id-stale"]
+    joined = [" ".join(c) for c in calls]
+    assert any(j.endswith("rm -f id-stale") for j in joined)
+    assert not any(j.endswith("rm -f id-fresh") for j in joined)
+    # Filter never lists non-e2e ids.
+    assert not any("id-other" in j for j in joined)
+
+
+def test_reaper_ignores_fresh_and_does_not_query_without_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
+        class R:
+            returncode = 0
+            stdout = "fresh-only\n" if "ps" in args else "2099-06-01T12:00:00Z\n"
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    assert reap_stale_e2e_containers(now_epoch=1_700_000_000.0, max_age_seconds=600) == []
+    assert any(f"label={E2E_LABEL}={E2E_LABEL_VALUE}" in " ".join(c) for c in calls)
