@@ -194,46 +194,36 @@ async def collect_runtime_gauges(
 
 
 async def ops_snapshot(
-    session_factory: async_sessionmaker, redis: Any, *, stale_minutes: int = _STALE_MINUTES
+    session_factory: async_sessionmaker,
+    redis: Any,
+    *,
+    stale_minutes: int = _STALE_MINUTES,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(minutes=stale_minutes)
+    owner = (owner_id or "").strip() or None
     async with session_factory() as session:
-        inflight_rows = (
-            await session.execute(
-                select(ReviewRun.status, func.count(ReviewRun.id))
-                .where(ReviewRun.status.in_(("pending", "running")))
-                .group_by(ReviewRun.status)
-            )
-        ).all()
-        stale_runs = (
-            (
-                await session.execute(
-                    select(ReviewRun)
-                    .where(ReviewRun.status.in_(("pending", "running")), ReviewRun.updated_at < cutoff)
-                    .order_by(ReviewRun.updated_at.asc())
-                    .limit(20)
-                )
-            )
-            .scalars()
-            .all()
+        inflight_q = select(ReviewRun.status, func.count(ReviewRun.id)).where(
+            ReviewRun.status.in_(("pending", "running"))
         )
-        last_failures = (
-            (
-                await session.execute(
-                    select(ReviewRun)
-                    .where(ReviewRun.status == "failed")
-                    .order_by(ReviewRun.updated_at.desc())
-                    .limit(10)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        last_ok = (
-            await session.execute(
-                select(ReviewRun).where(ReviewRun.status == "completed").order_by(ReviewRun.updated_at.desc()).limit(1)
-            )
-        ).scalar_one_or_none()
+        if owner:
+            inflight_q = inflight_q.where(ReviewRun.owner_id == owner)
+        inflight_rows = (await session.execute(inflight_q.group_by(ReviewRun.status))).all()
+
+        stale_q = select(ReviewRun).where(ReviewRun.status.in_(("pending", "running")), ReviewRun.updated_at < cutoff)
+        if owner:
+            stale_q = stale_q.where(ReviewRun.owner_id == owner)
+        stale_runs = (await session.execute(stale_q.order_by(ReviewRun.updated_at.asc()).limit(20))).scalars().all()
+
+        fail_q = select(ReviewRun).where(ReviewRun.status == "failed")
+        if owner:
+            fail_q = fail_q.where(ReviewRun.owner_id == owner)
+        last_failures = (await session.execute(fail_q.order_by(ReviewRun.updated_at.desc()).limit(10))).scalars().all()
+
+        ok_q = select(ReviewRun).where(ReviewRun.status == "completed")
+        if owner:
+            ok_q = ok_q.where(ReviewRun.owner_id == owner)
+        last_ok = (await session.execute(ok_q.order_by(ReviewRun.updated_at.desc()).limit(1))).scalar_one_or_none()
 
     in_flight = {"pending": 0, "running": 0}
     for status, count in inflight_rows:
@@ -252,6 +242,7 @@ async def ops_snapshot(
 def _run_brief(run: ReviewRun) -> dict[str, Any]:
     return {
         "review_run_id": str(run.id),
+        "owner_id": run.owner_id,
         "status": run.status,
         "error_code": run.error_code,
         "trigger": run.trigger,

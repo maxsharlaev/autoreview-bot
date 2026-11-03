@@ -35,6 +35,15 @@ Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migr
 | Variable | Default | Read by | Description |
 | --- | --- | --- | --- |
 | `REVIEW_API_KEY` | `""` | api | Operator key for `/api/v1/reviews*` and `/api/v1/ops/status`, valid for every owner. Generate a long random value; it is not a GitHub token. Without it those endpoints answer `401`. |
+| `ADMIN_API_ENABLED` | `false` | api | When `true`, mounts `/api/v1/admin/*` (session cookie auth). Default off. |
+| `ADMIN_ROOT_LOGIN` | `""` | api | Optional env-only root login (set together with `ADMIN_ROOT_PASSWORD`, or leave both empty). |
+| `ADMIN_ROOT_PASSWORD` | `""` | api | Optional env-only root password (≥ 12 chars). Not stored in DB; root stays usable even when DB users exist (recovery). Remove both root vars and restart to disable. Must not collide with `admin_users.login`. |
+| `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | Admin session TTL in Redis (default 8h). |
+| `ADMIN_COOKIE_SECURE` | `true` | api | `Secure` flag on the admin session cookie. Set `false` only for plain-http localhost. |
+| `ADMIN_SESSION_COOKIE_NAME` | `opr_admin_session` | api | Name of the HttpOnly admin session cookie. |
+| `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Max login attempts per login name per window (Redis fixed window). |
+| `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Max login attempts per client IP per window. |
+| `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Login rate-limit window length in seconds. |
 
 <!-- section: github-legacy-default-owner -->
 ## GitHub (legacy / `default` owner)

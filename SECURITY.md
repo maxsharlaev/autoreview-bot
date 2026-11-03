@@ -87,3 +87,9 @@ For public repositories the bot redacts security-relevant findings (`public_repo
 - [ ] The service runs from a current `main`.
 
 Deployment: [DEPLOY.md](docs/DEPLOY.md).
+
+
+## Admin API root recovery
+
+When `ADMIN_API_ENABLED=true`, an optional **env-only root** (`ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD`) can sign in even if database admin users exist. It is never stored in Postgres. Use it to recover access if DB passwords are lost; disable it by removing both variables and restarting. Do not reuse `REVIEW_API_KEY` or owner API keys for the admin panel — they do not grant admin sessions.
+

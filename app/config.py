@@ -212,6 +212,15 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     openai_api_key: str = ""
     review_api_key: str = ""
+    admin_api_enabled: bool = False
+    admin_root_login: str = ""
+    admin_root_password: str = ""
+    admin_session_ttl_seconds: int = 28800
+    admin_cookie_secure: bool = True
+    admin_session_cookie_name: str = "opr_admin_session"
+    admin_login_rate_limit_per_login: int = 10
+    admin_login_rate_limit_per_ip: int = 30
+    admin_login_rate_window_seconds: int = 300
     worker_max_jobs: int = 4
     worker_job_timeout: int = 900
     config_path: str = "config.yaml"

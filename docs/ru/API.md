@@ -8,6 +8,13 @@ API слушает порт 8000 (`127.0.0.1:8000` в Compose; перед ним
 | `POST /api/v1/reviews` | API key | Запустить ревью (GitHub Actions, скрипты, вручную). |
 | `GET /api/v1/reviews/{review_run_id}` | API key | Статус одного прогона. |
 | `GET /api/v1/ops/status` | только операторский ключ | Снимок очереди и ошибок. |
+| `POST /api/v1/admin/login` | session | Вход в админку (JSON); HttpOnly cookie. Только при `ADMIN_API_ENABLED`. |
+| `POST /api/v1/admin/logout` | admin session | Сброс сессии. |
+| `GET /api/v1/admin/me` | admin session | Текущий админ-principal. |
+| `GET /api/v1/admin/runs` | admin session (viewer+) | Список review run'ов. |
+| `GET /api/v1/admin/runs/{id}` | admin session (viewer+) | Один run (безопасные поля). |
+| `GET /api/v1/admin/queue` | admin session (viewer+) | Снимок очереди (`ops_snapshot`). |
+| `GET/POST/PATCH /api/v1/admin/users*` | роль admin | Управление DB-пользователями админки. |
 | `POST /api/v1/pull-request` | подпись webhook | Webhook GitHub, маршрутизируется к owner'у по репозиторию. |
 | `POST /api/v1/pull-request/{owner_id}` | подпись webhook этого owner'а | Webhook GitHub для одного owner'а. |
 | `GET /health` | нет | Liveness: `{"status": "ok"}`. |
@@ -26,7 +33,8 @@ API слушает порт 8000 (`127.0.0.1:8000` в Compose; перед ним
 
 Ключи:
 
-- `REVIEW_API_KEY` — **операторский ключ**: все owner'ы, все прогоны и `ops/status`.
+- `REVIEW_API_KEY` — **операторский ключ**: все owner'ы, все прогоны и `ops/status`. Он **не** открывает `/api/v1/admin/*`.
+- Админка: **session cookie** после `POST /api/v1/admin/login` (env root и/или DB `admin_users`). Owner-ключи тоже не дают доступ в админку.
 - `owners.<id>.api.key_env` (по умолчанию `OWNER_<ID>_REVIEW_API_KEY`) — ключ **одного owner'а**: запускает ревью только для этого owner'а и читает только его прогоны. `ops/status` ему недоступен.
 
 Отсутствующий или неверный ключ — `401 {"detail": "invalid access key"}`. Эндпойнты webhook API key не принимают; они проверяют `X-Hub-Signature-256`. Никогда не передавайте ключ в URL.
@@ -132,6 +140,24 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 ## `GET /api/v1/ops/status`
 
 Только операторский ключ. Возвращает `in_flight` (число pending/running), `queue_jobs` (глубина очереди ARQ), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` и `hints` (диагноз простыми словами, например нет квоты модели или worker не разбирает очередь).
+
+
+<!-- section: admin-api -->
+## Admin API
+
+Опциональный JSON под `/api/v1/admin` (`ADMIN_API_ENABLED`, по умолчанию `false`). Если выключено — маршруты не монтируются (`404`).
+
+**Аутентификация:** `POST /login` с JSON `{"login","password"}` (нужен `Content-Type: application/json`). Успех ставит HttpOnly cookie сессии (`opr_admin_session`, `SameSite=Strict`, `Secure` из `ADMIN_COOKIE_SECURE`). Сессии в Redis с `ADMIN_SESSION_TTL_SECONDS`. `POST /logout` сбрасывает cookie; `GET /me` — `{login, role, kind}`.
+
+CSRF: cookie `SameSite=Strict`, мутирующие методы принимают только JSON — держите админку first-party; отдельный CSRF-токен в этом MVP не вводим.
+
+**Principals:**
+- **Root** из `ADMIN_ROOT_LOGIN` + `ADMIN_ROOT_PASSWORD` (только env, никогда не пишется в `admin_users`). Роль `admin`. Остаётся доступен даже при наличии DB-пользователей (recovery). Отключение — убрать оба env и перезапустить. Старт падает, если задан только один из пары, пароль короче 12 символов, или login root совпадает с DB-пользователем.
+- **DB-пользователи** в `admin_users` (хеши argon2): роли `admin` или `viewer`. `admin` управляет пользователями; деактивация инвалидирует их Redis-сессии. `viewer` — только read-only.
+
+**Read-only (viewer+):** `GET /runs` (фильтры `owner_id`, `repo`, `status`, `limit`, `offset`; сначала новые; только безопасные поля), `GET /runs/{id}`, `GET /queue` (`ops_snapshot`, опциональный `owner_id`).
+
+Ошибки логина — общий `401 invalid credentials`; лимиты — `429`. `REVIEW_API_KEY` / owner API keys админку не аутентифицируют.
 
 <!-- section: webhooks -->
 ## Webhooks

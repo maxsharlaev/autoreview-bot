@@ -1,0 +1,422 @@
+"""Admin API: session auth, users CRUD, read-only runs/queue."""
+
+from __future__ import annotations
+
+import secrets
+import uuid
+from datetime import UTC, datetime
+from typing import Annotated, Any
+
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
+
+from app.api.admin_auth import AdminPrincipal, AdminPrincipalDep, require_admin_role
+from app.api.deps import SessionDep
+from app.api.v1.admin_schemas import (
+    AdminLoginRequest,
+    AdminMeResponse,
+    AdminPasswordResetRequest,
+    AdminQueueResponse,
+    AdminRunItem,
+    AdminRunListResponse,
+    AdminUserCreateRequest,
+    AdminUserListResponse,
+    AdminUserPublic,
+    AdminUserUpdateRequest,
+)
+from app.config import get_settings
+from app.metrics import ops_snapshot
+from app.models import AdminUser, PullRequest, Repository, ReviewRun
+from app.services.admin_passwords import (
+    MIN_ADMIN_PASSWORD_LENGTH,
+    hash_password,
+    password_too_short,
+    verify_password,
+)
+from app.services.admin_sessions import (
+    check_and_bump_rate_limit,
+    create_session,
+    destroy_session,
+    invalidate_user_sessions,
+)
+
+router = APIRouter()
+
+_MAX_LIMIT = 100
+_DEFAULT_LIMIT = 50
+_GENERIC_AUTH_ERROR = "invalid credentials"
+_RATE_LIMIT_ERROR = "too many attempts"
+
+
+def _secure_eq(left: str, right: str) -> bool:
+    """Length-safe compare for secrets.compare_digest (raises on length mismatch)."""
+    if len(left) != len(right):
+        return False
+    return secrets.compare_digest(left, right)
+
+
+def _require_json_content_type(request: Request) -> None:
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        raise HTTPException(status_code=415, detail="application/json required")
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or "unknown"
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    settings = get_settings()
+    response.set_cookie(
+        key=settings.admin_session_cookie_name,
+        value=token,
+        max_age=settings.admin_session_ttl_seconds,
+        httponly=True,
+        samesite="strict",
+        secure=settings.admin_cookie_secure,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    settings = get_settings()
+    response.delete_cookie(
+        key=settings.admin_session_cookie_name,
+        path="/",
+        httponly=True,
+        samesite="strict",
+        secure=settings.admin_cookie_secure,
+    )
+
+
+def _user_public(user: AdminUser) -> AdminUserPublic:
+    return AdminUserPublic(
+        id=user.id,
+        login=user.login,
+        role=user.role,  # type: ignore[arg-type]
+        is_active=user.is_active,
+        created_at=user.created_at,
+        last_login_at=user.last_login_at,
+    )
+
+
+def _to_run_item(run: ReviewRun) -> AdminRunItem:
+    pr = run.pull_request
+    repo = pr.repository if pr is not None else None
+    return AdminRunItem(
+        id=run.id,
+        owner_id=run.owner_id,
+        repository=repo.full_name if repo is not None else "",
+        pull_request_number=pr.number if pr is not None else 0,
+        head_sha=run.head_sha or "",
+        status=run.status,
+        trigger=run.trigger,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        comment_url=run.comment_url,
+        has_sensitive_content=run.has_sensitive_content,
+        error_code=run.error_code,
+        skip_reason=run.skip_reason,
+    )
+
+
+@router.post("/login")
+async def login(
+    request: Request,
+    session: SessionDep,
+) -> Response:
+    """Authenticate root (env) or DB user; set HttpOnly session cookie."""
+    _require_json_content_type(request)
+    redis = request.app.state.redis
+    settings = get_settings()
+    try:
+        body = AdminLoginRequest.model_validate(await request.json())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    allowed = await check_and_bump_rate_limit(
+        redis,
+        login=body.login,
+        ip=_client_ip(request),
+        per_login=settings.admin_login_rate_limit_per_login,
+        per_ip=settings.admin_login_rate_limit_per_ip,
+        window_seconds=settings.admin_login_rate_window_seconds,
+    )
+    if not allowed:
+        raise HTTPException(status_code=429, detail=_RATE_LIMIT_ERROR)
+
+    login = body.login.strip()
+    password = body.password
+    # Constant-time-ish: always do a verify path; dummy hash when missing user.
+    root_login = (settings.admin_root_login or "").strip()
+    authenticated_kind: str | None = None
+    role = "admin"
+    user_id: str | None = None
+    db_user: AdminUser | None = None
+
+    if root_login and _secure_eq(login, root_login):
+        expected = settings.admin_root_password or ""
+        if expected and _secure_eq(password, expected):
+            authenticated_kind = "root"
+            role = "admin"
+            user_id = None
+    else:
+        db_user = (await session.execute(select(AdminUser).where(AdminUser.login == login))).scalar_one_or_none()
+        # Use a fixed dummy verify to reduce timing oracle when user missing.
+        dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        pw_hash = db_user.password_hash if db_user is not None else dummy
+        ok = verify_password(pw_hash, password)
+        if db_user is not None and db_user.is_active and ok and db_user.role in ("admin", "viewer"):
+            authenticated_kind = "user"
+            role = db_user.role
+            user_id = str(db_user.id)
+
+    if authenticated_kind is None:
+        # Dummy work already done; generic error.
+        raise HTTPException(status_code=401, detail=_GENERIC_AUTH_ERROR)
+
+    if authenticated_kind == "user" and db_user is not None:
+        db_user.last_login_at = datetime.now(UTC)
+        await session.commit()
+
+    sess = await create_session(
+        redis,
+        kind=authenticated_kind,  # type: ignore[arg-type]
+        role=role,  # type: ignore[arg-type]
+        login=login if authenticated_kind == "root" else (db_user.login if db_user else login),
+        user_id=user_id,
+        ttl_seconds=settings.admin_session_ttl_seconds,
+    )
+    response = JSONResponse({"ok": True, "role": role, "kind": authenticated_kind})
+    _set_session_cookie(response, sess.token)
+    return response
+
+
+@router.post("/logout")
+async def logout(
+    request: Request,
+    principal: AdminPrincipalDep,
+) -> Response:
+    redis = request.app.state.redis
+    await destroy_session(redis, principal.session_token)
+    response = JSONResponse({"ok": True})
+    _clear_session_cookie(response)
+    return response
+
+
+@router.get("/me", response_model=AdminMeResponse)
+async def me(principal: AdminPrincipalDep) -> AdminMeResponse:
+    return AdminMeResponse(login=principal.login, role=principal.role, kind=principal.kind)
+
+
+def _admin_only(principal: AdminPrincipal) -> AdminPrincipal:
+    return require_admin_role(principal)
+
+
+@router.get("/users", response_model=AdminUserListResponse)
+async def list_users(
+    session: SessionDep,
+    principal: AdminPrincipalDep,
+) -> AdminUserListResponse:
+    _admin_only(principal)
+    rows = (await session.execute(select(AdminUser).order_by(AdminUser.created_at.asc()))).scalars().all()
+    return AdminUserListResponse(items=[_user_public(u) for u in rows])
+
+
+@router.post("/users", response_model=AdminUserPublic, status_code=201)
+async def create_user(
+    request: Request,
+    session: SessionDep,
+    principal: AdminPrincipalDep,
+) -> AdminUserPublic:
+    _admin_only(principal)
+    _require_json_content_type(request)
+    settings = get_settings()
+    try:
+        body = AdminUserCreateRequest.model_validate(await request.json())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    login = body.login.strip()
+    if not login:
+        raise HTTPException(status_code=422, detail="login is required")
+    root_login = (settings.admin_root_login or "").strip()
+    if root_login and _secure_eq(login, root_login):
+        raise HTTPException(status_code=409, detail="login conflicts with admin root")
+    if password_too_short(body.password):
+        raise HTTPException(
+            status_code=422,
+            detail=f"password must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters",
+        )
+    existing = (await session.execute(select(AdminUser.id).where(AdminUser.login == login))).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="login already exists")
+
+    user = AdminUser(
+        id=uuid.uuid4(),
+        login=login,
+        password_hash=hash_password(body.password),
+        role=body.role,
+        is_active=True,
+    )
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return _user_public(user)
+
+
+@router.patch("/users/{user_id}", response_model=AdminUserPublic)
+async def update_user(
+    user_id: uuid.UUID,
+    request: Request,
+    session: SessionDep,
+    principal: AdminPrincipalDep,
+) -> AdminUserPublic:
+    _admin_only(principal)
+    _require_json_content_type(request)
+    redis = request.app.state.redis
+    try:
+        body = AdminUserUpdateRequest.model_validate(await request.json())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    user = (await session.execute(select(AdminUser).where(AdminUser.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    if body.role is not None:
+        user.role = body.role
+    deactivated = False
+    if body.is_active is not None:
+        if user.is_active and not body.is_active:
+            deactivated = True
+        user.is_active = body.is_active
+
+    await session.commit()
+    await session.refresh(user)
+    if deactivated:
+        await invalidate_user_sessions(redis, str(user.id))
+    return _user_public(user)
+
+
+@router.post("/users/{user_id}/reset-password", response_model=AdminUserPublic)
+async def reset_password(
+    user_id: uuid.UUID,
+    request: Request,
+    session: SessionDep,
+    principal: AdminPrincipalDep,
+) -> AdminUserPublic:
+    _admin_only(principal)
+    _require_json_content_type(request)
+    redis = request.app.state.redis
+    try:
+        body = AdminPasswordResetRequest.model_validate(await request.json())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    if password_too_short(body.password):
+        raise HTTPException(
+            status_code=422,
+            detail=f"password must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters",
+        )
+    user = (await session.execute(select(AdminUser).where(AdminUser.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    user.password_hash = hash_password(body.password)
+    await session.commit()
+    await session.refresh(user)
+    await invalidate_user_sessions(redis, str(user.id))
+    return _user_public(user)
+
+
+@router.get("/runs", response_model=AdminRunListResponse)
+async def list_runs(
+    session: SessionDep,
+    _: AdminPrincipalDep,
+    owner_id: Annotated[str | None, Query()] = None,
+    repo: Annotated[str | None, Query(description="Repository full_name")] = None,
+    status: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminRunListResponse:
+    owner = (owner_id or "").strip() or None
+    repo_name = (repo or "").strip() or None
+    st = (status or "").strip() or None
+    filters: list[Any] = []
+    if owner:
+        filters.append(ReviewRun.owner_id == owner)
+    if st:
+        filters.append(ReviewRun.status == st)
+    if repo_name:
+        filters.append(Repository.full_name == repo_name)
+
+    base = (
+        select(ReviewRun)
+        .join(PullRequest, ReviewRun.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .options(selectinload(ReviewRun.pull_request).selectinload(PullRequest.repository))
+    )
+    if filters:
+        base = base.where(*filters)
+
+    count_q = (
+        select(func.count())
+        .select_from(ReviewRun)
+        .join(PullRequest, ReviewRun.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+    )
+    if filters:
+        count_q = count_q.where(*filters)
+    total = int((await session.execute(count_q)).scalar_one())
+    rows = (
+        (await session.execute(base.order_by(ReviewRun.created_at.desc()).limit(limit).offset(offset))).scalars().all()
+    )
+    return AdminRunListResponse(
+        items=[_to_run_item(run) for run in rows],
+        limit=limit,
+        offset=offset,
+        count=total,
+    )
+
+
+@router.get("/runs/{review_run_id}", response_model=AdminRunItem)
+async def get_run(
+    review_run_id: uuid.UUID,
+    session: SessionDep,
+    _: AdminPrincipalDep,
+    owner_id: Annotated[str | None, Query()] = None,
+) -> AdminRunItem:
+    run = (
+        await session.execute(
+            select(ReviewRun)
+            .options(selectinload(ReviewRun.pull_request).selectinload(PullRequest.repository))
+            .where(ReviewRun.id == review_run_id)
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="review run not found")
+    owner = (owner_id or "").strip()
+    if owner and run.owner_id != owner:
+        raise HTTPException(status_code=404, detail="review run not found")
+    return _to_run_item(run)
+
+
+@router.get("/queue", response_model=AdminQueueResponse)
+async def get_queue(
+    request: Request,
+    _: AdminPrincipalDep,
+    owner_id: Annotated[str | None, Query()] = None,
+) -> AdminQueueResponse:
+    snap = await ops_snapshot(
+        request.app.state.session_factory,
+        request.app.state.redis,
+        owner_id=owner_id,
+    )
+    return AdminQueueResponse.model_validate(snap)
