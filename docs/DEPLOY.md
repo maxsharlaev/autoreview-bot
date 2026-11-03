@@ -235,7 +235,7 @@ Happy-path check that a review through the **container** backend + **model-proxy
 ### Prerequisites
 
 - Docker Engine available to the host (same as local `stack up`).
-- A **separate low-limit** OpenAI (or compatible) API key used **only** for this test.
+- A **separate low-limit** OpenAI-issued API key used **only** for this test (the E2E hard-codes `PROXY_PROVIDER=openai` and `api.openai.com`; only one upstream provider is implemented).
 - Put that key in `model-proxy.env` as `OPENAI_API_KEY=...` (gitignored; copy from `model-proxy.env.example`). The test reads **only** that file (ambient `OPENAI_API_KEY` is ignored). Do **not** put the key in `.env` for this test path, and never commit it.
 - Optional: `OPR_REAL_MODEL` (default `gpt-4o-mini`) to pick a cheap chat model.
 
