@@ -1,9 +1,10 @@
 """Opt-in real-model E2E: container backend + model-proxy happy path (M4 PR2).
 
 The happy-path test is skipped unless ``OPR_REAL_MODEL_E2E=1`` (and Docker is
-available). Never enabled in CI. Upstream key is read **only** from
-``model-proxy.env`` (ambient ``OPENAI_API_KEY`` is ignored). The key value is
-never printed on failure and is never placed on the docker argv.
+available). Forced skip when ``CI`` or ``GITHUB_ACTIONS`` is set, even with the
+flag. Upstream key is read **only** from ``model-proxy.env`` (ambient
+``OPENAI_API_KEY`` is ignored). The key value is never printed on failure and
+is never placed on the docker argv.
 """
 
 from __future__ import annotations
@@ -25,11 +26,46 @@ import pytest
 docker = shutil.which("docker")
 enabled = os.environ.get("OPR_REAL_MODEL_E2E", "").strip().lower() in {"1", "true", "yes"}
 
+CI_SKIP_REASON = "real-model E2E is blocked when CI or GITHUB_ACTIONS is set (even with OPR_REAL_MODEL_E2E=1)"
+OPT_IN_SKIP_REASON = "Set OPR_REAL_MODEL_E2E=1 with Docker available (manual; not for CI)"
+
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW_SCHEMA = ROOT / "schemas" / "review_output.json"
 DEFAULT_MODEL = os.environ.get("OPR_REAL_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 HEAD_SHA = "deadbeefcafebabe0123456789abcdef01234567"
 MODEL_PROXY_ENV_NAME = "model-proxy.env"
+
+
+def _env_truthy(value: str | None) -> bool:
+    """Non-empty and not an explicit falsey token (ARB37-006)."""
+    if value is None:
+        return False
+    v = value.strip().lower()
+    if not v:
+        return False
+    return v not in {"0", "false", "no", "off"}
+
+
+def is_ci_environment(environ: dict[str, str] | None = None) -> bool:
+    """True when ``CI`` or ``GITHUB_ACTIONS`` is set/truthy (ARB37-006)."""
+    env = os.environ if environ is None else environ
+    return _env_truthy(env.get("CI")) or _env_truthy(env.get("GITHUB_ACTIONS"))
+
+
+def real_model_e2e_skip_reason(
+    *,
+    environ: dict[str, str] | None = None,
+    docker_bin: str | None = None,
+) -> str | None:
+    """Return skip reason, or None when the opt-in path may run (ARB37-006)."""
+    env = os.environ if environ is None else environ
+    if is_ci_environment(env):
+        return CI_SKIP_REASON
+    flag = (env.get("OPR_REAL_MODEL_E2E") or "").strip().lower() in {"1", "true", "yes"}
+    docker_ok = docker if docker_bin is None else docker_bin
+    if not flag or not docker_ok:
+        return OPT_IN_SKIP_REASON
+    return None
 
 
 def _run(
@@ -152,8 +188,9 @@ def upstream_key() -> str:
 
 @pytest.fixture(scope="module")
 def real_model_stack(upstream_key: str):
-    if not enabled or not docker:
-        pytest.skip("Set OPR_REAL_MODEL_E2E=1 with Docker available (manual; not for CI)")
+    reason = real_model_e2e_skip_reason()
+    if reason:
+        pytest.skip(reason)
 
     suffix = uuid.uuid4().hex[:8]
     volume = f"opr_e2e_real_co_{suffix}"
@@ -390,9 +427,10 @@ def _poll_review_env(job_id: str, stop: threading.Event, sink: dict) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(is_ci_environment(), reason=CI_SKIP_REASON)
 @pytest.mark.skipif(
     not enabled or not docker,
-    reason="Set OPR_REAL_MODEL_E2E=1 with Docker available (manual; not for CI)",
+    reason=OPT_IN_SKIP_REASON,
 )
 async def test_real_model_review_via_proxy_happy_path(real_model_stack) -> None:
     """Review through launcher + model-proxy completes; no upstream key in review env/logs."""

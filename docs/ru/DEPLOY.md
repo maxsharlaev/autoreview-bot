@@ -229,7 +229,7 @@ API `202`, но комментария нет: [TROUBLESHOOTING.md](TROUBLESHOOT
 <!-- section: manual-real-model-e2e -->
 ## Manual real-model E2E (opt-in)
 
-Happy-path проверка, что ревью через backend **container** + **model-proxy** завершается с реальной upstream-моделью. Skipped unless you set `OPR_REAL_MODEL_E2E=1`. **Never runs in CI** (default skip; CI stays green without any model key).
+Happy-path проверка, что ревью через backend **container** + **model-proxy** завершается с реальной upstream-моделью. Skipped unless you set `OPR_REAL_MODEL_E2E=1`. **Never runs in CI** (forced skip when `CI`/`GITHUB_ACTIONS` is set, even with the flag; CI stays green without any model key).
 
 <!-- section: real-model-e2e-prerequisites -->
 ### Prerequisites

@@ -159,5 +159,5 @@ The worker starts `git` and `codex` with an allowlisted environment, not its own
 | --- | --- |
 | `TEST_DATABASE_URL` | Postgres URL for database tests; they are skipped without it. See [CONTRIBUTING.md](../CONTRIBUTING.md). |
 | `OPR_CONTAINER_E2E` | Set to `1` to run the stub container E2E (`tests/test_container_e2e.py`). Off by default; not for CI. |
-| `OPR_REAL_MODEL_E2E` | Set to `1` to run the opt-in real-model E2E (`tests/test_real_model_e2e.py`). Off by default; never enable in CI. Needs Docker + `OPENAI_API_KEY` in `model-proxy.env` only (ambient `OPENAI_API_KEY` ignored; see [DEPLOY.md](DEPLOY.md#manual-real-model-e2e-opt-in)). |
+| `OPR_REAL_MODEL_E2E` | Set to `1` to run the opt-in real-model E2E (`tests/test_real_model_e2e.py`). Off by default; forced skip when `CI`/`GITHUB_ACTIONS` is set (even with the flag). Needs Docker + `OPENAI_API_KEY` in `model-proxy.env` only (ambient `OPENAI_API_KEY` ignored; see [DEPLOY.md](DEPLOY.md#manual-real-model-e2e-opt-in)). |
 | `OPR_REAL_MODEL` | Optional model id for the real-model E2E (default `gpt-4o-mini`). |

@@ -7,10 +7,13 @@ from typing import Any
 
 import pytest
 from tests.test_real_model_e2e import (
+    CI_SKIP_REASON,
     ResourceTracker,
     _rm_container_idempotent,
     docker_env_passing_openai_key,
+    is_ci_environment,
     load_upstream_key_from_model_proxy_env,
+    real_model_e2e_skip_reason,
     review_job_id_filters,
 )
 
@@ -188,3 +191,33 @@ def test_tracker_removes_name_registered_before_failed_run(monkeypatch: pytest.M
     assert run.returncode != 0
     tracker.cleanup()
     assert any(args == ["/usr/bin/docker", "rm", "-f", name] for args in calls)
+
+
+@pytest.mark.parametrize(
+    "ci_env",
+    [
+        {"CI": "true"},
+        {"CI": "1"},
+        {"GITHUB_ACTIONS": "true"},
+        {"CI": "true", "GITHUB_ACTIONS": "true"},
+    ],
+)
+def test_flag_plus_ci_skips_real_model_e2e(ci_env: dict[str, str]) -> None:
+    """ARB37-006: OPR_REAL_MODEL_E2E=1 still skips when CI indicators are set."""
+    env = {"OPR_REAL_MODEL_E2E": "1", **ci_env}
+    assert is_ci_environment(env)
+    reason = real_model_e2e_skip_reason(environ=env, docker_bin="/usr/bin/docker")
+    assert reason == CI_SKIP_REASON
+
+
+def test_flag_without_ci_not_skipped_by_ci_rule() -> None:
+    """ARB37-006: with flag and Docker mock, CI rule alone does not skip."""
+    env = {"OPR_REAL_MODEL_E2E": "1"}
+    assert not is_ci_environment(env)
+    assert real_model_e2e_skip_reason(environ=env, docker_bin="/usr/bin/docker") is None
+
+
+def test_ci_falsey_tokens_do_not_block() -> None:
+    env = {"OPR_REAL_MODEL_E2E": "1", "CI": "0", "GITHUB_ACTIONS": "false"}
+    assert not is_ci_environment(env)
+    assert real_model_e2e_skip_reason(environ=env, docker_bin="/usr/bin/docker") is None

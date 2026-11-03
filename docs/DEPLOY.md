@@ -229,7 +229,7 @@ To serve another GitHub organization from the same deployment, add an `owners:` 
 <!-- section: manual-real-model-e2e -->
 ## Manual real-model E2E (opt-in)
 
-Happy-path check that a review through the **container** backend + **model-proxy** completes with a real upstream model. Skipped unless you set `OPR_REAL_MODEL_E2E=1`. **Never runs in CI** (default skip; CI stays green without any model key).
+Happy-path check that a review through the **container** backend + **model-proxy** completes with a real upstream model. Skipped unless you set `OPR_REAL_MODEL_E2E=1`. **Never runs in CI** (forced skip when `CI`/`GITHUB_ACTIONS` is set, even with the flag; CI stays green without any model key).
 
 <!-- section: real-model-e2e-prerequisites -->
 ### Prerequisites
