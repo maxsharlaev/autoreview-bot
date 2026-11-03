@@ -14,7 +14,8 @@
   .\scripts\stack.ps1 status
 #>
 # ARB36-008/009/010: first positional non-option is the command. Helper switches
-# may appear before/after non-compose commands; after `compose` args are verbatim.
+# may appear before/after non-compose commands; after `compose` args are verbatim
+# (one optional leading `--` after `compose` is consumed, ARB36-004 / ARB38-002).
 # Use $args directly so PowerShell does not steal compose flags like -d (= -Debug).
 # Plain if/elseif loop (no switch+continue+break) so every option is processed.
 $ArgList = @($args)
@@ -36,7 +37,8 @@ Helper options (before or after non-compose commands; before `compose` only):
   -Container       Include container-runner overlay (default since M4; back-compat).
   -InProcess       Omit container-runner overlay (in_process reviews only).
   compose          Passthrough to docker compose with the same -f files
-                   (no token check / image build); remaining args are verbatim.
+                   (no token check / image build); remaining args are verbatim
+                   (one optional leading `--` after `compose` is consumed).
 "@
 }
 
@@ -99,6 +101,7 @@ foreach ($a in $argv) {
     }
 
     if ($Command -eq "compose") {
+        # Collect verbatim; optional leading `--` stripped once after the loop (ARB36-004 / ARB38-002).
         [void]$Rest.Add($a)
         continue
     }
@@ -138,6 +141,10 @@ if ($Container -and $InProcess) {
 # M4: container-runner overlay is on unless -InProcess.
 $UseContainerOverlay = -not $InProcess
 $Rest = @($Rest)
+# ARB36-004 / ARB38-002: drop at most one leading `--` after `compose` (helper separator only).
+if ($Command -eq "compose" -and $Rest.Count -gt 0 -and $Rest[0] -eq "--") {
+    $Rest = @($Rest | Select-Object -Skip 1)
+}
 
 function Get-DotEnvValue([string]$Name) {
     $envVal = [Environment]::GetEnvironmentVariable($Name)
