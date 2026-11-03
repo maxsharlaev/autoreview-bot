@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
 import pytest
 from tests.test_real_model_e2e import (
+    _RM_CONTAINER_MAX_ATTEMPTS,
     CI_INDICATOR_ENV_VARS,
     CI_SKIP_REASON,
+    E2E_JOB_TIMEOUT_SECONDS,
     E2E_LABEL,
     E2E_LABEL_VALUE,
+    E2E_REAPER_REQUEST_MARGIN_SECONDS,
+    E2E_REAPER_STARTUP_MARGIN_SECONDS,
     ResourceTracker,
     _rm_container_idempotent,
     docker_env_passing_openai_key,
     e2e_container_is_stale,
+    e2e_reaper_max_age_seconds,
     is_ci_environment,
     load_upstream_key_from_model_proxy_env,
     parse_docker_created_epoch,
@@ -259,6 +265,7 @@ def test_cleanup_continues_after_failure_then_raises(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
     monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    monkeypatch.setattr("tests.test_real_model_e2e._rm_sleep", lambda _s: None)
 
     tracker = ResourceTracker()
     tracker.containers.extend(["ctr-fail", "ctr-missing"])
@@ -282,7 +289,12 @@ def test_cleanup_continues_after_failure_then_raises(monkeypatch: pytest.MonkeyP
 
 
 def test_rm_container_unexpected_failure_returns_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
     def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
         class R:
             returncode = 1
             stdout = ""
@@ -292,7 +304,10 @@ def test_rm_container_unexpected_failure_returns_label(monkeypatch: pytest.Monke
 
     monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
     monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    monkeypatch.setattr("tests.test_real_model_e2e._rm_sleep", sleeps.append)
     assert _rm_container_idempotent("stuck") == "container:stuck"
+    assert len(calls) == _RM_CONTAINER_MAX_ATTEMPTS
+    assert len(sleeps) == _RM_CONTAINER_MAX_ATTEMPTS - 1
 
 
 def test_validate_review_output_rejects_missing_required_field() -> None:
@@ -394,3 +409,85 @@ def test_reaper_ignores_fresh_and_does_not_query_without_label(
     monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
     assert reap_stale_e2e_containers(now_epoch=1_700_000_000.0, max_age_seconds=600) == []
     assert any(f"label={E2E_LABEL}={E2E_LABEL_VALUE}" in " ".join(c) for c in calls)
+
+
+def test_rm_container_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARB37-008: transient rm failure then success => no error label."""
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+    n = {"i": 0}
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+        n["i"] += 1
+
+        class R:
+            returncode = 1 if n["i"] == 1 else 0
+            stdout = ""
+            stderr = "Error: busy" if n["i"] == 1 else ""
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    monkeypatch.setattr("tests.test_real_model_e2e._rm_sleep", sleeps.append)
+    assert _rm_container_idempotent("flaky") is None
+    assert len(calls) == 2
+    assert len(sleeps) == 1
+
+
+def test_rm_container_persistent_failure_attempts_then_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARB37-008: persistent failure => 3 attempts and container:<name>."""
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "Error: still there"
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    monkeypatch.setattr("tests.test_real_model_e2e._rm_sleep", sleeps.append)
+    assert _rm_container_idempotent("persist") == "container:persist"
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+
+
+def test_reaper_threshold_ignores_ambient_max_review_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARB37-009: ambient OPR_MAX_REVIEW_TIMEOUT_SECONDS must not change threshold."""
+    monkeypatch.setenv("OPR_MAX_REVIEW_TIMEOUT_SECONDS", "1")
+    expected = E2E_JOB_TIMEOUT_SECONDS + E2E_REAPER_STARTUP_MARGIN_SECONDS + E2E_REAPER_REQUEST_MARGIN_SECONDS
+    assert e2e_reaper_max_age_seconds() == expected
+
+    calls: list[list[str]] = []
+    # Created just under threshold ago relative to now_epoch.
+    now = 1_700_000_000.0
+    age = expected - 10
+    from datetime import datetime
+
+    created = datetime.fromtimestamp(now - age, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+
+    def fake_run(args: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> Any:
+        calls.append(list(args))
+
+        class R:
+            returncode = 0
+            stdout = "young-e2e\n" if "ps" in args else created + "\n"
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr("tests.test_real_model_e2e.docker", "/usr/bin/docker")
+    monkeypatch.setattr("tests.test_real_model_e2e._run", fake_run)
+    assert reap_stale_e2e_containers(now_epoch=now) == []
+    assert not any("rm -f young-e2e" in " ".join(c) for c in calls)

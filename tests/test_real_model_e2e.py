@@ -49,6 +49,13 @@ CI_INDICATOR_ENV_VARS = (
 )
 E2E_LABEL = "opr.e2e"
 E2E_LABEL_VALUE = "1"
+# Happy-path job timeout (job.json / token issue / review POST).
+E2E_JOB_TIMEOUT_SECONDS = 180
+# Reaper age = job timeout + these margins (never ambient OPR_MAX_REVIEW_TIMEOUT_SECONDS).
+E2E_REAPER_STARTUP_MARGIN_SECONDS = 120  # image builds + health waits
+E2E_REAPER_REQUEST_MARGIN_SECONDS = 90  # review HTTP / docker wait slack
+_RM_CONTAINER_MAX_ATTEMPTS = 3
+_RM_CONTAINER_BACKOFF_SECONDS = 1.0
 
 
 def _env_truthy(value: str | None) -> bool:
@@ -92,20 +99,29 @@ def _run(
     return subprocess.run(args, check=check, capture_output=True, text=True, env=env)
 
 
-def _rm_container_idempotent(name: str) -> str | None:
-    """``docker rm -f``; confirmed missing is OK (ARB37-003 / ARB37-008).
+def _rm_sleep(seconds: float) -> None:
+    """Sleep helper for rm backoff (patchable in tests; ARB37-008)."""
+    time.sleep(seconds)
 
-    Returns ``None`` on success or confirmed missing; otherwise a ``container:<name>``
-    label for teardown failure reporting. Does not retry.
+
+def _rm_container_idempotent(name: str) -> str | None:
+    """``docker rm -f`` with short retries; confirmed missing is OK (ARB37-008).
+
+    Up to ``_RM_CONTAINER_MAX_ATTEMPTS`` attempts with fixed ``_RM_CONTAINER_BACKOFF_SECONDS``
+    between unexpected failures. Returns ``None`` on removal or confirmed missing;
+    otherwise a ``container:<name>`` label for teardown failure reporting.
     """
     if not docker or not name:
         return None
-    result = _run([docker, "rm", "-f", name])
-    if result.returncode == 0:
-        return None
-    err = f"{result.stderr or ''}{result.stdout or ''}".lower()
-    if "no such container" in err:
-        return None
+    for attempt in range(1, _RM_CONTAINER_MAX_ATTEMPTS + 1):
+        result = _run([docker, "rm", "-f", name])
+        if result.returncode == 0:
+            return None
+        err = f"{result.stderr or ''}{result.stdout or ''}".lower()
+        if "no such container" in err:
+            return None
+        if attempt < _RM_CONTAINER_MAX_ATTEMPTS:
+            _rm_sleep(_RM_CONTAINER_BACKOFF_SECONDS)
     return f"container:{name}"
 
 
@@ -116,10 +132,13 @@ def validate_review_output(output: object) -> None:
 
 
 def e2e_reaper_max_age_seconds() -> int:
-    """Stale threshold: max review timeout + orphan grace (ARB37-008 reaper)."""
-    from app.launcher.timeouts import min_review_container_orphan_ttl_seconds
+    """Stale threshold from E2E constants only (ARB37-009).
 
-    return int(min_review_container_orphan_ttl_seconds())
+    Does **not** read ambient ``OPR_MAX_REVIEW_TIMEOUT_SECONDS``.
+    """
+    return (
+        int(E2E_JOB_TIMEOUT_SECONDS) + int(E2E_REAPER_STARTUP_MARGIN_SECONDS) + int(E2E_REAPER_REQUEST_MARGIN_SECONDS)
+    )
 
 
 def parse_docker_created_epoch(created: str) -> float:
@@ -157,10 +176,10 @@ def reap_stale_e2e_containers(
     now_epoch: float | None = None,
     max_age_seconds: int | None = None,
 ) -> list[str]:
-    """Remove ``opr.e2e=1`` containers older than max review timeout + margin.
+    """Remove ``opr.e2e=1`` containers older than the E2E-owned age threshold.
 
-    Never touches containers without that label. Best-effort; no retries.
-    Returns ids that were successfully removed (or confirmed missing after rm).
+    Never touches containers without that label. Container rm uses short retries
+    (see ``_rm_container_idempotent``). Returns ids removed or confirmed missing.
     """
     if not docker:
         return []
@@ -488,7 +507,7 @@ def _stage_fixture(volume: str, job_id: str) -> None:
     )
     job = {
         "model": DEFAULT_MODEL,
-        "timeout_seconds": 180,
+        "timeout_seconds": E2E_JOB_TIMEOUT_SECONDS,
         "reasoning_effort": "low",
         "sandbox": "read-only",
         "approval_policy": "never",
@@ -572,7 +591,7 @@ async def test_real_model_review_via_proxy_happy_path(real_model_stack) -> None:
         issued = await client.post(
             f"{stack['proxy_url']}/internal/jobs/{job_id}/token",
             headers={"Authorization": f"Bearer {stack['issuer']}"},
-            json={"timeout_seconds": 180, "owner_id": ""},
+            json={"timeout_seconds": E2E_JOB_TIMEOUT_SECONDS, "owner_id": ""},
         )
     assert issued.status_code == 200, "token issue failed (response body omitted)"
     token_payload = issued.json()

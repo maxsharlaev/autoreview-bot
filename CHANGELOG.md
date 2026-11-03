@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
 
 ### Fixed
+- **ARB37-009:** real-model E2E reaper age threshold uses E2E constants (job timeout 180s + startup/request margins), not ambient `OPR_MAX_REVIEW_TIMEOUT_SECONDS`.
+- **ARB37-008 (rm retries):** container removal retries unexpected failures up to 3 times with a fixed 1s backoff; still collects failures and raises listing remaining names.
 - **ARB37-006 (extend):** real-model E2E CI skip also honors `JENKINS_URL`, `TF_BUILD`, `TEAMCITY_VERSION`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI` (with `CI` / `GITHUB_ACTIONS`).
 - **ARB37-008 (E2E reaper):** real-model E2E labels proxy/launcher with `opr.e2e=1` and at fixture start removes only those labeled containers older than max review timeout + orphan grace; review containers stay scoped by `opr.job_id` (launcher does not set `opr.e2e`).
 - **ARB37-007:** real-model E2E validates full review output with `jsonschema.validate` against `schemas/review_output.json` and asserts `reviewed_head_sha` matches the fixture HEAD SHA.
