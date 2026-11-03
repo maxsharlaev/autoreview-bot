@@ -7,16 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-### Fixed
-- **ARB38-001:** `stack.ps1` / `stack.sh` consume at most one leading `--` after `compose` (explicit separator-consumed flag); `compose -- -- up` forwards `-- up` to `docker compose`.
-- **ARB38-002:** `stack.ps1` / `stack.sh` strip at most one **leading** `--` after `compose` (post-parse); a `--` in the middle or at the end (e.g. `compose run app command -- --literal`, `compose config --`) is forwarded unchanged.
-- **ARB36-004 (follow-up):** `scripts/stack.ps1` / `stack.sh` `compose` passthrough silently consumes one optional leading `--` (documented PowerShell form) and does not forward it to `docker compose`; remaining args stay verbatim (no token check / image build).
+### Added
+- **M4 PR2 real-model E2E (opt-in):** `tests/test_real_model_e2e.py` happy-path review through launcher + model-proxy + real review image; gated by `OPR_REAL_MODEL_E2E=1` (skipped by default / never CI). Asserts `CODEX_API_KEY` is an `opr_job_` token, no upstream key in launch env/spec/logs/metrics. Runbook in DEPLOY (EN/RU); `OPR_CONTAINER_E2E` / `OPR_REAL_MODEL_E2E` / `OPR_REAL_MODEL` in ENVIRONMENT; ROADMAP M4 marked **done**.
 
 ### Changed
 - **M4 PR1 container default:** `codex.runner_backend` defaults to **`container`** (hard cut; `in_process` remains an explicit fallback). `./scripts/stack.ps1 up` / `./scripts/stack.sh up` include `docker-compose.container-runner.yml` by default; opt out with `-InProcess` / `--in-process`. Worker fail-fast for missing `LAUNCHER_TOKEN` / `PROXY_ISSUER_TOKEN` / `MODEL_PROXY_URL` unchanged. Docs EN/RU (DEPLOY, ENVIRONMENT, UPGRADE migration, CONFIGURATION, ARCHITECTURE, ROADMAP in progress).
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
 
 ### Fixed
+- **ARB37-011:** real-model E2E reaper fails closed on `docker ps` or persistent `docker rm` failures (container ids only in the message; no docker output); `prepare_real_model_e2e_host` does not proceed.
+- **ARB37-010 (docs):** real-model E2E runbook (EN/RU) states local Docker daemon only (no shared/remote daemon) and one run per host.
+- **ARB37-010:** real-model E2E allows only one run per host via an OS exclusive lock (`fcntl` / `msvcrt`); after acquire, reaps **all** `opr.e2e=1` leftovers (age threshold / ARB37-009 margins removed).
+- **ARB37-009:** real-model E2E reaper age threshold uses E2E constants (job timeout 180s + startup/request margins), not ambient `OPR_MAX_REVIEW_TIMEOUT_SECONDS`.
+- **ARB37-008 (rm retries):** container removal retries unexpected failures up to 3 times with a fixed 1s backoff; still collects failures and raises listing remaining names.
+- **ARB37-006 (extend):** real-model E2E CI skip also honors `JENKINS_URL`, `TF_BUILD`, `TEAMCITY_VERSION`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI` (with `CI` / `GITHUB_ACTIONS`).
+- **ARB37-008 (E2E reaper):** real-model E2E labels proxy/launcher with `opr.e2e=1` and at fixture start removes only those labeled containers older than max review timeout + orphan grace; review containers stay scoped by `opr.job_id` (launcher does not set `opr.e2e`).
+- **ARB37-007:** real-model E2E validates full review output with `jsonschema.validate` against `schemas/review_output.json` and asserts `reviewed_head_sha` matches the fixture HEAD SHA.
+- **ARB37-008:** real-model E2E cleanup attempts every removal, then fails teardown listing resources that remain; only a confirmed-missing container is treated as success (no retry loop).
+- **ARB37-006:** real-model E2E forced-skips when `CI` or `GITHUB_ACTIONS` is set, even with `OPR_REAL_MODEL_E2E=1` (decorator + fixture); runbook EN/RU note.
+- **ARB37-003 (reopened):** real-model E2E registers proxy/launcher container names in the resource tracker **before** `docker run`; container removal is idempotent if the name is missing.
+- **ARB37-005:** real-model E2E runbook (DEPLOY EN/RU) states an **OpenAI-issued** key only (`PROXY_PROVIDER=openai` / `api.openai.com`); removed “or compatible” wording.
+- **ARB37-001 / ARB37-002 / ARB37-003 / ARB37-004:** real-model E2E scopes review containers by `opr.job_id` (not global `opr.review`); passes `OPENAI_API_KEY` to docker via subprocess env (`-e OPENAI_API_KEY` without `=value`); tracks created resources for reverse-order cleanup; reads the upstream key only from `model-proxy.env` (ambient `OPENAI_API_KEY` ignored).
+- **ARB38-001:** `stack.ps1` / `stack.sh` consume at most one leading `--` after `compose` (explicit separator-consumed flag); `compose -- -- up` forwards `-- up` to `docker compose`.
+- **ARB38-002:** `stack.ps1` / `stack.sh` strip at most one **leading** `--` after `compose` (post-parse); a `--` in the middle or at the end (e.g. `compose run app command -- --literal`, `compose config --`) is forwarded unchanged.
+- **ARB36-004 (follow-up):** `scripts/stack.ps1` / `stack.sh` `compose` passthrough silently consumes one optional leading `--` (documented PowerShell form) and does not forward it to `docker compose`; remaining args stay verbatim (no token check / image build).
 - **ARB36-002:** README / CONTRIBUTING quick start (and GITHUB_SETUP / UPGRADE EN+RU) use `./scripts/stack.sh up` / `stack.ps1 up` with `model-proxy.env` + `LAUNCHER_TOKEN` / `PROXY_ISSUER_TOKEN`; document the `in_process` + `--in-process` lightweight path.
 - **ARB36-001:** `scripts/stack.ps1` / `stack.sh` require `LAUNCHER_TOKEN` only for `up` with the container-runner overlay; `status` / `down` / `restart` / `logs` keep the overlay but skip the credential check.
 - **ARB35-001:** docs no longer claim model-catalog traffic goes through the proxy; proxy allowlists only `POST /v1/responses`, and with pinned Codex + `opr_proxy` no separate catalog request was observed (spike) — network isolation fails the review visibly if one appears (EN/RU SECURITY / ARCHITECTURE / ENVIRONMENT).
