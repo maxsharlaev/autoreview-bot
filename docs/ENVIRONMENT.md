@@ -44,6 +44,8 @@ Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migr
 | `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Max login attempts per login name per window (Redis fixed window). |
 | `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Max login attempts per client IP per window. |
 | `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Login rate-limit window length in seconds. |
+| `UVICORN_PROXY_HEADERS` | `0` | api (process) | When `1`/`true`, `scripts/run-api.sh` adds uvicorn `--proxy-headers`. Default off. Requires `UVICORN_FORWARDED_ALLOW_IPS`. Admin login rate limits use `request.client.host` only (no manual `X-Forwarded-For` parsing). |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `""` | api (process) | Passed to uvicorn `--forwarded-allow-ips` when proxy headers are enabled. Set to the reverse-proxy address(es); required when `UVICORN_PROXY_HEADERS` is on. |
 
 <!-- section: github-legacy-default-owner -->
 ## GitHub (legacy / `default` owner)

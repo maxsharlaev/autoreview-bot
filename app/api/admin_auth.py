@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import uuid
 from dataclasses import dataclass
 from typing import Annotated, Literal
@@ -9,7 +10,11 @@ from typing import Annotated, Literal
 from fastapi import Cookie, Depends, HTTPException, Request
 
 from app.config import get_settings
-from app.services.admin_sessions import load_session
+from app.services.admin_sessions import (
+    compute_root_fingerprint,
+    destroy_session,
+    load_session,
+)
 
 AdminRole = Literal["admin", "viewer"]
 
@@ -28,7 +33,6 @@ async def get_admin_session_token(
     opr_admin_session: str | None = Cookie(default=None, alias="opr_admin_session"),
 ) -> str | None:
     settings = get_settings()
-    # Allow tests / alternate cookie name via settings
     name = settings.admin_session_cookie_name
     if name != "opr_admin_session":
         return request.cookies.get(name)
@@ -40,48 +44,66 @@ async def require_admin_principal(
     token: Annotated[str | None, Depends(get_admin_session_token)],
 ) -> AdminPrincipal:
     settings = get_settings()
-    if not settings.admin_api_enabled:
+    if settings.admin_api_enabled is not True:
         raise HTTPException(status_code=404, detail="not found")
     redis = request.app.state.redis
     session = await load_session(redis, token)
     if session is None:
         raise HTTPException(status_code=401, detail="not authenticated")
 
-    if session.kind == "user":
-        # Re-check DB: deactivated users must not keep working sessions.
-        if not session.user_id:
-            raise HTTPException(status_code=401, detail="not authenticated")
-        from sqlalchemy import select
-
-        from app.models import AdminUser
-
-        factory = request.app.state.session_factory
-        async with factory() as db:
-            user = (
-                await db.execute(select(AdminUser).where(AdminUser.id == uuid.UUID(session.user_id)))
-            ).scalar_one_or_none()
-        if user is None or not user.is_active:
-            from app.services.admin_sessions import destroy_session
-
+    if session.kind == "root":
+        root_login = settings.admin_root_login if isinstance(settings.admin_root_login, str) else ""
+        root_password = settings.admin_root_password if isinstance(settings.admin_root_password, str) else ""
+        root_login = root_login.strip()
+        if not root_login or not root_password:
             await destroy_session(redis, token)
             raise HTTPException(status_code=401, detail="not authenticated")
-        # Role may have been updated; prefer DB role for authorization.
-        role: AdminRole = user.role if user.role in ("admin", "viewer") else session.role
+        expected = compute_root_fingerprint(root_login, root_password)
+        presented = session.root_fingerprint or ""
+        if not hmac_compare(expected, presented) or not hmac_compare(session.login, root_login):
+            await destroy_session(redis, token)
+            raise HTTPException(status_code=401, detail="not authenticated")
         return AdminPrincipal(
-            kind="user",
-            role=role,  # type: ignore[arg-type]
-            login=user.login,
-            user_id=str(user.id),
+            kind="root",
+            role="admin",
+            login=root_login,
+            user_id=None,
             session_token=session.token,
         )
 
+    if not session.user_id:
+        await destroy_session(redis, token)
+        raise HTTPException(status_code=401, detail="not authenticated")
+
+    from sqlalchemy import select
+
+    from app.models import AdminUser
+
+    factory = request.app.state.session_factory
+    async with factory() as db:
+        user = (
+            await db.execute(select(AdminUser).where(AdminUser.id == uuid.UUID(session.user_id)))
+        ).scalar_one_or_none()
+    if user is None or not user.is_active:
+        await destroy_session(redis, token)
+        raise HTTPException(status_code=401, detail="not authenticated")
+    if session.session_version is None or session.session_version != user.session_version:
+        await destroy_session(redis, token)
+        raise HTTPException(status_code=401, detail="not authenticated")
+    role: AdminRole = user.role if user.role in ("admin", "viewer") else "viewer"
     return AdminPrincipal(
-        kind="root",
-        role="admin",
-        login=session.login,
-        user_id=None,
+        kind="user",
+        role=role,
+        login=user.login,
+        user_id=str(user.id),
         session_token=session.token,
     )
+
+
+def hmac_compare(left: str, right: str) -> bool:
+    if len(left) != len(right):
+        return False
+    return hmac.compare_digest(left, right)
 
 
 def require_admin_role(principal: AdminPrincipal) -> AdminPrincipal:

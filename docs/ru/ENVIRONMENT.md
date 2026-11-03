@@ -44,6 +44,8 @@
 | `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Макс. попыток логина на имя за окно (Redis fixed window). |
 | `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Макс. попыток логина на IP за окно. |
 | `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Длина окна rate-limit логина в секундах. |
+| `UVICORN_PROXY_HEADERS` | `0` | api (process) | При `1`/`true` `scripts/run-api.sh` добавляет uvicorn `--proxy-headers`. По умолчанию выкл. Нужен `UVICORN_FORWARDED_ALLOW_IPS`. Лимит логина админки смотрит только `request.client.host` (без ручного разбора `X-Forwarded-For`). |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `""` | api (process) | Передаётся в uvicorn `--forwarded-allow-ips` при включённых proxy headers. Укажите адрес(а) reverse proxy; обязателен при `UVICORN_PROXY_HEADERS`. |
 
 <!-- section: github-legacy-default-owner -->
 ## GitHub (legacy / owner `default`)

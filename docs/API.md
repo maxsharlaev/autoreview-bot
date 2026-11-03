@@ -157,6 +157,10 @@ CSRF: cookie is `SameSite=Strict` and mutating endpoints accept JSON bodies only
 
 **Read-only (viewer+):** `GET /runs` (filters `owner_id`, `repo`, `status`, `limit`, `offset`; newest first; safe fields only — no summaries/tokens), `GET /runs/{id}`, `GET /queue` (reuses `ops_snapshot`, optional `owner_id`).
 
+Sessions carry a `session_version` (DB users) or a root credential fingerprint (HMAC of current `ADMIN_ROOT_*`); password reset, role change, and deactivation bump the version so older cookies stop working. Changing or clearing root env invalidates root sessions the same way.
+
+Login rate limiting keys the IP from `request.client.host` only. Behind a reverse proxy enable uvicorn `--proxy-headers` via `UVICORN_PROXY_HEADERS=1` and set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy (see ENVIRONMENT).
+
 Login failures use a generic `401 invalid credentials`; rate limits return `429`. `REVIEW_API_KEY` / owner API keys never authenticate the admin API.
 
 <!-- section: webhooks -->

@@ -157,6 +157,10 @@ CSRF: cookie `SameSite=Strict`, мутирующие методы принима
 
 **Read-only (viewer+):** `GET /runs` (фильтры `owner_id`, `repo`, `status`, `limit`, `offset`; сначала новые; только безопасные поля), `GET /runs/{id}`, `GET /queue` (`ops_snapshot`, опциональный `owner_id`).
 
+В сессии хранится `session_version` (DB-пользователи) или fingerprint root (HMAC текущих `ADMIN_ROOT_*`); сброс пароля, смена роли и деактивация увеличивают версию — старые cookie перестают работать. Смена/очистка root env инвалидирует root-сессии так же.
+
+Rate limit по IP берёт только `request.client.host`. За reverse proxy включите uvicorn `--proxy-headers` через `UVICORN_PROXY_HEADERS=1` и задайте `UVICORN_FORWARDED_ALLOW_IPS` (см. ENVIRONMENT).
+
 Ошибки логина — общий `401 invalid credentials`; лимиты — `429`. `REVIEW_API_KEY` / owner API keys админку не аутентифицируют.
 
 <!-- section: webhooks -->

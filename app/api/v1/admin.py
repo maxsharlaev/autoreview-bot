@@ -7,9 +7,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -38,9 +37,9 @@ from app.services.admin_passwords import (
 )
 from app.services.admin_sessions import (
     check_and_bump_rate_limit,
+    compute_root_fingerprint,
     create_session,
     destroy_session,
-    invalidate_user_sessions,
 )
 
 router = APIRouter()
@@ -58,16 +57,17 @@ def _secure_eq(left: str, right: str) -> bool:
     return secrets.compare_digest(left, right)
 
 
-def _require_json_content_type(request: Request) -> None:
+def ensure_json_content_type(request: Request) -> None:
     ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
     if ctype != "application/json":
         raise HTTPException(status_code=415, detail="application/json required")
 
 
+JsonContentType = Annotated[None, Depends(ensure_json_content_type)]
+
+
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip() or "unknown"
+    """Peer address as seen by uvicorn (use --proxy-headers behind a trusted reverse proxy)."""
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
@@ -132,15 +132,12 @@ def _to_run_item(run: ReviewRun) -> AdminRunItem:
 async def login(
     request: Request,
     session: SessionDep,
+    _: JsonContentType,
+    body: AdminLoginRequest,
 ) -> Response:
     """Authenticate root (env) or DB user; set HttpOnly session cookie."""
-    _require_json_content_type(request)
     redis = request.app.state.redis
     settings = get_settings()
-    try:
-        body = AdminLoginRequest.model_validate(await request.json())
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
     allowed = await check_and_bump_rate_limit(
         redis,
@@ -153,24 +150,25 @@ async def login(
     if not allowed:
         raise HTTPException(status_code=429, detail=_RATE_LIMIT_ERROR)
 
-    login = body.login.strip()
+    login_name = body.login.strip()
     password = body.password
-    # Constant-time-ish: always do a verify path; dummy hash when missing user.
     root_login = (settings.admin_root_login or "").strip()
     authenticated_kind: str | None = None
     role = "admin"
     user_id: str | None = None
+    session_version: int | None = None
+    root_fingerprint: str | None = None
     db_user: AdminUser | None = None
 
-    if root_login and _secure_eq(login, root_login):
+    if root_login and _secure_eq(login_name, root_login):
         expected = settings.admin_root_password or ""
         if expected and _secure_eq(password, expected):
             authenticated_kind = "root"
             role = "admin"
             user_id = None
+            root_fingerprint = compute_root_fingerprint(root_login, expected)
     else:
-        db_user = (await session.execute(select(AdminUser).where(AdminUser.login == login))).scalar_one_or_none()
-        # Use a fixed dummy verify to reduce timing oracle when user missing.
+        db_user = (await session.execute(select(AdminUser).where(AdminUser.login == login_name))).scalar_one_or_none()
         dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         pw_hash = db_user.password_hash if db_user is not None else dummy
         ok = verify_password(pw_hash, password)
@@ -178,9 +176,9 @@ async def login(
             authenticated_kind = "user"
             role = db_user.role
             user_id = str(db_user.id)
+            session_version = int(db_user.session_version)
 
     if authenticated_kind is None:
-        # Dummy work already done; generic error.
         raise HTTPException(status_code=401, detail=_GENERIC_AUTH_ERROR)
 
     if authenticated_kind == "user" and db_user is not None:
@@ -191,9 +189,11 @@ async def login(
         redis,
         kind=authenticated_kind,  # type: ignore[arg-type]
         role=role,  # type: ignore[arg-type]
-        login=login if authenticated_kind == "root" else (db_user.login if db_user else login),
+        login=login_name if authenticated_kind == "root" else (db_user.login if db_user else login_name),
         user_id=user_id,
         ttl_seconds=settings.admin_session_ttl_seconds,
+        session_version=session_version,
+        root_fingerprint=root_fingerprint,
     )
     response = JSONResponse({"ok": True, "role": role, "kind": authenticated_kind})
     _set_session_cookie(response, sess.token)
@@ -236,36 +236,34 @@ async def create_user(
     request: Request,
     session: SessionDep,
     principal: AdminPrincipalDep,
+    _: JsonContentType,
+    body: AdminUserCreateRequest,
 ) -> AdminUserPublic:
     _admin_only(principal)
-    _require_json_content_type(request)
     settings = get_settings()
-    try:
-        body = AdminUserCreateRequest.model_validate(await request.json())
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
-    login = body.login.strip()
-    if not login:
+    login_name = body.login.strip()
+    if not login_name:
         raise HTTPException(status_code=422, detail="login is required")
     root_login = (settings.admin_root_login or "").strip()
-    if root_login and _secure_eq(login, root_login):
+    if root_login and _secure_eq(login_name, root_login):
         raise HTTPException(status_code=409, detail="login conflicts with admin root")
     if password_too_short(body.password):
         raise HTTPException(
             status_code=422,
             detail=f"password must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters",
         )
-    existing = (await session.execute(select(AdminUser.id).where(AdminUser.login == login))).scalar_one_or_none()
+    existing = (await session.execute(select(AdminUser.id).where(AdminUser.login == login_name))).scalar_one_or_none()
     if existing is not None:
         raise HTTPException(status_code=409, detail="login already exists")
 
     user = AdminUser(
         id=uuid.uuid4(),
-        login=login,
+        login=login_name,
         password_hash=hash_password(body.password),
         role=body.role,
         is_active=True,
+        session_version=0,
     )
     session.add(user)
     await session.commit()
@@ -276,51 +274,42 @@ async def create_user(
 @router.patch("/users/{user_id}", response_model=AdminUserPublic)
 async def update_user(
     user_id: uuid.UUID,
-    request: Request,
     session: SessionDep,
     principal: AdminPrincipalDep,
+    _: JsonContentType,
+    body: AdminUserUpdateRequest,
 ) -> AdminUserPublic:
     _admin_only(principal)
-    _require_json_content_type(request)
-    redis = request.app.state.redis
-    try:
-        body = AdminUserUpdateRequest.model_validate(await request.json())
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
     user = (await session.execute(select(AdminUser).where(AdminUser.id == user_id))).scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="user not found")
 
-    if body.role is not None:
+    bump = False
+    if body.role is not None and body.role != user.role:
         user.role = body.role
-    deactivated = False
-    if body.is_active is not None:
-        if user.is_active and not body.is_active:
-            deactivated = True
+        bump = True
+    if body.is_active is not None and body.is_active != user.is_active:
         user.is_active = body.is_active
+        if not body.is_active:
+            bump = True
+    if bump:
+        user.session_version = int(user.session_version) + 1
 
     await session.commit()
     await session.refresh(user)
-    if deactivated:
-        await invalidate_user_sessions(redis, str(user.id))
     return _user_public(user)
 
 
 @router.post("/users/{user_id}/reset-password", response_model=AdminUserPublic)
 async def reset_password(
     user_id: uuid.UUID,
-    request: Request,
     session: SessionDep,
     principal: AdminPrincipalDep,
+    _: JsonContentType,
+    body: AdminPasswordResetRequest,
 ) -> AdminUserPublic:
     _admin_only(principal)
-    _require_json_content_type(request)
-    redis = request.app.state.redis
-    try:
-        body = AdminPasswordResetRequest.model_validate(await request.json())
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     if password_too_short(body.password):
         raise HTTPException(
             status_code=422,
@@ -330,9 +319,9 @@ async def reset_password(
     if user is None:
         raise HTTPException(status_code=404, detail="user not found")
     user.password_hash = hash_password(body.password)
+    user.session_version = int(user.session_version) + 1
     await session.commit()
     await session.refresh(user)
-    await invalidate_user_sessions(redis, str(user.id))
     return _user_public(user)
 
 
