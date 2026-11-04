@@ -31,6 +31,7 @@ Configuration stays compatible: new keys have defaults that keep the previous be
 | `008_review_run_progress` | `progress_status`, `comment_url`, `has_sensitive_content` on review runs. | NULL for existing rows. |
 | `009_admin_users` | `admin_users` for the admin API. | |
 | `010_finding_admin_status` | `status_changed_by`, `status_changed_at`, `status_reason` on findings (admin suppress / unsuppress). | NULL for existing rows. |
+| `011_run_comment_cleanup` | `comment_cleaned_by`, `comment_cleaned_at`, `comment_cleanup_reason` on review runs (admin comment cleanup). | NULL for existing rows. |
 
 <!-- section: rollback -->
 ## Rollback

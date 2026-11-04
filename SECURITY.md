@@ -70,6 +70,8 @@ Codes and responses: [API.md](docs/API.md), [MULTI_OWNER.md](docs/MULTI_OWNER.md
 
 For public repositories the bot redacts security-relevant findings (`public_repos.security_findings: redact` by default, `redact_all` for strict setups), limits Jira disclosure (`jira_disclosure`), and never publishes details recorded while the repository was private. A run that redacted something sets `has_sensitive_content`. See [PUBLIC_DISCLOSURE.md](docs/PUBLIC_DISCLOSURE.md) and [DATA_HANDLING.md](docs/DATA_HANDLING.md).
 
+Sensitive review comments are cleaned up **manually**: an admin deletes the comment on GitHub via `POST /api/v1/admin/runs/{id}/cleanup-comment` (see [API.md](docs/API.md)). Residual risks: text already delivered by notifications (email, integrations) is not recalled; the bot does not block re-publication, so a later run of the same PR may post the details again; a run in flight during cleanup may recreate the comment; text the bot wrote to Jira is not touched.
+
 ## Deployment hardening checklist
 
 - [ ] TLS at a reverse proxy; the API is not exposed over plain HTTP.

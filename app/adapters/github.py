@@ -582,6 +582,15 @@ class GitHubAppClient:
         )
         return int(response.json()["id"])
 
+    async def delete_issue_comment(self, owner: str, repo: str, comment_id: int) -> None:
+        token = await self.installation_token(owner, repo)
+        await self._request(
+            "DELETE",
+            f"{API}/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            token=token,
+            _evict_on_401=True,
+        )
+
     async def delete_issue_reaction(self, owner: str, repo: str, number: int, reaction_id: int) -> None:
         token = await self.installation_token(owner, repo)
         await self._request(

@@ -13,6 +13,7 @@ The API listens on port 8000 (`127.0.0.1:8000` in Compose; put a TLS reverse pro
 | `GET /api/v1/admin/me` | admin session | Current admin principal. |
 | `GET /api/v1/admin/runs` | admin session (viewer+) | List review runs. |
 | `GET /api/v1/admin/runs/{id}` | admin session (viewer+) | One review run (safe fields). |
+| `POST /api/v1/admin/runs/{id}/cleanup-comment` | admin role | Delete the run's sensitive review comment on GitHub. |
 | `GET /api/v1/admin/queue` | admin session (viewer+) | Queue snapshot (`ops_snapshot`). |
 | `GET/POST/PATCH /api/v1/admin/users*` | admin role | Manage DB admin users. |
 | `GET /api/v1/admin/findings`, `GET /api/v1/admin/findings/{id}` | admin session (viewer+) | List / read findings. |
@@ -166,6 +167,12 @@ CSRF: cookie is `SameSite=Strict` and mutating endpoints accept JSON bodies only
 - Each change records `status_changed_by` (admin login), `status_changed_at` and `status_reason` (cleared on unsuppress). Only the latest change is kept.
 - A suppressed finding is left out of the model's previous context, carry-forward, sticky comment and digest. If a later run reports it again it stays suppressed; only `last_seen_run_id` moves. After unsuppress the next run treats it as open again.
 - Residual risk: a change is a single `UPDATE`; a review run already in flight for that PR may still overwrite it when it stores findings. Repeat the action after the run finishes if needed.
+
+**Sensitive comment cleanup (manual only):**
+- `GET /runs` also filters `sensitive` (`has_sensitive_content`) and `cleaned` (comment already cleaned) and returns `comment_cleaned_by`, `comment_cleaned_at`, `comment_cleanup_reason`.
+- `has_sensitive_content` means the review, **unredacted**, would carry security finding details or Jira text. In a public repository with `security_findings: redact` the published comment had those parts redacted, yet the flag is still true; check the comment before cleaning.
+- `POST /runs/{id}/cleanup-comment` (admin role, JSON `{"reason"?}`, `reason` ≤ 1000 chars) deletes the comment from `comment_url` on GitHub with the owner's credentials (deleted, not edited: an edit keeps a visible history). Every run of the PR sharing that `comment_url` (one sticky comment) is marked in one update. GitHub `404` (already deleted) counts as success; other GitHub errors return `502` and record nothing. A repeat on a cleaned run returns `200` without calling GitHub. `409` when the run has no sensitive comment, the URL is not a comment URL, or the owner is not configured.
+- No re-publish block: the next run of that PR posts a new sticky comment, which may carry the details again (new `comment_url`, listed again with `cleaned=false`). Fix the code or close the PR first.
 
 Sessions carry a `session_version` (DB users) or a root credential fingerprint (argon2-derived key + HMAC of current `ADMIN_ROOT_*`); password reset, role change, and deactivation bump the version so older cookies stop working. Root credentials are read once at startup: change or clear `ADMIN_ROOT_*` in `.env` and restart; existing root sessions stop working when they changed.
 

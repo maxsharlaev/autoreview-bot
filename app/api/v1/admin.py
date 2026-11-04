@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -12,9 +14,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
+from app.adapters.github import GitHubAppClient, GitHubError
 from app.api.admin_auth import ADMIN_SESSION_COOKIE, AdminPrincipal, AdminPrincipalDep, require_admin_role
 from app.api.deps import SessionDep
 from app.api.v1.admin_schemas import (
+    AdminCommentCleanupRequest,
     AdminFindingDetail,
     AdminFindingItem,
     AdminFindingListResponse,
@@ -34,6 +38,7 @@ from app.api.v1.admin_schemas import (
 from app.config import get_settings
 from app.metrics import ops_snapshot
 from app.models import AdminUser, Finding, PullRequest, Repository, ReviewRun
+from app.owners.registry import get_owner_registry
 from app.services.admin_passwords import (
     MIN_ADMIN_PASSWORD_LENGTH,
     ahash_password,
@@ -56,6 +61,7 @@ from app.services.admin_user_ops import (
 from app.services.finding_status import FINDING_STATUS_OPEN, SUPPRESSED_FINDING_STATUSES
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 ADMIN_PREFIX = "/api/v1/admin"
 _NO_STORE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
@@ -155,6 +161,9 @@ def _to_run_item(run: ReviewRun) -> AdminRunItem:
         has_sensitive_content=run.has_sensitive_content,
         error_code=run.error_code,
         skip_reason=run.skip_reason,
+        comment_cleaned_by=run.comment_cleaned_by,
+        comment_cleaned_at=run.comment_cleaned_at,
+        comment_cleanup_reason=run.comment_cleanup_reason,
     )
 
 
@@ -388,6 +397,8 @@ async def list_runs(
     owner_id: Annotated[str | None, Query()] = None,
     repo: Annotated[str | None, Query(description="Repository full_name")] = None,
     status: Annotated[str | None, Query()] = None,
+    sensitive: Annotated[bool | None, Query(description="has_sensitive_content")] = None,
+    cleaned: Annotated[bool | None, Query(description="comment cleaned by an admin")] = None,
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> AdminRunListResponse:
@@ -401,6 +412,12 @@ async def list_runs(
         filters.append(ReviewRun.status == st)
     if repo_name:
         filters.append(Repository.full_name == repo_name)
+    if sensitive is not None:
+        filters.append(
+            ReviewRun.has_sensitive_content.is_(True) if sensitive else ReviewRun.has_sensitive_content.isnot(True)
+        )
+    if cleaned is not None:
+        filters.append(ReviewRun.comment_cleaned_at.isnot(None) if cleaned else ReviewRun.comment_cleaned_at.is_(None))
 
     base = (
         select(ReviewRun)
@@ -638,6 +655,77 @@ async def unsuppress_finding(
     if finding is None:
         raise HTTPException(status_code=404, detail=_FINDING_NOT_FOUND)
     return _finding_detail(finding)
+
+
+_COMMENT_ID_RE = re.compile(r"#issuecomment-(\d+)$")
+
+
+def _github_for_owner(owner_id: str) -> GitHubAppClient | None:
+    ctx = get_owner_registry().get(owner_id)
+    if ctx is None:
+        return None
+    return GitHubAppClient.from_credentials(ctx.github, owner_id=owner_id)
+
+
+async def _load_run(session: Any, review_run_id: uuid.UUID) -> ReviewRun | None:
+    return (
+        await session.execute(
+            select(ReviewRun)
+            .options(selectinload(ReviewRun.pull_request).selectinload(PullRequest.repository))
+            .where(ReviewRun.id == review_run_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+@router.post("/runs/{review_run_id}/cleanup-comment", response_model=AdminRunItem)
+async def cleanup_run_comment(
+    review_run_id: uuid.UUID,
+    session: SessionDep,
+    _: JsonContentType,
+    principal: AdminPrincipalDep,
+    body: AdminCommentCleanupRequest,
+) -> AdminRunItem:
+    """Delete the run's published review comment on GitHub (manual cleanup, no re-publish block)."""
+    _admin_only(principal)
+    run = await _load_run(session, review_run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="review run not found")
+    if run.comment_cleaned_at is not None:
+        return _to_run_item(run)  # idempotent repeat: no GitHub call
+    if not run.comment_url or run.has_sensitive_content is not True:
+        raise HTTPException(status_code=409, detail="run has no sensitive comment to clean up")
+    match = _COMMENT_ID_RE.search(run.comment_url)
+    repo = run.pull_request.repository if run.pull_request is not None else None
+    if match is None or repo is None or "/" not in repo.full_name:
+        raise HTTPException(status_code=409, detail="comment url not recognized")
+    github = _github_for_owner(run.owner_id)
+    if github is None:
+        raise HTTPException(status_code=409, detail="owner_not_configured")
+    owner, name = repo.full_name.split("/", 1)
+    try:
+        await github.delete_issue_comment(owner, name, int(match.group(1)))
+    except GitHubError as exc:
+        if exc.status_code != 404:  # 404 = already deleted on GitHub: treat as done
+            logger.warning("Admin comment cleanup failed for run %s: HTTP %s", run.id, exc.status_code)
+            raise HTTPException(status_code=502, detail="github delete failed") from None
+    # One comment can be shared by several runs of the PR (sticky): mark them all.
+    await session.execute(
+        update(ReviewRun)
+        .where(
+            ReviewRun.pull_request_id == run.pull_request_id,
+            ReviewRun.comment_url == run.comment_url,
+            ReviewRun.comment_cleaned_at.is_(None),
+        )
+        .values(
+            comment_cleaned_by=principal.login,
+            comment_cleaned_at=func.now(),
+            comment_cleanup_reason=(body.reason or "").strip() or None,
+        )
+    )
+    await session.commit()
+    refreshed = await _load_run(session, review_run_id)
+    return _to_run_item(refreshed or run)
 
 
 @router.get("/queue", response_model=AdminQueueResponse)

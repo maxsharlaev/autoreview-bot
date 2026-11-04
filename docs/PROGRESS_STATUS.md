@@ -111,4 +111,6 @@ Summaries contain only the state, the skip reason or error code, finding counts 
 <!-- section: has-sensitive-content -->
 ## `has_sensitive_content`
 
+Admins can list such runs and delete their comment manually (`GET /api/v1/admin/runs?sensitive=true&cleaned=false`, `POST /api/v1/admin/runs/{id}/cleanup-comment`; see [API.md](API.md)).
+
 Each run records `comment_url` and `has_sensitive_content`: whether the review comment it published would have contained security finding details or Jira text (unmet acceptance criteria, or any review text written with Jira context in the prompt) before the public repository policy was applied. `NULL` means unknown: runs from before migration `008_review_run_progress` and runs that published no review comment. The flag is groundwork for a later admin view; nothing acts on it yet.
