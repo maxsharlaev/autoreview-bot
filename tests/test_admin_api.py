@@ -964,3 +964,28 @@ def test_every_mutating_admin_route_requires_json() -> None:
     assert mutating
     for route in mutating:
         assert ensure_json_content_type in deps(route), route.path
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "42",  # JSON scalar
+        json.dumps({"kind": "user", "role": "admin", "login": "erin", "user_id": "not-a-uuid", "session_version": 0}),
+    ],
+)
+def test_malformed_stored_session_is_401_and_deleted(payload: str) -> None:
+    from app.services.admin_sessions import SESSION_KEY_PREFIX
+
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    key = f"{SESSION_KEY_PREFIX}bad-token"
+    redis.store[key] = payload
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+    ):
+        client = _client(session, redis, settings)
+        client.cookies.set("opr_admin_session", "bad-token")
+        assert client.get("/api/v1/admin/me").status_code == 401
+    assert key not in redis.store

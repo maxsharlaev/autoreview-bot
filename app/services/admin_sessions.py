@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import uuid
 from dataclasses import dataclass
 from typing import Literal
 
@@ -69,31 +70,46 @@ async def create_session(
     )
 
 
+def _parse_session(raw: str | bytes) -> tuple | None:
+    try:
+        data = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    kind = data.get("kind")
+    role = data.get("role")
+    login = data.get("login")
+    user_id = data.get("user_id")
+    version = data.get("session_version")
+    fingerprint = data.get("root_fingerprint")
+    if kind not in ("root", "user") or role not in ("admin", "viewer") or not isinstance(login, str) or not login:
+        return None
+    if user_id is not None:
+        try:
+            user_id = str(uuid.UUID(user_id))
+        except (TypeError, ValueError, AttributeError):
+            return None
+    if version is not None and not isinstance(version, int):
+        try:
+            version = int(version)
+        except (TypeError, ValueError):
+            return None
+    return kind, role, login, user_id, version, fingerprint if isinstance(fingerprint, str) else None
+
+
 async def load_session(redis: Redis, token: str | None) -> AdminSession | None:
     if not token:
         return None
     raw = await redis.get(_session_key(token))
     if not raw:
         return None
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+    data = _parse_session(raw)
+    if data is None:
+        # Malformed stored session: drop it so the request ends as a plain 401.
+        await redis.delete(_session_key(token))
         return None
-    kind = data.get("kind")
-    role = data.get("role")
-    login = data.get("login")
-    if kind not in ("root", "user") or role not in ("admin", "viewer") or not login:
-        return None
-    user_id = data.get("user_id")
-    version = data.get("session_version")
-    fingerprint = data.get("root_fingerprint")
-    if version is not None and not isinstance(version, int):
-        try:
-            version = int(version)
-        except (TypeError, ValueError):
-            return None
+    kind, role, login, user_id, version, fingerprint = data
     return AdminSession(
         token=token,
         kind=kind,
@@ -101,7 +117,7 @@ async def load_session(redis: Redis, token: str | None) -> AdminSession | None:
         login=login,
         user_id=user_id,
         session_version=version,
-        root_fingerprint=fingerprint if isinstance(fingerprint, str) else None,
+        root_fingerprint=fingerprint,
     )
 
 
