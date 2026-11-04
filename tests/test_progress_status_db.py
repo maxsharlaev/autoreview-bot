@@ -367,16 +367,25 @@ async def test_worker_finishing_before_queued_write_is_not_clobbered(
 
 
 class _SlowQueuedGitHub(FakeGitHub):
-    """The API's queued write is slow; calls are recorded when they land on GitHub."""
+    """The API's queued write is slow; calls are recorded when they land on GitHub.
+
+    ``queued_started`` is set when the queued write begins, i.e. while the API holds the run row lock.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.queued_started = asyncio.Event()
 
     async def create_check_run(self, owner, repo, payload):
         if payload["status"] == "queued":
+            self.queued_started.set()
             await asyncio.sleep(0.5)
         self.calls.append(("create", payload))
         return 101 + len(self.payloads("create"))
 
     async def create_commit_status(self, owner, repo, sha, payload):
         if payload["description"].endswith("Queued, waiting for a worker…"):
+            self.queued_started.set()
             await asyncio.sleep(0.5)
         self.calls.append(("status", sha, payload))
 
@@ -396,8 +405,13 @@ async def test_worker_racing_the_queued_write_waits_and_reuses_it(session_factor
     tasks = []
 
     async def enqueue_and_start(_name, run_id, **_kw):
-        # The worker starts while the API is still writing the queued status.
-        tasks.append(asyncio.create_task(work(_uuid.UUID(run_id))))
+        # The worker starts while the API is still writing the queued status (deterministically:
+        # only once that write has begun, so the API always takes the row lock first).
+        async def start_during_queued_write():
+            await slow.queued_started.wait()
+            return await work(_uuid.UUID(run_id))
+
+        tasks.append(asyncio.create_task(start_during_queued_write()))
         return MagicMock(job_id="job-race")
 
     await _queue_with(session_factory, ProgressReporter(slow, mode, AppConfig()), _redis(enqueue_and_start))
