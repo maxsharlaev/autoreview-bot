@@ -235,3 +235,18 @@ class DigestRun(TimestampMixin, Base):
     slack_sent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     owner_id: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
+
+
+class AdminUser(TimestampMixin, Base):
+    """Local admin-panel user (argon2 password hash). Root admin is env-only, not a row."""
+
+    __tablename__ = "admin_users"
+    __table_args__ = (UniqueConstraint("login", name="uq_admin_users_login"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    login: Mapped[str] = mapped_column(String(128), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)  # admin | viewer
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    session_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

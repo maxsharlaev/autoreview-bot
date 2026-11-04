@@ -39,7 +39,7 @@ from tests.test_owner_integrations import (
     legacy_settings,
 )
 
-pytestmark = requires_test_postgres
+pytestmark = [requires_test_postgres, pytest.mark.postgres]
 
 
 @pytest.fixture

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **Admin API skeleton (PR2):** opt-in `ADMIN_API_ENABLED` mounts session-auth `/api/v1/admin` (Redis sessions, cookie `SameSite=Strict`); env-only root (`ADMIN_ROOT_*`) plus DB `admin_users` (argon2, roles admin/viewer); login rate limits; read-only runs/queue; user management for admin role. `REVIEW_API_KEY` / owner keys do not grant admin access.
 - **Admin finding suppression (PR1):** `findings.current_status` may be `accepted` or `false_positive`; suppressed findings are omitted from model previous context, not carried open, not reopened/regressed when re-reported, and not shown as new/regressed on the sticky comment. Helpers `set_finding_suppression` / `clear_finding_suppression` (clear → `open`). Admin JSON API/UI deferred.
 - **M4 PR2 real-model E2E (opt-in):** `tests/test_real_model_e2e.py` happy-path review through launcher + model-proxy + real review image; gated by `OPR_REAL_MODEL_E2E=1` (skipped by default / never CI). Asserts `CODEX_API_KEY` is an `opr_job_` token, no upstream key in launch env/spec/logs/metrics. Runbook in DEPLOY (EN/RU); `OPR_CONTAINER_E2E` / `OPR_REAL_MODEL_E2E` / `OPR_REAL_MODEL` in ENVIRONMENT; ROADMAP M4 marked **done**.
 
@@ -16,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
 
 ### Fixed
+- **AR-007:** admin API without root env fails startup unless an active DB admin exists (message points to `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` for bootstrap); in rootless mode demoting/deactivating the last active admin returns `409` (check + update under `pg_advisory_xact_lock`).
+- **AR-008:** `POST /api/v1/admin/users` maps a concurrent duplicate-login `IntegrityError` to `409` (rollback) instead of `500`.
+- **AR-009:** admin login rate-limit counters use one Lua script for `INCR` + `EXPIRE`; keys without TTL self-repair.
+- **AR-020:** a malformed stored admin session (non-object JSON, non-string login, invalid `user_id`) is deleted and the request gets `401` instead of `500`.
+- **AR-019:** `POST /api/v1/admin/logout` requires `Content-Type: application/json` (`415` otherwise) like the other mutating admin routes, so a cross-site form cannot log the admin out.
+- **AR-017:** removed `ADMIN_SESSION_COOKIE_NAME`; the admin cookie name is fixed to `opr_admin_session`.
+- **AR-018:** admin argon2 hash/verify (login, create user, reset password, startup root warm-up) runs off the event loop via `anyio.to_thread` with a dedicated per-loop `CapacityLimiter(2)`; queued calls wait on the event loop and do not occupy shared worker threads.
+- **AR-016:** pytest marker `postgres` on all `TEST_DATABASE_URL` tests; CI `test-migrations` runs `pytest -m postgres` instead of a file list (adds the admin session-version DB test).
+- **AR-015:** shared max lengths (login 128, password 1024) for admin request bodies and `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD`; oversized root env fails startup.
+- **AR-014:** admin login always does the `admin_users` lookup first (root included), then exactly one argon2 dispatch; root hash and session fingerprint are computed once at startup and read synchronously (root changes require a restart, no lazy rehash); root login verifies against an argon2 hash of `ADMIN_ROOT_PASSWORD` computed once per process, so every failed login (root, existing user, unknown user) does exactly one argon2 verify (no timing leak of the root login).
+- **AR-011:** `ADMIN_SESSION_TTL_SECONDS` (1..604800), `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` (1..1000), `ADMIN_LOGIN_RATE_LIMIT_PER_IP` (1..10000), `ADMIN_LOGIN_RATE_WINDOW_SECONDS` (1..86400) are validated; invalid values fail startup.
+- **AR-012:** all `/api/v1/admin` responses, errors included, send `Cache-Control: no-store` and `Pragma: no-cache`.
+- **AR-013:** admin `GET /queue` reports the ARQ depth as `queue_jobs_global` (global across owners); `ops_snapshot` and `GET /api/v1/ops/status` keep `queue_jobs` unchanged.
+- **Admin API (PR #40):** atomic `session_version` bumps in SQL; root session fingerprint via argon2-derived key (min root password 16); `run-api.sh` passes `--no-proxy-headers` by default.
+- **Admin API (PR #40):** invalidate sessions via `admin_users.session_version` (bump on password reset / role change / deactivation) and root credential fingerprint; drop Redis per-user session sets. Login rate-limit IP uses `request.client.host` only (`UVICORN_PROXY_HEADERS` / `UVICORN_FORWARDED_ALLOW_IPS`). Mutating admin endpoints take Pydantic bodies (malformed JSON → 422).
 - **ARB37-011:** real-model E2E reaper fails closed on `docker ps` or persistent `docker rm` failures (container ids only in the message; no docker output); `prepare_real_model_e2e_host` does not proceed.
 - **ARB37-010 (docs):** real-model E2E runbook (EN/RU) states local Docker daemon only (no shared/remote daemon) and one run per host.
 - **ARB37-010:** real-model E2E allows only one run per host via an OS exclusive lock (`fcntl` / `msvcrt`); after acquire, reaps **all** `opr.e2e=1` leftovers (age threshold / ARB37-009 margins removed).

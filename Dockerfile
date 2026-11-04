@@ -16,12 +16,14 @@ COPY prompts ./prompts
 COPY schemas ./schemas
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY scripts/run-api.sh ./scripts/run-api.sh
 
 RUN pip install --no-cache-dir .
+RUN chmod +x ./scripts/run-api.sh
 
 FROM base AS api
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "./scripts/run-api.sh"]
 
 FROM base AS worker
 

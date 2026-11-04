@@ -18,6 +18,14 @@ from app.security.webhook_config import (
     set_multi_owner_webhook_config,
     set_webhook_config,
 )
+from app.services.admin_config import (
+    AdminApiConfigError,
+    assert_admin_bootstrap_possible,
+    assert_root_login_not_in_db,
+    log_admin_root_status,
+    validate_admin_env,
+    warm_admin_root_caches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,12 @@ def _validate_startup_config() -> None:
                 len(owner_ids),
                 registry.default_owner_id,
             )
+        try:
+            validate_admin_env(settings)
+            log_admin_root_status(settings)
+        except AdminApiConfigError as admin_exc:
+            logger.error("Admin API configuration error: %s", admin_exc)
+            raise SystemExit(1) from admin_exc
     except OwnerConfigError as exc:
         logger.error("Owner configuration error: %s", exc)
         raise SystemExit(1) from exc
@@ -83,6 +97,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_engine()
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
+    settings = get_settings()
+    if settings.admin_api_enabled is True:
+        try:
+            await assert_root_login_not_in_db(app.state.session_factory, settings)
+            await assert_admin_bootstrap_possible(app.state.session_factory, settings)
+            await warm_admin_root_caches(settings)
+        except AdminApiConfigError as admin_exc:
+            logger.error("Admin API configuration error: %s", admin_exc)
+            raise SystemExit(1) from admin_exc
     app.state.redis = await create_redis_pool()
     logger.info("api ready")
     yield
@@ -93,6 +116,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     application = FastAPI(title="Open PR Review", version="0.1.0", lifespan=lifespan)
     application.include_router(api_router)
+    settings = get_settings()
+    if settings.admin_api_enabled is True:
+        from app.api.v1 import admin as admin_api
+
+        admin_api.mount_admin_api(application)
+        logger.info("Admin API mounted at /api/v1/admin")
     return application
 
 

@@ -19,7 +19,7 @@ from tests.test_cross_owner_db import (
 )
 from tests.test_progress_status import COMMENT_URL, HEAD, FakeGitHub, Harness, _finding, _verified
 
-pytestmark = requires_test_postgres
+pytestmark = [requires_test_postgres, pytest.mark.postgres]
 
 NEW_HEAD = "e" * 40
 

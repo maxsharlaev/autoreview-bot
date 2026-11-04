@@ -24,7 +24,7 @@ from tests.test_owner_integrations import JiraSite, SlackApi
 from tests.test_owner_integrations_db import session_factory  # noqa: F401  (fixture)
 from tests.test_owner_policies import A_JIRA, B_JIRA, SECRETS, SHARED_MODEL_KEY, policy_registry, policy_settings
 
-pytestmark = requires_test_postgres
+pytestmark = [requires_test_postgres, pytest.mark.postgres]
 
 SECRET_VALUES = set(SECRETS.values()) | {SHARED_MODEL_KEY, "ghp_legacy", "xoxb-legacy", "sk-process-env"}
 

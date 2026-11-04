@@ -8,6 +8,13 @@ The API listens on port 8000 (`127.0.0.1:8000` in Compose; put a TLS reverse pro
 | `POST /api/v1/reviews` | API key | Start a review (GitHub Actions, scripts, manual). |
 | `GET /api/v1/reviews/{review_run_id}` | API key | Status of one run. |
 | `GET /api/v1/ops/status` | operator key only | Queue and failure snapshot. |
+| `POST /api/v1/admin/login` | session | Admin login (JSON); sets HttpOnly cookie. Mounted only when `ADMIN_API_ENABLED`. |
+| `POST /api/v1/admin/logout` | admin session | Clear session. |
+| `GET /api/v1/admin/me` | admin session | Current admin principal. |
+| `GET /api/v1/admin/runs` | admin session (viewer+) | List review runs. |
+| `GET /api/v1/admin/runs/{id}` | admin session (viewer+) | One review run (safe fields). |
+| `GET /api/v1/admin/queue` | admin session (viewer+) | Queue snapshot (`ops_snapshot`). |
+| `GET/POST/PATCH /api/v1/admin/users*` | admin role | Manage DB admin users. |
 | `POST /api/v1/pull-request` | webhook signature | GitHub webhook, routed to an owner by repository. |
 | `POST /api/v1/pull-request/{owner_id}` | that owner's webhook signature | GitHub webhook for one owner. |
 | `GET /health` | none | Liveness: `{"status": "ok"}`. |
@@ -26,7 +33,8 @@ Send the key in one of:
 
 Keys:
 
-- `REVIEW_API_KEY` is the **operator key**: every owner, every run, and `ops/status`.
+- `REVIEW_API_KEY` is the **operator key**: every owner, every run, and `ops/status`. It does **not** unlock `/api/v1/admin/*`.
+- Admin panel uses **session cookies** after `POST /api/v1/admin/login` (env root and/or DB `admin_users`). Owner keys likewise do not grant admin access.
 - `owners.<id>.api.key_env` (default `OWNER_<ID>_REVIEW_API_KEY`) is a key **scoped to one owner**: it can start reviews only for that owner and read only that owner's runs. It cannot read `ops/status`.
 
 A missing or wrong key is `401 {"detail": "invalid access key"}`. The webhook endpoints take no API key; they verify `X-Hub-Signature-256`. Never put a key in a URL.
@@ -132,6 +140,29 @@ If enqueueing to Redis fails, the request fails with `500` and the run is stored
 ## `GET /api/v1/ops/status`
 
 Operator key only. Returns `in_flight` (pending/running counts), `queue_jobs` (ARQ queue depth), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` and `hints` (a plain-language diagnosis such as missing model quota or a worker that does not consume the queue).
+
+
+<!-- section: admin-api -->
+## Admin API
+
+Opt-in JSON under `/api/v1/admin` (`ADMIN_API_ENABLED`, default `false`). When disabled the routes are not mounted (`404`).
+
+**Auth:** `POST /login` with JSON `{"login","password"}` (require `Content-Type: application/json`). Success sets an HttpOnly session cookie (`opr_admin_session`, `SameSite=Strict`, `Secure` from `ADMIN_COOKIE_SECURE`). Sessions live in Redis with `ADMIN_SESSION_TTL_SECONDS`. `POST /logout` (also `Content-Type: application/json`, like every mutating admin route) clears the cookie; `GET /me` returns `{login, role, kind}`.
+
+CSRF: cookie is `SameSite=Strict` and mutating endpoints accept JSON bodies only — keep the admin origin first-party; no separate CSRF token in this MVP.
+
+**Principals:**
+- **Root** from `ADMIN_ROOT_LOGIN` + `ADMIN_ROOT_PASSWORD` (env only, never inserted into `admin_users`). Role `admin`. Stays usable even when DB users exist (password-recovery path). Disable by removing both env vars and restarting. Startup fails if only one of the pair is set, if the password is shorter than 16 characters, or if the root login collides with a DB user login.
+- **DB users** in `admin_users` (argon2 hashes): roles `admin` or `viewer`. `admin` may list/create/update users and reset passwords; deactivating a user invalidates their Redis sessions. `viewer` may only call read-only endpoints. Duplicate logins (including concurrent creates) return `409`.
+- **Rootless mode** (no `ADMIN_ROOT_*`): startup fails unless `admin_users` has at least one active `admin` (set `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` in `.env` to bootstrap). Demoting or deactivating the last active admin returns `409`; the check and update run in one transaction under a Postgres advisory lock.
+
+**Read-only (viewer+):** `GET /runs` (filters `owner_id`, `repo`, `status`, `limit`, `offset`; newest first; safe fields only — no summaries/tokens), `GET /runs/{id}`, `GET /queue` (reuses `ops_snapshot`, optional `owner_id`; the response field `queue_jobs_global` is the ARQ depth across all owners and ignores the filter). All admin responses, errors included, carry `Cache-Control: no-store` and `Pragma: no-cache`.
+
+Sessions carry a `session_version` (DB users) or a root credential fingerprint (argon2-derived key + HMAC of current `ADMIN_ROOT_*`); password reset, role change, and deactivation bump the version so older cookies stop working. Root credentials are read once at startup: change or clear `ADMIN_ROOT_*` in `.env` and restart; existing root sessions stop working when they changed.
+
+Login rate limiting keys the IP from `request.client.host` only. By default the API process uses uvicorn `--no-proxy-headers`. Behind a reverse proxy enable `--proxy-headers` via `UVICORN_PROXY_HEADERS=1` and set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy (see ENVIRONMENT).
+
+Login failures use a generic `401 invalid credentials`; root, existing and unknown logins each cost exactly one argon2 verify (root password hash and session fingerprint are computed once at startup; changing `ADMIN_ROOT_*` requires a restart); argon2 work runs in worker threads under a dedicated limiter (at most 2 at once; queued calls wait on the event loop, not in shared pool threads), so other requests are not blocked; rate limits return `429`. Rate-limit counters get `INCR` + TTL atomically (Lua); a counter found without TTL gets one again. `REVIEW_API_KEY` / owner API keys never authenticate the admin API.
 
 <!-- section: webhooks -->
 ## Webhooks

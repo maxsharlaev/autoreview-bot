@@ -21,6 +21,7 @@ dependencies = [
     "PyJWT>=2.10.0",
     "cryptography>=44.0.0",
     "prometheus-client>=0.21.0",
+    "argon2-cffi>=23.1.0",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,9 @@ include = ["app*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "postgres: needs a real Postgres via TEST_DATABASE_URL (run in CI with `pytest -m postgres`)",
+]
 
 [tool.ruff]
 target-version = "py312"
