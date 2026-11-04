@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from app.services.admin_passwords import MIN_ROOT_PASSWORD_LENGTH, root_password_too_short
+from app.services.admin_passwords import (
+    MIN_ROOT_PASSWORD_LENGTH,
+    clear_root_password_hash,
+    get_root_password_hash,
+    root_password_too_short,
+)
 from app.services.admin_root_crypto import clear_root_fingerprint_cache, warm_root_fingerprint_cache
 
 if TYPE_CHECKING:
@@ -45,8 +50,10 @@ def validate_admin_env(settings: Settings) -> None:
 
     if has_login and has_password:
         warm_root_fingerprint_cache(login, password)
+        get_root_password_hash(password)
     else:
         clear_root_fingerprint_cache()
+        clear_root_password_hash()
 
 
 def log_admin_root_status(settings: Settings) -> None:

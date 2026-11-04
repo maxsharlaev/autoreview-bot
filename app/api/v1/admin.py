@@ -31,6 +31,7 @@ from app.metrics import ops_snapshot
 from app.models import AdminUser, PullRequest, Repository, ReviewRun
 from app.services.admin_passwords import (
     MIN_ADMIN_PASSWORD_LENGTH,
+    get_root_password_hash,
     hash_password,
     password_too_short,
     verify_password,
@@ -70,6 +71,7 @@ def mount_admin_api(app: FastAPI) -> None:
 _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 50
 _GENERIC_AUTH_ERROR = "invalid credentials"
+_DUMMY_HASH = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 _RATE_LIMIT_ERROR = "too many attempts"
 
 
@@ -185,15 +187,20 @@ async def login(
 
     if root_login and _secure_eq(login_name, root_login):
         expected = settings.admin_root_password or ""
-        if expected and _secure_eq(password, expected):
+        # Same single argon2 verify as the DB-user path (no plaintext compare timing gap).
+        ok = (
+            verify_password(get_root_password_hash(expected), password)
+            if expected
+            else verify_password(_DUMMY_HASH, password)
+        )
+        if expected and ok:
             authenticated_kind = "root"
             role = "admin"
             user_id = None
             root_fingerprint = get_root_fingerprint(root_login, expected)
     else:
         db_user = (await session.execute(select(AdminUser).where(AdminUser.login == login_name))).scalar_one_or_none()
-        dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        pw_hash = db_user.password_hash if db_user is not None else dummy
+        pw_hash = db_user.password_hash if db_user is not None else _DUMMY_HASH
         ok = verify_password(pw_hash, password)
         if db_user is not None and db_user.is_active and ok and db_user.role in ("admin", "viewer"):
             authenticated_kind = "user"

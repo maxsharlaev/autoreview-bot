@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from app.api.v1 import admin as admin_api
@@ -724,3 +724,48 @@ def test_admin_queue_reports_global_depth_and_ops_snapshot_unchanged() -> None:
         body = client.get("/api/v1/admin/queue").json()
     assert body["queue_jobs_global"] == 7
     assert "queue_jobs" not in body
+
+
+@pytest.mark.parametrize(
+    ("login", "password", "status"),
+    [
+        (ROOT_LOGIN, "wrong-root-password", 401),
+        ("erin", "wrong-password-x", 401),
+        ("nobody-here", "whatever-password", 401),
+        (ROOT_LOGIN, ROOT_PASSWORD, 200),
+        ("erin", ADMIN_PASSWORD, 200),
+    ],
+)
+def test_login_does_exactly_one_argon2_verify(login: str, password: str, status: int) -> None:
+    from app.services import admin_passwords
+
+    session = FakeSession()
+    session.seed_user(_make_user(login="erin", password=ADMIN_PASSWORD, role="admin"))
+    redis = FakeRedis()
+    settings = _settings()
+    admin_passwords.get_root_password_hash(ROOT_PASSWORD)  # startup warm-up
+    spy = MagicMock(side_effect=admin_passwords.verify_password)
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.verify_password", spy),
+    ):
+        client = _client(session, redis, settings)
+        r = client.post(
+            "/api/v1/admin/login",
+            headers={"Content-Type": "application/json"},
+            json={"login": login, "password": password},
+        )
+    assert r.status_code == status
+    assert spy.call_count == 1
+
+
+def test_root_password_hash_cached_and_refreshed() -> None:
+    from app.services import admin_passwords
+
+    admin_passwords.clear_root_password_hash()
+    h1 = admin_passwords.get_root_password_hash(ROOT_PASSWORD)
+    assert admin_passwords.get_root_password_hash(ROOT_PASSWORD) == h1
+    assert admin_passwords.verify_password(h1, ROOT_PASSWORD)
+    h2 = admin_passwords.get_root_password_hash("another-root-pass-16")
+    assert h2 != h1 and not admin_passwords.verify_password(h2, ROOT_PASSWORD)

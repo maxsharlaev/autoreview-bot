@@ -162,7 +162,7 @@ Sessions carry a `session_version` (DB users) or a root credential fingerprint (
 
 Login rate limiting keys the IP from `request.client.host` only. By default the API process uses uvicorn `--no-proxy-headers`. Behind a reverse proxy enable `--proxy-headers` via `UVICORN_PROXY_HEADERS=1` and set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy (see ENVIRONMENT).
 
-Login failures use a generic `401 invalid credentials`; rate limits return `429`. Rate-limit counters get `INCR` + TTL atomically (Lua); a counter found without TTL gets one again. `REVIEW_API_KEY` / owner API keys never authenticate the admin API.
+Login failures use a generic `401 invalid credentials`; root, existing and unknown logins each cost exactly one argon2 verify (root password is hashed once per process at startup); rate limits return `429`. Rate-limit counters get `INCR` + TTL atomically (Lua); a counter found without TTL gets one again. `REVIEW_API_KEY` / owner API keys never authenticate the admin API.
 
 <!-- section: webhooks -->
 ## Webhooks

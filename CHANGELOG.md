@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AR-007:** admin API without root env fails startup unless an active DB admin exists (message points to `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` for bootstrap); in rootless mode demoting/deactivating the last active admin returns `409` (check + update under `pg_advisory_xact_lock`).
 - **AR-008:** `POST /api/v1/admin/users` maps a concurrent duplicate-login `IntegrityError` to `409` (rollback) instead of `500`.
 - **AR-009:** admin login rate-limit counters use one Lua script for `INCR` + `EXPIRE`; keys without TTL self-repair.
+- **AR-014:** admin root login verifies against an argon2 hash of `ADMIN_ROOT_PASSWORD` computed once per process, so every failed login (root, existing user, unknown user) does exactly one argon2 verify (no timing leak of the root login).
 - **AR-011:** `ADMIN_SESSION_TTL_SECONDS` (1..604800), `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` (1..1000), `ADMIN_LOGIN_RATE_LIMIT_PER_IP` (1..10000), `ADMIN_LOGIN_RATE_WINDOW_SECONDS` (1..86400) are validated; invalid values fail startup.
 - **AR-012:** all `/api/v1/admin` responses, errors included, send `Cache-Control: no-store` and `Pragma: no-cache`.
 - **AR-013:** admin `GET /queue` reports the ARQ depth as `queue_jobs_global` (global across owners); `ops_snapshot` and `GET /api/v1/ops/status` keep `queue_jobs` unchanged.
