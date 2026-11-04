@@ -183,8 +183,12 @@ class GitHubAppClient:
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.request(method, url, headers=headers, json=json, params=params)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.request(method, url, headers=headers, json=json, params=params)
+        except httpx.TransportError as exc:
+            # Message has no headers/body: never leaks the token.
+            raise GitHubError(f"{method} {url} -> transport error: {type(exc).__name__}") from None
         if response.status_code >= 400:
             # On 401, evict the token that was used (if requested)
             if response.status_code == 401 and _evict_on_401 and token:

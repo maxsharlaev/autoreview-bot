@@ -1126,6 +1126,10 @@ def test_cleanup_repeat_is_idempotent_without_github_call() -> None:
         {"has_sensitive_content": False},
         {"has_sensitive_content": None},
         {"comment_url": "https://github.com/acme/repo/pull/7"},
+        {"comment_url": "https://evil.example/acme/repo/pull/7#issuecomment-123"},
+        {"comment_url": "http://github.com/acme/repo/pull/7#issuecomment-123"},
+        {"comment_url": "https://github.com/other/repo/pull/7#issuecomment-123"},
+        {"comment_url": "https://github.com/acme/repo/commit/abc#issuecomment-123"},
     ],
 )
 def test_cleanup_conflicts(over: dict) -> None:
@@ -1141,3 +1145,27 @@ def test_cleanup_owner_not_configured_and_roles() -> None:
     assert _cleanup_call(_cleanup_run(), gh, json=None, data={"reason": "x"}).status_code == 415
     assert _cleanup_call(_cleanup_run(), gh, json={"reason": "x" * 1001}).status_code == 422
     assert gh.calls == []
+
+
+def test_cleanup_accepts_issue_url_and_repo_case() -> None:
+    gh = FakeGitHub()
+    run = _cleanup_run(comment_url="https://github.com/ACME/Repo/issues/7#issuecomment-9")
+    assert _cleanup_call(run, gh).status_code == 200
+    assert gh.calls == [("acme", "repo", 9)]
+
+
+def test_cleanup_transport_error_is_502_without_audit() -> None:
+    import httpx
+    from app.adapters.github import GitHubAppClient
+
+    client = GitHubAppClient.__new__(GitHubAppClient)
+
+    async def token(*_a: Any) -> str:
+        return "t"
+
+    client.installation_token = token  # type: ignore[method-assign]
+    run = _cleanup_run()
+    with patch("httpx.AsyncClient.request", side_effect=httpx.ConnectTimeout("timed out")):
+        r = _cleanup_call(run, client)  # type: ignore[arg-type]
+    assert r.status_code == 502
+    assert run.comment_cleaned_at is None

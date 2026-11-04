@@ -8,6 +8,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -657,7 +658,20 @@ async def unsuppress_finding(
     return _finding_detail(finding)
 
 
-_COMMENT_ID_RE = re.compile(r"#issuecomment-(\d+)$")
+_COMMENT_PATH_RE = re.compile(r"/([^/]+)/([^/]+)/(?:pull|issues)/\d+")
+_COMMENT_FRAGMENT_RE = re.compile(r"issuecomment-(\d+)")
+
+
+def _comment_id_for_repo(url: str, full_name: str) -> int | None:
+    """Comment id if ``url`` is a github.com comment URL of ``full_name``, else None."""
+    parts = urlsplit(url)
+    path = _COMMENT_PATH_RE.fullmatch(parts.path)
+    frag = _COMMENT_FRAGMENT_RE.fullmatch(parts.fragment)
+    if parts.scheme != "https" or (parts.hostname or "").lower() != "github.com" or path is None or frag is None:
+        return None
+    if f"{path.group(1)}/{path.group(2)}".lower() != full_name.lower():
+        return None
+    return int(frag.group(1))
 
 
 def _github_for_owner(owner_id: str) -> GitHubAppClient | None:
@@ -695,16 +709,16 @@ async def cleanup_run_comment(
         return _to_run_item(run)  # idempotent repeat: no GitHub call
     if not run.comment_url or run.has_sensitive_content is not True:
         raise HTTPException(status_code=409, detail="run has no sensitive comment to clean up")
-    match = _COMMENT_ID_RE.search(run.comment_url)
     repo = run.pull_request.repository if run.pull_request is not None else None
-    if match is None or repo is None or "/" not in repo.full_name:
+    comment_id = _comment_id_for_repo(run.comment_url, repo.full_name) if repo is not None else None
+    if comment_id is None:
         raise HTTPException(status_code=409, detail="comment url not recognized")
     github = _github_for_owner(run.owner_id)
     if github is None:
         raise HTTPException(status_code=409, detail="owner_not_configured")
     owner, name = repo.full_name.split("/", 1)
     try:
-        await github.delete_issue_comment(owner, name, int(match.group(1)))
+        await github.delete_issue_comment(owner, name, comment_id)
     except GitHubError as exc:
         if exc.status_code != 404:  # 404 = already deleted on GitHub: treat as done
             logger.warning("Admin comment cleanup failed for run %s: HTTP %s", run.id, exc.status_code)
