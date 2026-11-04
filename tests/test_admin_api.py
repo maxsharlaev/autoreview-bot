@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from app.api.v1 import admin as admin_api
@@ -239,7 +239,7 @@ class _SessionFactory:
 
 def _app(session: FakeSession, redis: FakeRedis) -> FastAPI:
     application = FastAPI()
-    application.include_router(admin_api.router, prefix="/api/v1/admin", tags=["admin"])
+    admin_api.mount_admin_api(application)
     application.state.session_factory = _SessionFactory(session)
     application.state.redis = redis
 
@@ -658,3 +658,69 @@ async def test_rate_limit_repairs_key_without_ttl() -> None:
     assert allowed
     assert redis.store[stuck] == "4"
     assert redis.expiry[stuck] == 300
+
+
+@pytest.mark.parametrize(
+    ("field", "upper"),
+    [
+        ("admin_session_ttl_seconds", 604800),
+        ("admin_login_rate_limit_per_login", 1000),
+        ("admin_login_rate_limit_per_ip", 10000),
+        ("admin_login_rate_window_seconds", 86400),
+    ],
+)
+def test_admin_numeric_settings_bounds(field: str, upper: int) -> None:
+    from pydantic import ValidationError
+
+    assert getattr(_settings(**{field: 1}), field) == 1
+    assert getattr(_settings(**{field: upper}), field) == upper
+    for bad in (0, -1, upper + 1):
+        with pytest.raises(ValidationError):
+            _settings(**{field: bad})
+
+
+def test_admin_responses_are_no_store_including_errors() -> None:
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+    ):
+        client = _client(session, redis, settings)
+        responses = [
+            client.get("/api/v1/admin/me"),  # 401
+            client.post("/api/v1/admin/login", content="x", headers={"Content-Type": "text/plain"}),  # 415
+            client.post(
+                "/api/v1/admin/login",
+                headers={"Content-Type": "application/json"},
+                json={"login": ROOT_LOGIN, "password": ROOT_PASSWORD},
+            ),  # 200
+            client.get("/api/v1/admin/me"),  # 200
+            client.get("/api/v1/admin/nope"),  # 404
+        ]
+    assert [r.status_code for r in responses] == [401, 415, 200, 200, 404]
+    for r in responses:
+        assert r.headers["cache-control"] == "no-store"
+        assert r.headers["pragma"] == "no-cache"
+
+
+def test_admin_queue_reports_global_depth_and_ops_snapshot_unchanged() -> None:
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    snap = {"in_flight": {"pending": 0, "running": 0}, "queue_jobs": 7, "stale_minutes": 30}
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.ops_snapshot", AsyncMock(return_value=dict(snap))),
+    ):
+        client = _client(session, redis, settings)
+        client.post(
+            "/api/v1/admin/login",
+            headers={"Content-Type": "application/json"},
+            json={"login": ROOT_LOGIN, "password": ROOT_PASSWORD},
+        )
+        body = client.get("/api/v1/admin/queue").json()
+    assert body["queue_jobs_global"] == 7
+    assert "queue_jobs" not in body

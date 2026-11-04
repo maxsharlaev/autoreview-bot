@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -50,6 +50,22 @@ from app.services.admin_user_ops import (
 )
 
 router = APIRouter()
+
+ADMIN_PREFIX = "/api/v1/admin"
+_NO_STORE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+
+
+def mount_admin_api(app: FastAPI) -> None:
+    """Mount the admin router; every response under the prefix (errors included) is no-store."""
+    app.include_router(router, prefix=ADMIN_PREFIX, tags=["admin"])
+
+    @app.middleware("http")
+    async def _admin_no_store(request: Request, call_next):  # noqa: ANN001, ANN202
+        response = await call_next(request)
+        if request.url.path == ADMIN_PREFIX or request.url.path.startswith(ADMIN_PREFIX + "/"):
+            response.headers.update(_NO_STORE_HEADERS)
+        return response
+
 
 _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 50
@@ -434,4 +450,5 @@ async def get_queue(
         request.app.state.redis,
         owner_id=owner_id,
     )
+    snap["queue_jobs_global"] = snap.pop("queue_jobs")
     return AdminQueueResponse.model_validate(snap)

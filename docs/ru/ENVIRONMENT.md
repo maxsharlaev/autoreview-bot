@@ -38,12 +38,12 @@
 | `ADMIN_API_ENABLED` | `false` | api | При `true` монтирует `/api/v1/admin/*` (сессия в cookie). По умолчанию выкл. |
 | `ADMIN_ROOT_LOGIN` | `""` | api | Опциональный login root только из env (вместе с `ADMIN_ROOT_PASSWORD`, или оба пустые). |
 | `ADMIN_ROOT_PASSWORD` | `""` | api | Опциональный пароль root (≥ 16 символов). В БД не пишется; root доступен даже при наличии DB-пользователей (recovery). Уберите оба root-var и перезапустите, чтобы отключить. Не должен совпадать с `admin_users.login`. |
-| `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | TTL админ-сессии в Redis (по умолчанию 8ч). |
+| `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | TTL админ-сессии в Redis (по умолчанию 8ч). 1..604800 (7 дней); невалидное значение — старт падает. |
 | `ADMIN_COOKIE_SECURE` | `true` | api | Флаг `Secure` у cookie сессии. `false` только для plain-http localhost. |
 | `ADMIN_SESSION_COOKIE_NAME` | `opr_admin_session` | api | Имя HttpOnly cookie админ-сессии. |
-| `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Макс. попыток логина на имя за окно (Redis fixed window). |
-| `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Макс. попыток логина на IP за окно. |
-| `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Длина окна rate-limit логина в секундах. |
+| `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Макс. попыток логина на имя за окно (Redis fixed window). 1..1000. |
+| `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Макс. попыток логина на IP за окно. 1..10000. |
+| `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Длина окна rate-limit логина в секундах. 1..86400 (1 день). |
 | `UVICORN_PROXY_HEADERS` | `0` | api (process) | По умолчанию `scripts/run-api.sh` передаёт uvicorn `--no-proxy-headers`. При `1`/`true` — `--proxy-headers` (нужен `UVICORN_FORWARDED_ALLOW_IPS`). Нужен `UVICORN_FORWARDED_ALLOW_IPS`. Лимит логина админки смотрит только `request.client.host` (без ручного разбора `X-Forwarded-For`). |
 | `UVICORN_FORWARDED_ALLOW_IPS` | `""` | api (process) | Передаётся в uvicorn `--forwarded-allow-ips` при включённых proxy headers. Укажите адрес(а) reverse proxy; обязателен при `UVICORN_PROXY_HEADERS`. |
 

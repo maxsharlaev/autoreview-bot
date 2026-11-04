@@ -215,12 +215,12 @@ class Settings(BaseSettings):
     admin_api_enabled: bool = False
     admin_root_login: str = ""
     admin_root_password: str = ""
-    admin_session_ttl_seconds: int = 28800
+    admin_session_ttl_seconds: int = Field(default=28800, gt=0, le=604800)
     admin_cookie_secure: bool = True
     admin_session_cookie_name: str = "opr_admin_session"
-    admin_login_rate_limit_per_login: int = 10
-    admin_login_rate_limit_per_ip: int = 30
-    admin_login_rate_window_seconds: int = 300
+    admin_login_rate_limit_per_login: int = Field(default=10, gt=0, le=1000)
+    admin_login_rate_limit_per_ip: int = Field(default=30, gt=0, le=10000)
+    admin_login_rate_window_seconds: int = Field(default=300, gt=0, le=86400)
     worker_max_jobs: int = 4
     worker_job_timeout: int = 900
     config_path: str = "config.yaml"

@@ -230,7 +230,7 @@ async def ops_snapshot(
         in_flight[status] = int(count)
     return {
         "in_flight": in_flight,
-        "queue_jobs_global": await arq_queue_depth(redis),
+        "queue_jobs": await arq_queue_depth(redis),
         "stale_minutes": stale_minutes,
         "stale_runs": [_run_brief(item) for item in stale_runs],
         "last_completed": _run_brief(last_ok) if last_ok else None,

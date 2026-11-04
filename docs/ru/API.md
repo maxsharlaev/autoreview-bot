@@ -139,7 +139,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 <!-- section: get-api-v1-ops-status -->
 ## `GET /api/v1/ops/status`
 
-Только операторский ключ. Возвращает `in_flight` (число pending/running), `queue_jobs_global` (глобально по всем owner'ам; глубина очереди ARQ), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` и `hints` (диагноз простыми словами, например нет квоты модели или worker не разбирает очередь).
+Только операторский ключ. Возвращает `in_flight` (число pending/running), `queue_jobs` (глубина очереди ARQ), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` и `hints` (диагноз простыми словами, например нет квоты модели или worker не разбирает очередь).
 
 
 <!-- section: admin-api -->
@@ -156,7 +156,7 @@ CSRF: cookie `SameSite=Strict`, мутирующие методы принима
 - **DB-пользователи** в `admin_users` (хеши argon2): роли `admin` или `viewer`. `admin` управляет пользователями; деактивация инвалидирует их Redis-сессии. `viewer` — только read-only. Дублирующийся login (в том числе при параллельном создании) — `409`.
 - **Режим без root** (нет `ADMIN_ROOT_*`): старт падает, если в `admin_users` нет ни одного активного `admin` (для bootstrap задайте `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` в `.env`). Понижение или деактивация последнего активного admin — `409`; проверка и изменение идут в одной транзакции под advisory lock Postgres.
 
-**Read-only (viewer+):** `GET /runs` (фильтры `owner_id`, `repo`, `status`, `limit`, `offset`; сначала новые; только безопасные поля), `GET /runs/{id}`, `GET /queue` (`ops_snapshot`, опциональный `owner_id`; `queue_jobs_global` — глубина очереди ARQ по всем owner'ам, фильтр на неё не влияет).
+**Read-only (viewer+):** `GET /runs` (фильтры `owner_id`, `repo`, `status`, `limit`, `offset`; сначала новые; только безопасные поля), `GET /runs/{id}`, `GET /queue` (`ops_snapshot`, опциональный `owner_id`; поле ответа `queue_jobs_global` — глубина очереди ARQ по всем owner'ам, фильтр на неё не влияет). Все ответы админки, включая ошибки, отдаются с `Cache-Control: no-store` и `Pragma: no-cache`.
 
 В сессии хранится `session_version` (DB-пользователи) или fingerprint root (argon2-ключ + HMAC текущих `ADMIN_ROOT_*`); сброс пароля, смена роли и деактивация увеличивают версию — старые cookie перестают работать. Смена/очистка root env инвалидирует root-сессии так же.
 

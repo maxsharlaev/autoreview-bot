@@ -118,7 +118,7 @@ def create_app() -> FastAPI:
     if settings.admin_api_enabled is True:
         from app.api.v1 import admin as admin_api
 
-        application.include_router(admin_api.router, prefix="/api/v1/admin", tags=["admin"])
+        admin_api.mount_admin_api(application)
         logger.info("Admin API mounted at /api/v1/admin")
     return application
 

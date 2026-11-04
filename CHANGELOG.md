@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AR-007:** admin API without root env fails startup unless an active DB admin exists (message points to `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` for bootstrap); in rootless mode demoting/deactivating the last active admin returns `409` (check + update under `pg_advisory_xact_lock`).
 - **AR-008:** `POST /api/v1/admin/users` maps a concurrent duplicate-login `IntegrityError` to `409` (rollback) instead of `500`.
 - **AR-009:** admin login rate-limit counters use one Lua script for `INCR` + `EXPIRE`; keys without TTL self-repair.
-- **AR-010 (breaking field rename):** `ops_snapshot` / `GET /api/v1/ops/status` / `GET /api/v1/admin/queue` field `queue_jobs` → `queue_jobs_global` (ARQ depth is global across owners). Prometheus metric `open_pr_review_arq_queue_jobs` unchanged.
+- **AR-011:** `ADMIN_SESSION_TTL_SECONDS` (1..604800), `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` (1..1000), `ADMIN_LOGIN_RATE_LIMIT_PER_IP` (1..10000), `ADMIN_LOGIN_RATE_WINDOW_SECONDS` (1..86400) are validated; invalid values fail startup.
+- **AR-012:** all `/api/v1/admin` responses, errors included, send `Cache-Control: no-store` and `Pragma: no-cache`.
+- **AR-013:** admin `GET /queue` reports the ARQ depth as `queue_jobs_global` (global across owners); `ops_snapshot` and `GET /api/v1/ops/status` keep `queue_jobs` unchanged.
 - **Admin API (PR #40):** atomic `session_version` bumps in SQL; root session fingerprint via argon2-derived key (min root password 16); `run-api.sh` passes `--no-proxy-headers` by default.
 - **Admin API (PR #40):** invalidate sessions via `admin_users.session_version` (bump on password reset / role change / deactivation) and root credential fingerprint; drop Redis per-user session sets. Login rate-limit IP uses `request.client.host` only (`UVICORN_PROXY_HEADERS` / `UVICORN_FORWARDED_ALLOW_IPS`). Mutating admin endpoints take Pydantic bodies (malformed JSON → 422).
 - **ARB37-011:** real-model E2E reaper fails closed on `docker ps` or persistent `docker rm` failures (container ids only in the message; no docker output); `prepare_real_model_e2e_host` does not proceed.

@@ -38,12 +38,12 @@ Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migr
 | `ADMIN_API_ENABLED` | `false` | api | When `true`, mounts `/api/v1/admin/*` (session cookie auth). Default off. |
 | `ADMIN_ROOT_LOGIN` | `""` | api | Optional env-only root login (set together with `ADMIN_ROOT_PASSWORD`, or leave both empty). |
 | `ADMIN_ROOT_PASSWORD` | `""` | api | Optional env-only root password (≥ 16 chars). Not stored in DB; root stays usable even when DB users exist (recovery). Remove both root vars and restart to disable. Must not collide with `admin_users.login`. |
-| `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | Admin session TTL in Redis (default 8h). |
+| `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | Admin session TTL in Redis (default 8h). 1..604800 (7 days); invalid values fail startup. |
 | `ADMIN_COOKIE_SECURE` | `true` | api | `Secure` flag on the admin session cookie. Set `false` only for plain-http localhost. |
 | `ADMIN_SESSION_COOKIE_NAME` | `opr_admin_session` | api | Name of the HttpOnly admin session cookie. |
-| `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Max login attempts per login name per window (Redis fixed window). |
-| `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Max login attempts per client IP per window. |
-| `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Login rate-limit window length in seconds. |
+| `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Max login attempts per login name per window (Redis fixed window). 1..1000. |
+| `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Max login attempts per client IP per window. 1..10000. |
+| `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Login rate-limit window length in seconds. 1..86400 (1 day). |
 | `UVICORN_PROXY_HEADERS` | `0` | api (process) | Default: `scripts/run-api.sh` passes uvicorn `--no-proxy-headers`. When `1`/`true`, switches to `--proxy-headers` (requires `UVICORN_FORWARDED_ALLOW_IPS`). Requires `UVICORN_FORWARDED_ALLOW_IPS`. Admin login rate limits use `request.client.host` only (no manual `X-Forwarded-For` parsing). |
 | `UVICORN_FORWARDED_ALLOW_IPS` | `""` | api (process) | Passed to uvicorn `--forwarded-allow-ips` when proxy headers are enabled. Set to the reverse-proxy address(es); required when `UVICORN_PROXY_HEADERS` is on. |
 

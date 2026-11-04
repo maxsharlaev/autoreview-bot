@@ -101,7 +101,7 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/ops/status" -Headers @{ Aut
 ### API отвечает `202`, на GitHub ничего не появляется
 
 1. `GET /api/v1/ops/status`.
-2. `queue_jobs_global > 0` и `in_flight.running = 0`: **worker не разбирает очередь.** Контейнер запущен (`./scripts/stack.sh status`)? В логе есть `worker ready` или он упал при старте (ошибка конфига owner'а останавливает worker с кодом выхода 1)? Отвечает ли `:9100/metrics`?
+2. `queue_jobs > 0` и `in_flight.running = 0`: **worker не разбирает очередь.** Контейнер запущен (`./scripts/stack.sh status`)? В логе есть `worker ready` или он упал при старте (ошибка конфига owner'а останавливает worker с кодом выхода 1)? Отвечает ли `:9100/metrics`?
 3. `last_failures[].error_code = CODEX_QUOTA`: **нет квоты модели.** Ревью не висит; оно падает примерно за 30–40 с. Пополните billing организации ключа. До этого повторные запросы только добавляют упавшие прогоны.
 4. `CODEX_AUTH`: ключ не доходит до песочницы. Проверьте `OPENAI_API_KEY` (или ключ owner'а) в окружении **worker'а**, затем пересоздайте worker.
 5. Сразу `status=completed` на том же SHA: прогон переиспользован (webhook или `force: false`). Ручной API по умолчанию использует `force: true`; пример Actions отправляет `force: false`.
