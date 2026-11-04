@@ -1130,6 +1130,8 @@ def test_cleanup_repeat_is_idempotent_without_github_call() -> None:
         {"comment_url": "http://github.com/acme/repo/pull/7#issuecomment-123"},
         {"comment_url": "https://github.com/other/repo/pull/7#issuecomment-123"},
         {"comment_url": "https://github.com/acme/repo/commit/abc#issuecomment-123"},
+        {"comment_url": "https://github.com/acme/repo/pull/8#issuecomment-123"},
+        {"comment_url": "https://[github.com/acme/repo/pull/7#issuecomment-123"},
     ],
 )
 def test_cleanup_conflicts(over: dict) -> None:

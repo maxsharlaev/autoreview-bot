@@ -658,18 +658,22 @@ async def unsuppress_finding(
     return _finding_detail(finding)
 
 
-_COMMENT_PATH_RE = re.compile(r"/([^/]+)/([^/]+)/(?:pull|issues)/\d+")
+_COMMENT_PATH_RE = re.compile(r"/([^/]+)/([^/]+)/(?:pull|issues)/(\d+)")
 _COMMENT_FRAGMENT_RE = re.compile(r"issuecomment-(\d+)")
 
 
-def _comment_id_for_repo(url: str, full_name: str) -> int | None:
+def _comment_id_for_repo(url: str, full_name: str, number: int) -> int | None:
     """Comment id if ``url`` is a github.com comment URL of ``full_name``, else None."""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:  # malformed authority, e.g. unmatched IPv6 bracket
+        return None
     path = _COMMENT_PATH_RE.fullmatch(parts.path)
     frag = _COMMENT_FRAGMENT_RE.fullmatch(parts.fragment)
-    if parts.scheme != "https" or (parts.hostname or "").lower() != "github.com" or path is None or frag is None:
+    if parts.scheme != "https" or host != "github.com" or path is None or frag is None:
         return None
-    if f"{path.group(1)}/{path.group(2)}".lower() != full_name.lower():
+    if f"{path.group(1)}/{path.group(2)}".lower() != full_name.lower() or int(path.group(3)) != number:
         return None
     return int(frag.group(1))
 
@@ -710,7 +714,9 @@ async def cleanup_run_comment(
     if not run.comment_url or run.has_sensitive_content is not True:
         raise HTTPException(status_code=409, detail="run has no sensitive comment to clean up")
     repo = run.pull_request.repository if run.pull_request is not None else None
-    comment_id = _comment_id_for_repo(run.comment_url, repo.full_name) if repo is not None else None
+    comment_id = (
+        _comment_id_for_repo(run.comment_url, repo.full_name, run.pull_request.number) if repo is not None else None
+    )
     if comment_id is None:
         raise HTTPException(status_code=409, detail="comment url not recognized")
     github = _github_for_owner(run.owner_id)

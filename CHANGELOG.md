@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **ARB42-001:** admin comment cleanup validates the full comment URL (`https://github.com/{owner}/{repo}/(pull|issues)/N#issuecomment-<id>`, owner/repo must match the run's repository case-insensitively); otherwise `409`, so a foreign URL can no longer be deleted elsewhere or marked cleaned.
+- **ARB42-003 / ARB42-004:** comment cleanup also requires the URL's pull/issue number to equal the run's PR number, and a malformed URL authority (e.g. unmatched IPv6 bracket) returns `409` instead of `500`.
 - **ARB42-002:** GitHub client wraps `httpx` transport errors (timeout, DNS, connection) into `GitHubError` with a sanitized message; comment cleanup returns `502` without audit instead of `500`.
 - **AR-007:** admin API without root env fails startup unless an active DB admin exists (message points to `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` for bootstrap); in rootless mode demoting/deactivating the last active admin returns `409` (check + update under `pg_advisory_xact_lock`).
 - **AR-008:** `POST /api/v1/admin/users` maps a concurrent duplicate-login `IntegrityError` to `409` (rollback) instead of `500`.
