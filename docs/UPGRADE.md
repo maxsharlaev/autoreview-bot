@@ -29,6 +29,8 @@ Configuration stays compatible: new keys have defaults that keep the previous be
 | `006_comment_authors_objects` | Comment authors stored as `{login, owner_id, kind}` objects. | |
 | `007_findings_owner_id` | `owner_id` on findings, required. | Downgrade may need `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` (below). |
 | `008_review_run_progress` | `progress_status`, `comment_url`, `has_sensitive_content` on review runs. | NULL for existing rows. |
+| `009_admin_users` | `admin_users` for the admin API. | |
+| `010_finding_admin_status` | `status_changed_by`, `status_changed_at`, `status_reason` on findings (admin suppress / unsuppress). | NULL for existing rows. |
 
 <!-- section: rollback -->
 ## Rollback

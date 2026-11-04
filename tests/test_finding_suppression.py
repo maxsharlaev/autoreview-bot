@@ -105,6 +105,7 @@ async def test_suppressed_not_reopened_when_model_re_reports() -> None:
         owner_findings=[prior],
     )
     assert prior.current_status == FINDING_STATUS_FALSE_POSITIVE
+    assert prior.last_seen_run_id == run.id
     assert view.stable_id not in {item.stable_id for item in verified.findings}
     assert all(item.stable_id != view.stable_id for item in transitions)
     assert not any(item.status == "regressed" for item in transitions)

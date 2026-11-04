@@ -1676,6 +1676,8 @@ async def _store_findings(
         prior = existing.get(view.stable_id)
         if prior is not None and is_suppressed_status(prior.current_status):
             # Keep accepted / false_positive; do not reopen or emit sticky transitions.
+            # Only record that the model still reports it.
+            prior.last_seen_run_id = run.id
             suppressed_fresh_ids.add(view.stable_id)
             continue
         if prior is None:

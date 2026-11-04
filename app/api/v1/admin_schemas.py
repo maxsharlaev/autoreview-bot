@@ -101,3 +101,55 @@ class AdminQueueResponse(BaseModel):
     last_completed: dict[str, Any] | None = None
     last_failures: list[dict[str, Any]] = Field(default_factory=list)
     hints: list[str] = Field(default_factory=list)
+
+
+MAX_FINDING_REASON_LENGTH = 1000
+
+
+class AdminFindingItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    owner_id: str
+    repository: str
+    pull_request_number: int
+    stable_id: str
+    severity: str
+    category: str
+    path: str
+    line: int | None = None
+    title: str
+    current_status: str
+    first_seen_run_id: uuid.UUID
+    last_seen_run_id: uuid.UUID
+    status_changed_by: str | None = None
+    status_changed_at: datetime | None = None
+    status_reason: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class AdminFindingDetail(AdminFindingItem):
+    scenario: str
+    evidence: str
+    recommendation: str
+
+
+class AdminFindingListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AdminFindingItem]
+    limit: int
+    offset: int
+    count: int
+
+
+class AdminFindingSuppressRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted", "false_positive"]
+    reason: str | None = Field(default=None, max_length=MAX_FINDING_REASON_LENGTH)
+
+
+class AdminFindingUnsuppressRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")

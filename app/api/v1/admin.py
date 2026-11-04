@@ -9,12 +9,17 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.api.admin_auth import ADMIN_SESSION_COOKIE, AdminPrincipal, AdminPrincipalDep, require_admin_role
 from app.api.deps import SessionDep
 from app.api.v1.admin_schemas import (
+    AdminFindingDetail,
+    AdminFindingItem,
+    AdminFindingListResponse,
+    AdminFindingSuppressRequest,
+    AdminFindingUnsuppressRequest,
     AdminLoginRequest,
     AdminMeResponse,
     AdminPasswordResetRequest,
@@ -28,7 +33,7 @@ from app.api.v1.admin_schemas import (
 )
 from app.config import get_settings
 from app.metrics import ops_snapshot
-from app.models import AdminUser, PullRequest, Repository, ReviewRun
+from app.models import AdminUser, Finding, PullRequest, Repository, ReviewRun
 from app.services.admin_passwords import (
     MIN_ADMIN_PASSWORD_LENGTH,
     ahash_password,
@@ -48,6 +53,7 @@ from app.services.admin_user_ops import (
     reset_password_atomic,
     update_user_atomic,
 )
+from app.services.finding_status import FINDING_STATUS_OPEN, SUPPRESSED_FINDING_STATUSES
 
 router = APIRouter()
 
@@ -445,6 +451,193 @@ async def get_run(
     if owner and run.owner_id != owner:
         raise HTTPException(status_code=404, detail="review run not found")
     return _to_run_item(run)
+
+
+_FINDING_NOT_FOUND = "finding not found"
+
+
+def _finding_fields(finding: Finding) -> dict[str, Any]:
+    pr = finding.pull_request
+    repo = pr.repository if pr is not None else None
+    return {
+        "id": finding.id,
+        "owner_id": finding.owner_id,
+        "repository": repo.full_name if repo is not None else "",
+        "pull_request_number": pr.number if pr is not None else 0,
+        "stable_id": finding.stable_id,
+        "severity": finding.severity,
+        "category": finding.category,
+        "path": finding.path,
+        "line": finding.line,
+        "title": finding.title,
+        "current_status": finding.current_status,
+        "first_seen_run_id": finding.first_seen_run_id,
+        "last_seen_run_id": finding.last_seen_run_id,
+        "status_changed_by": finding.status_changed_by,
+        "status_changed_at": finding.status_changed_at,
+        "status_reason": finding.status_reason,
+        "created_at": finding.created_at,
+        "updated_at": finding.updated_at,
+    }
+
+
+def _finding_detail(finding: Finding) -> AdminFindingDetail:
+    return AdminFindingDetail(
+        **_finding_fields(finding),
+        scenario=finding.scenario,
+        evidence=finding.evidence,
+        recommendation=finding.recommendation,
+    )
+
+
+async def _load_finding(session: Any, finding_id: uuid.UUID) -> Finding | None:
+    return (
+        await session.execute(
+            select(Finding)
+            .options(selectinload(Finding.pull_request).selectinload(PullRequest.repository))
+            .where(Finding.id == finding_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+@router.get("/findings", response_model=AdminFindingListResponse)
+async def list_findings(
+    session: SessionDep,
+    _: AdminPrincipalDep,
+    owner_id: Annotated[str | None, Query()] = None,
+    repo: Annotated[str | None, Query(description="Repository full_name")] = None,
+    pr: Annotated[int | None, Query(ge=1, description="Pull request number")] = None,
+    status: Annotated[list[str] | None, Query()] = None,
+    severity: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminFindingListResponse:
+    filters: list[Any] = []
+    if (owner_id or "").strip():
+        filters.append(Finding.owner_id == owner_id.strip())
+    if (repo or "").strip():
+        filters.append(Repository.full_name == repo.strip())
+    if pr is not None:
+        filters.append(PullRequest.number == pr)
+    statuses = [s.strip() for s in (status or []) if s.strip()]
+    if statuses:
+        filters.append(Finding.current_status.in_(statuses))
+    if (severity or "").strip():
+        filters.append(Finding.severity == severity.strip())
+
+    joined = (
+        select(Finding)
+        .join(PullRequest, Finding.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+    )
+    count_q = (
+        select(func.count())
+        .select_from(Finding)
+        .join(PullRequest, Finding.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+    )
+    if filters:
+        joined = joined.where(*filters)
+        count_q = count_q.where(*filters)
+    total = int((await session.execute(count_q)).scalar_one())
+    rows = (
+        (
+            await session.execute(
+                joined.options(selectinload(Finding.pull_request).selectinload(PullRequest.repository))
+                .order_by(Finding.updated_at.desc(), Finding.id)
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return AdminFindingListResponse(
+        items=[AdminFindingItem(**_finding_fields(f)) for f in rows], limit=limit, offset=offset, count=total
+    )
+
+
+@router.get("/findings/{finding_id}", response_model=AdminFindingDetail)
+async def get_finding(
+    finding_id: uuid.UUID,
+    session: SessionDep,
+    _: AdminPrincipalDep,
+    owner_id: Annotated[str | None, Query()] = None,
+) -> AdminFindingDetail:
+    finding = await _load_finding(session, finding_id)
+    owner = (owner_id or "").strip()
+    if finding is None or (owner and finding.owner_id != owner):
+        raise HTTPException(status_code=404, detail=_FINDING_NOT_FOUND)
+    return _finding_detail(finding)
+
+
+@router.post("/findings/{finding_id}/suppress", response_model=AdminFindingDetail)
+async def suppress_finding(
+    finding_id: uuid.UUID,
+    session: SessionDep,
+    _: JsonContentType,
+    principal: AdminPrincipalDep,
+    body: AdminFindingSuppressRequest,
+) -> AdminFindingDetail:
+    _admin_only(principal)
+    # Single UPDATE; a review run already in flight may still overwrite it (documented residual risk).
+    changed = (
+        await session.execute(
+            update(Finding)
+            .where(Finding.id == finding_id)
+            .values(
+                current_status=body.status,
+                status_changed_by=principal.login,
+                status_changed_at=func.now(),
+                status_reason=(body.reason or "").strip() or None,
+            )
+            .returning(Finding.id)
+        )
+    ).scalar_one_or_none()
+    if changed is None:
+        await session.rollback()
+        raise HTTPException(status_code=404, detail=_FINDING_NOT_FOUND)
+    await session.commit()
+    finding = await _load_finding(session, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail=_FINDING_NOT_FOUND)
+    return _finding_detail(finding)
+
+
+@router.post("/findings/{finding_id}/unsuppress", response_model=AdminFindingDetail)
+async def unsuppress_finding(
+    finding_id: uuid.UUID,
+    session: SessionDep,
+    _: JsonContentType,
+    principal: AdminPrincipalDep,
+    body: AdminFindingUnsuppressRequest,
+) -> AdminFindingDetail:
+    _admin_only(principal)
+    changed = (
+        await session.execute(
+            update(Finding)
+            .where(Finding.id == finding_id, Finding.current_status.in_(sorted(SUPPRESSED_FINDING_STATUSES)))
+            .values(
+                current_status=FINDING_STATUS_OPEN,
+                status_changed_by=principal.login,
+                status_changed_at=func.now(),
+                status_reason=None,
+            )
+            .returning(Finding.id)
+        )
+    ).scalar_one_or_none()
+    if changed is None:
+        await session.rollback()
+        exists = await _load_finding(session, finding_id)
+        if exists is None:
+            raise HTTPException(status_code=404, detail=_FINDING_NOT_FOUND)
+        raise HTTPException(status_code=409, detail="finding is not suppressed")
+    await session.commit()
+    finding = await _load_finding(session, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail=_FINDING_NOT_FOUND)
+    return _finding_detail(finding)
 
 
 @router.get("/queue", response_model=AdminQueueResponse)

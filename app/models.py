@@ -189,6 +189,10 @@ class Finding(TimestampMixin, Base):
     details_visibility: Mapped[str | None] = mapped_column(String(16), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     current_status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    # Last admin status change (suppress / unsuppress); NULL until an admin acts.
+    status_changed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     pull_request: Mapped[PullRequest] = relationship(back_populates="findings")
     transitions: Mapped[list[FindingTransition]] = relationship(back_populates="finding")
