@@ -15,6 +15,8 @@ API слушает порт 8000 (`127.0.0.1:8000` в Compose; перед ним
 | `GET /api/v1/admin/runs/{id}` | admin session (viewer+) | Один run (безопасные поля). |
 | `GET /api/v1/admin/queue` | admin session (viewer+) | Снимок очереди (`ops_snapshot`). |
 | `GET/POST/PATCH /api/v1/admin/users*` | роль admin | Управление DB-пользователями админки. |
+| `GET /api/v1/admin/findings`, `GET /api/v1/admin/findings/{id}` | admin session (viewer+) | Список / одна находка. |
+| `POST /api/v1/admin/findings/{id}/suppress`, `…/unsuppress` | роль admin | Пометить `accepted` / `false_positive` или вернуть в `open`. |
 | `POST /api/v1/pull-request` | подпись webhook | Webhook GitHub, маршрутизируется к owner'у по репозиторию. |
 | `POST /api/v1/pull-request/{owner_id}` | подпись webhook этого owner'а | Webhook GitHub для одного owner'а. |
 | `GET /health` | нет | Liveness: `{"status": "ok"}`. |
@@ -157,6 +159,13 @@ CSRF: cookie `SameSite=Strict`, мутирующие методы принима
 - **Режим без root** (нет `ADMIN_ROOT_*`): старт падает, если в `admin_users` нет ни одного активного `admin` (для bootstrap задайте `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` в `.env`). Понижение или деактивация последнего активного admin — `409`; проверка и изменение идут в одной транзакции под advisory lock Postgres.
 
 **Read-only (viewer+):** `GET /runs` (фильтры `owner_id`, `repo`, `status`, `limit`, `offset`; сначала новые; только безопасные поля), `GET /runs/{id}`, `GET /queue` (`ops_snapshot`, опциональный `owner_id`; поле ответа `queue_jobs_global` — глубина очереди ARQ по всем owner'ам, фильтр на неё не влияет). Все ответы админки, включая ошибки, отдаются с `Cache-Control: no-store` и `Pragma: no-cache`.
+
+**Находки (findings):**
+- `GET /findings` (viewer+): фильтры `owner_id`, `repo`, `pr` (номер), `status` (можно несколько), `severity`, `limit`, `offset`; сначала недавно изменённые. В элементах списка нет текстов (`scenario`/`evidence`/`recommendation`); `GET /findings/{id}` (опциональный `owner_id`) отдаёт их независимо от `details_visibility`.
+- `POST /findings/{id}/suppress` (роль admin, JSON) `{"status": "accepted" | "false_positive", "reason": "…"}` (`reason` опционален, ≤ 1000 символов). Повтор обновляет статус/причину. `POST /findings/{id}/unsuppress` (роль admin, JSON `{}`) ставит `open`; `409`, если находка не подавлена; `404` для неизвестного id.
+- Каждое изменение пишет `status_changed_by` (login админа), `status_changed_at` и `status_reason` (очищается при unsuppress). Хранится только последнее изменение.
+- Подавленная находка не попадает в previous-контекст модели, carry-forward, sticky-комментарий и digest. Если следующий прогон снова её находит, она остаётся подавленной; меняется только `last_seen_run_id`. После unsuppress следующий прогон снова считает её открытой.
+- Остаточный риск: изменение — один `UPDATE`; уже идущий прогон ревью этого PR может перезаписать его при сохранении находок. При необходимости повторите действие после завершения прогона.
 
 В сессии хранится `session_version` (DB-пользователи) или fingerprint root (argon2-ключ + HMAC текущих `ADMIN_ROOT_*`); сброс пароля, смена роли и деактивация увеличивают версию — старые cookie перестают работать. Root-учётка читается один раз при старте: смените или очистите `ADMIN_ROOT_*` в `.env` и перезапустите; после изменения старые root-сессии перестают работать.
 

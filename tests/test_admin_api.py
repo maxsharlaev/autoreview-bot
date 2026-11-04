@@ -147,6 +147,9 @@ class FakeSession:
     async def commit(self) -> None:
         return None
 
+    async def rollback(self) -> None:
+        return None
+
     async def refresh(self, obj: AdminUser) -> None:
         return None
 
@@ -989,3 +992,52 @@ def test_malformed_stored_session_is_401_and_deleted(payload: str) -> None:
         client.cookies.set("opr_admin_session", "bad-token")
         assert client.get("/api/v1/admin/me").status_code == 401
     assert key not in redis.store
+
+
+# ---- findings (unit; DB flow lives in test_admin_findings_db.py) -------------
+
+
+def _login_as(client: TestClient, login: str, password: str) -> None:
+    r = client.post(
+        "/api/v1/admin/login",
+        headers={"Content-Type": "application/json"},
+        json={"login": login, "password": password},
+    )
+    assert r.status_code == 200
+
+
+def test_findings_mutations_viewer_forbidden_and_json_only() -> None:
+    session = FakeSession()
+    session.seed_user(_make_user(login="vera", password=VIEWER_PASSWORD, role="viewer"))
+    redis = FakeRedis()
+    settings = _settings()
+    fid = uuid.uuid4()
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+    ):
+        client = _client(session, redis, settings)
+        _login_as(client, "vera", VIEWER_PASSWORD)
+        assert client.post(f"/api/v1/admin/findings/{fid}/suppress", json={"status": "accepted"}).status_code == 403
+        assert client.post(f"/api/v1/admin/findings/{fid}/unsuppress", json={}).status_code == 403
+        assert client.post(f"/api/v1/admin/findings/{fid}/suppress", data={"status": "accepted"}).status_code == 415
+
+
+def test_findings_suppress_validation_and_not_found() -> None:
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    fid = uuid.uuid4()
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+    ):
+        client = _client(session, redis, settings)
+        _login_as(client, ROOT_LOGIN, ROOT_PASSWORD)
+        url = f"/api/v1/admin/findings/{fid}/suppress"
+        assert client.post(url, json={"status": "open"}).status_code == 422
+        assert client.post(url, json={"status": "accepted", "reason": "x" * 1001}).status_code == 422
+        assert client.post(url, json={"status": "accepted", "extra": 1}).status_code == 422
+        assert client.post(url, json={"status": "accepted", "reason": "ok"}).status_code == 404
+        assert client.post(f"/api/v1/admin/findings/{fid}/unsuppress", json={}).status_code == 404
+        assert client.get(f"/api/v1/admin/findings/{fid}").status_code == 404

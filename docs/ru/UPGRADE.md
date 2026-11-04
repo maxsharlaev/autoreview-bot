@@ -29,6 +29,8 @@
 | `006_comment_authors_objects` | Авторы комментариев хранятся как объекты `{login, owner_id, kind}`. | |
 | `007_findings_owner_id` | `owner_id` в замечаниях, обязательный. | Для downgrade может понадобиться `MIGRATION_007_DOWNGRADE_DROP_DUPLICATES=1` (ниже). |
 | `008_review_run_progress` | `progress_status`, `comment_url`, `has_sensitive_content` в прогонах ревью. | NULL для существующих строк. |
+| `009_admin_users` | `admin_users` для admin API. | |
+| `010_finding_admin_status` | `status_changed_by`, `status_changed_at`, `status_reason` в findings (suppress / unsuppress из админки). | NULL для существующих строк. |
 
 <!-- section: rollback -->
 ## Откат

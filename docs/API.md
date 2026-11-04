@@ -15,6 +15,8 @@ The API listens on port 8000 (`127.0.0.1:8000` in Compose; put a TLS reverse pro
 | `GET /api/v1/admin/runs/{id}` | admin session (viewer+) | One review run (safe fields). |
 | `GET /api/v1/admin/queue` | admin session (viewer+) | Queue snapshot (`ops_snapshot`). |
 | `GET/POST/PATCH /api/v1/admin/users*` | admin role | Manage DB admin users. |
+| `GET /api/v1/admin/findings`, `GET /api/v1/admin/findings/{id}` | admin session (viewer+) | List / read findings. |
+| `POST /api/v1/admin/findings/{id}/suppress`, `…/unsuppress` | admin role | Mark `accepted` / `false_positive`, or back to `open`. |
 | `POST /api/v1/pull-request` | webhook signature | GitHub webhook, routed to an owner by repository. |
 | `POST /api/v1/pull-request/{owner_id}` | that owner's webhook signature | GitHub webhook for one owner. |
 | `GET /health` | none | Liveness: `{"status": "ok"}`. |
@@ -157,6 +159,13 @@ CSRF: cookie is `SameSite=Strict` and mutating endpoints accept JSON bodies only
 - **Rootless mode** (no `ADMIN_ROOT_*`): startup fails unless `admin_users` has at least one active `admin` (set `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` in `.env` to bootstrap). Demoting or deactivating the last active admin returns `409`; the check and update run in one transaction under a Postgres advisory lock.
 
 **Read-only (viewer+):** `GET /runs` (filters `owner_id`, `repo`, `status`, `limit`, `offset`; newest first; safe fields only — no summaries/tokens), `GET /runs/{id}`, `GET /queue` (reuses `ops_snapshot`, optional `owner_id`; the response field `queue_jobs_global` is the ARQ depth across all owners and ignores the filter). All admin responses, errors included, carry `Cache-Control: no-store` and `Pragma: no-cache`.
+
+**Findings:**
+- `GET /findings` (viewer+): filters `owner_id`, `repo`, `pr` (number), `status` (repeatable), `severity`, `limit`, `offset`; most recently updated first. Items carry no texts (`scenario`/`evidence`/`recommendation`); `GET /findings/{id}` (optional `owner_id`) adds them regardless of `details_visibility`.
+- `POST /findings/{id}/suppress` (admin role, JSON) `{"status": "accepted" | "false_positive", "reason": "…"}` (`reason` optional, ≤ 1000 chars). Repeating it updates status/reason. `POST /findings/{id}/unsuppress` (admin role, JSON `{}`) sets `open`; `409` if the finding is not suppressed; `404` for an unknown id.
+- Each change records `status_changed_by` (admin login), `status_changed_at` and `status_reason` (cleared on unsuppress). Only the latest change is kept.
+- A suppressed finding is left out of the model's previous context, carry-forward, sticky comment and digest. If a later run reports it again it stays suppressed; only `last_seen_run_id` moves. After unsuppress the next run treats it as open again.
+- Residual risk: a change is a single `UPDATE`; a review run already in flight for that PR may still overwrite it when it stores findings. Repeat the action after the run finishes if needed.
 
 Sessions carry a `session_version` (DB users) or a root credential fingerprint (argon2-derived key + HMAC of current `ADMIN_ROOT_*`); password reset, role change, and deactivation bump the version so older cookies stop working. Root credentials are read once at startup: change or clear `ADMIN_ROOT_*` in `.env` and restart; existing root sessions stop working when they changed.
 
