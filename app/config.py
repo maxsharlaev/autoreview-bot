@@ -217,7 +217,6 @@ class Settings(BaseSettings):
     admin_root_password: str = ""
     admin_session_ttl_seconds: int = Field(default=28800, gt=0, le=604800)
     admin_cookie_secure: bool = True
-    admin_session_cookie_name: str = "opr_admin_session"
     admin_login_rate_limit_per_login: int = Field(default=10, gt=0, le=1000)
     admin_login_rate_limit_per_ip: int = Field(default=30, gt=0, le=10000)
     admin_login_rate_window_seconds: int = Field(default=300, gt=0, le=86400)

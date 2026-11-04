@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import threading
+from collections.abc import Callable
 
+import anyio.to_thread
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
@@ -59,3 +61,29 @@ def password_too_short(password: str, *, minimum: int = MIN_ADMIN_PASSWORD_LENGT
 
 def root_password_too_short(password: str) -> bool:
     return password_too_short(password, minimum=MIN_ROOT_PASSWORD_LENGTH)
+
+
+# Argon2 runs in worker threads, at most 2 at a time, so logins never block the event loop.
+_ARGON2_SLOTS = threading.BoundedSemaphore(2)
+
+
+def _bounded[T](fn: Callable[..., T], *args: object) -> T:
+    with _ARGON2_SLOTS:
+        return fn(*args)
+
+
+async def run_argon2[T](fn: Callable[..., T], *args: object) -> T:
+    return await anyio.to_thread.run_sync(_bounded, fn, *args)
+
+
+async def averify_password(password_hash: str, password: str) -> bool:
+    # Late-bound lookup keeps verify_password patchable in tests.
+    return await run_argon2(lambda: verify_password(password_hash, password))
+
+
+async def ahash_password(password: str) -> str:
+    return await run_argon2(lambda: hash_password(password))
+
+
+async def aget_root_password_hash(password: str) -> str:
+    return await run_argon2(lambda: get_root_password_hash(password))

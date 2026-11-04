@@ -748,7 +748,7 @@ def test_login_does_exactly_one_argon2_verify(login: str, password: str, status:
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
-        patch("app.api.v1.admin.verify_password", spy),
+        patch("app.services.admin_passwords.verify_password", spy),
     ):
         client = _client(session, redis, settings)
         r = client.post(
@@ -793,3 +793,38 @@ def test_login_body_max_lengths() -> None:
         AdminLoginRequest(login="l" * (MAX_ADMIN_LOGIN_LENGTH + 1), password="p")
     with pytest.raises(ValidationError):
         AdminLoginRequest(login="l", password="p" * (MAX_ADMIN_PASSWORD_LENGTH + 1))
+
+
+@pytest.mark.asyncio
+async def test_slow_password_verify_does_not_block_other_requests() -> None:
+    import asyncio
+    import time
+
+    import httpx
+    from app.services import admin_passwords
+
+    real_verify = admin_passwords.verify_password
+
+    def slow_verify(password_hash: str, password: str) -> bool:
+        time.sleep(0.5)
+        return real_verify(password_hash, password)
+
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    app = _app(session, redis)
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.services.admin_passwords.verify_password", slow_verify),
+    ):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            login = asyncio.create_task(
+                client.post("/api/v1/admin/login", json={"login": "nobody", "password": "whatever-pass"})
+            )
+            await asyncio.sleep(0.1)
+            me = await client.get("/api/v1/admin/me")
+            assert me.status_code == 401
+            assert not login.done()
+            assert (await login).status_code == 401

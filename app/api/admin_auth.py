@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 from fastapi import Cookie, Depends, HTTPException, Request
 
 from app.config import get_settings
+from app.services.admin_passwords import run_argon2
 from app.services.admin_root_crypto import get_root_fingerprint
 from app.services.admin_sessions import destroy_session, load_session
 
@@ -25,14 +26,12 @@ class AdminPrincipal:
     session_token: str
 
 
+ADMIN_SESSION_COOKIE = "opr_admin_session"
+
+
 async def get_admin_session_token(
-    request: Request,
-    opr_admin_session: str | None = Cookie(default=None, alias="opr_admin_session"),
+    opr_admin_session: str | None = Cookie(default=None, alias=ADMIN_SESSION_COOKIE),
 ) -> str | None:
-    settings = get_settings()
-    name = settings.admin_session_cookie_name
-    if name != "opr_admin_session":
-        return request.cookies.get(name)
     return opr_admin_session
 
 
@@ -61,7 +60,7 @@ async def require_admin_principal(
         if not root_login or not root_password:
             await destroy_session(redis, token)
             raise HTTPException(status_code=401, detail="not authenticated")
-        expected = get_root_fingerprint(root_login, root_password)
+        expected = await run_argon2(get_root_fingerprint, root_login, root_password)
         presented = session.root_fingerprint or ""
         if not _hmac_eq(expected, presented) or not _hmac_eq(session.login, root_login):
             await destroy_session(redis, token)

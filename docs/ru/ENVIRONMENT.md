@@ -40,7 +40,6 @@
 | `ADMIN_ROOT_PASSWORD` | `""` | api | Опциональный пароль root (16..1024 символов; вне диапазона — старт падает). В БД не пишется; root доступен даже при наличии DB-пользователей (recovery). Уберите оба root-var и перезапустите, чтобы отключить. Не должен совпадать с `admin_users.login`. |
 | `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | TTL админ-сессии в Redis (по умолчанию 8ч). 1..604800 (7 дней); невалидное значение — старт падает. |
 | `ADMIN_COOKIE_SECURE` | `true` | api | Флаг `Secure` у cookie сессии. `false` только для plain-http localhost. |
-| `ADMIN_SESSION_COOKIE_NAME` | `opr_admin_session` | api | Имя HttpOnly cookie админ-сессии. |
 | `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Макс. попыток логина на имя за окно (Redis fixed window). 1..1000. |
 | `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Макс. попыток логина на IP за окно. 1..10000. |
 | `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Длина окна rate-limit логина в секундах. 1..86400 (1 день). |

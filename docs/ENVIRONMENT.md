@@ -40,7 +40,6 @@ Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migr
 | `ADMIN_ROOT_PASSWORD` | `""` | api | Optional env-only root password (16..1024 chars; out of range fails startup). Not stored in DB; root stays usable even when DB users exist (recovery). Remove both root vars and restart to disable. Must not collide with `admin_users.login`. |
 | `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | Admin session TTL in Redis (default 8h). 1..604800 (7 days); invalid values fail startup. |
 | `ADMIN_COOKIE_SECURE` | `true` | api | `Secure` flag on the admin session cookie. Set `false` only for plain-http localhost. |
-| `ADMIN_SESSION_COOKIE_NAME` | `opr_admin_session` | api | Name of the HttpOnly admin session cookie. |
 | `ADMIN_LOGIN_RATE_LIMIT_PER_LOGIN` | `10` | api | Max login attempts per login name per window (Redis fixed window). 1..1000. |
 | `ADMIN_LOGIN_RATE_LIMIT_PER_IP` | `30` | api | Max login attempts per client IP per window. 1..10000. |
 | `ADMIN_LOGIN_RATE_WINDOW_SECONDS` | `300` | api | Login rate-limit window length in seconds. 1..86400 (1 day). |

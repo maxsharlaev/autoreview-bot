@@ -55,8 +55,7 @@ def validate_admin_env(settings: Settings) -> None:
         raise AdminApiConfigError(f"ADMIN_ROOT_PASSWORD must be at most {MAX_ADMIN_PASSWORD_LENGTH} characters")
 
     if has_login and has_password:
-        warm_root_fingerprint_cache(login, password)
-        get_root_password_hash(password)
+        return
     else:
         clear_root_fingerprint_cache()
         clear_root_password_hash()
@@ -108,3 +107,20 @@ async def assert_admin_bootstrap_possible(
             "ADMIN_API_ENABLED is true but no root credentials are set and admin_users has no active admin; "
             "set ADMIN_ROOT_LOGIN and ADMIN_ROOT_PASSWORD in .env to bootstrap"
         )
+
+
+async def warm_admin_root_caches(settings: Settings) -> None:
+    """Precompute root fingerprint + argon2 hash in a worker thread (off the event loop)."""
+    if settings.admin_api_enabled is not True:
+        return
+    login = (settings.admin_root_login or "").strip()
+    password = settings.admin_root_password or ""
+    if not (login and password):
+        return
+    from app.services.admin_passwords import run_argon2
+
+    def _warm() -> None:
+        warm_root_fingerprint_cache(login, password)
+        get_root_password_hash(password)
+
+    await run_argon2(_warm)

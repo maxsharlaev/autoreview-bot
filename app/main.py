@@ -24,6 +24,7 @@ from app.services.admin_config import (
     assert_root_login_not_in_db,
     log_admin_root_status,
     validate_admin_env,
+    warm_admin_root_caches,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await assert_root_login_not_in_db(app.state.session_factory, settings)
             await assert_admin_bootstrap_possible(app.state.session_factory, settings)
+            await warm_admin_root_caches(settings)
         except AdminApiConfigError as admin_exc:
             logger.error("Admin API configuration error: %s", admin_exc)
             raise SystemExit(1) from admin_exc
