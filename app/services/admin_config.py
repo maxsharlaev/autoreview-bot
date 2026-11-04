@@ -77,3 +77,21 @@ async def assert_root_login_not_in_db(
         ).scalar_one_or_none()
     if existing is not None:
         raise AdminApiConfigError(f"ADMIN_ROOT_LOGIN collides with an existing admin_users.login ({login!r})")
+
+
+async def assert_admin_bootstrap_possible(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> None:
+    """Without root env, fail startup unless at least one active DB admin exists."""
+    if settings.admin_api_enabled is not True or (settings.admin_root_login or "").strip():
+        return
+    from app.services.admin_user_ops import count_active_admins
+
+    async with session_factory() as session:
+        count = await count_active_admins(session)
+    if count == 0:
+        raise AdminApiConfigError(
+            "ADMIN_API_ENABLED is true but no root credentials are set and admin_users has no active admin; "
+            "set ADMIN_ROOT_LOGIN and ADMIN_ROOT_PASSWORD in .env to bootstrap"
+        )

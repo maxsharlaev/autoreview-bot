@@ -93,7 +93,7 @@ class AdminQueueResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     in_flight: dict[str, int]
-    queue_jobs: int
+    queue_jobs_global: int
     stale_minutes: int
     stale_runs: list[dict[str, Any]] = Field(default_factory=list)
     last_completed: dict[str, Any] | None = None

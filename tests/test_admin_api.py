@@ -91,6 +91,14 @@ class FakeRedis:
         self.expiry[key] = seconds
         return True
 
+    async def eval(self, script: str, numkeys: int, key: str, window: int) -> int:
+        # Mirrors _INCR_WITH_TTL_LUA: INCR, then EXPIRE when the key has no TTL.
+        assert numkeys == 1 and "INCR" in script and "TTL" in script
+        val = await self.incr(key)
+        if key not in self.expiry:
+            self.expiry[key] = int(window)
+        return val
+
 
 class FakeResult:
     def __init__(self, *, scalar=None, scalars_list=None):
@@ -131,7 +139,7 @@ class FakeSession:
         except Exception:
             return str(stmt)
 
-    async def execute(self, stmt):  # noqa: ANN001
+    async def execute(self, stmt, *args, **kwargs):  # noqa: ANN001
         sql = self._compiled(stmt)
         sql_l = sql.lower()
         if sql_l.strip().startswith("update") and "admin_users" in sql_l:
@@ -635,3 +643,18 @@ def test_review_api_key_does_not_grant_admin() -> None:
             headers={"Authorization": "Bearer operator-key-not-admin"},
         )
         assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_repairs_key_without_ttl() -> None:
+    from app.services.admin_sessions import RATE_LOGIN_PREFIX, check_and_bump_rate_limit
+
+    redis = FakeRedis()
+    stuck = f"{RATE_LOGIN_PREFIX}stuck"
+    redis.store[stuck] = "3"  # no TTL: would never expire with the old count==1 logic
+    allowed = await check_and_bump_rate_limit(
+        redis, login="stuck", ip="1.2.3.4", per_login=5, per_ip=20, window_seconds=300
+    )
+    assert allowed
+    assert redis.store[stuck] == "4"
+    assert redis.expiry[stuck] == 300

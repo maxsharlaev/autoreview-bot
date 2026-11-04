@@ -114,6 +114,20 @@ async def destroy_session(redis: Redis, token: str | None) -> None:
     await redis.delete(_session_key(token))
 
 
+# INCR + EXPIRE atomically; a key left without TTL (e.g. crash between calls) gets one again.
+_INCR_WITH_TTL_LUA = """
+local count = redis.call('INCR', KEYS[1])
+if redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
+
+
+async def _incr_with_ttl(redis: Redis, key: str, window_seconds: int) -> int:
+    return int(await redis.eval(_INCR_WITH_TTL_LUA, 1, key, int(window_seconds)))
+
+
 async def check_and_bump_rate_limit(
     redis: Redis,
     *,
@@ -127,12 +141,8 @@ async def check_and_bump_rate_limit(
     login_key = f"{RATE_LOGIN_PREFIX}{(login or '').strip().lower() or '_'}"
     ip_key = f"{RATE_IP_PREFIX}{(ip or '').strip() or '_'}"
 
-    login_count = int(await redis.incr(login_key))
-    if login_count == 1:
-        await redis.expire(login_key, window_seconds)
-    ip_count = int(await redis.incr(ip_key))
-    if ip_count == 1:
-        await redis.expire(ip_key, window_seconds)
+    login_count = await _incr_with_ttl(redis, login_key, window_seconds)
+    ip_count = await _incr_with_ttl(redis, ip_key, window_seconds)
 
     if login_count > per_login or ip_count > per_ip:
         return False

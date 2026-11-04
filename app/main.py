@@ -20,6 +20,7 @@ from app.security.webhook_config import (
 )
 from app.services.admin_config import (
     AdminApiConfigError,
+    assert_admin_bootstrap_possible,
     assert_root_login_not_in_db,
     log_admin_root_status,
     validate_admin_env,
@@ -99,6 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.admin_api_enabled is True:
         try:
             await assert_root_login_not_in_db(app.state.session_factory, settings)
+            await assert_admin_bootstrap_possible(app.state.session_factory, settings)
         except AdminApiConfigError as admin_exc:
             logger.error("Admin API configuration error: %s", admin_exc)
             raise SystemExit(1) from admin_exc

@@ -139,7 +139,7 @@ If enqueueing to Redis fails, the request fails with `500` and the run is stored
 <!-- section: get-api-v1-ops-status -->
 ## `GET /api/v1/ops/status`
 
-Operator key only. Returns `in_flight` (pending/running counts), `queue_jobs` (ARQ queue depth), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` and `hints` (a plain-language diagnosis such as missing model quota or a worker that does not consume the queue).
+Operator key only. Returns `in_flight` (pending/running counts), `queue_jobs_global` (ARQ queue depth, global across owners), `stale_minutes`, `stale_runs`, `last_completed`, `last_failures` and `hints` (a plain-language diagnosis such as missing model quota or a worker that does not consume the queue).
 
 
 <!-- section: admin-api -->
@@ -153,15 +153,16 @@ CSRF: cookie is `SameSite=Strict` and mutating endpoints accept JSON bodies only
 
 **Principals:**
 - **Root** from `ADMIN_ROOT_LOGIN` + `ADMIN_ROOT_PASSWORD` (env only, never inserted into `admin_users`). Role `admin`. Stays usable even when DB users exist (password-recovery path). Disable by removing both env vars and restarting. Startup fails if only one of the pair is set, if the password is shorter than 16 characters, or if the root login collides with a DB user login.
-- **DB users** in `admin_users` (argon2 hashes): roles `admin` or `viewer`. `admin` may list/create/update users and reset passwords; deactivating a user invalidates their Redis sessions. `viewer` may only call read-only endpoints.
+- **DB users** in `admin_users` (argon2 hashes): roles `admin` or `viewer`. `admin` may list/create/update users and reset passwords; deactivating a user invalidates their Redis sessions. `viewer` may only call read-only endpoints. Duplicate logins (including concurrent creates) return `409`.
+- **Rootless mode** (no `ADMIN_ROOT_*`): startup fails unless `admin_users` has at least one active `admin` (set `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` in `.env` to bootstrap). Demoting or deactivating the last active admin returns `409`; the check and update run in one transaction under a Postgres advisory lock.
 
-**Read-only (viewer+):** `GET /runs` (filters `owner_id`, `repo`, `status`, `limit`, `offset`; newest first; safe fields only — no summaries/tokens), `GET /runs/{id}`, `GET /queue` (reuses `ops_snapshot`, optional `owner_id`).
+**Read-only (viewer+):** `GET /runs` (filters `owner_id`, `repo`, `status`, `limit`, `offset`; newest first; safe fields only — no summaries/tokens), `GET /runs/{id}`, `GET /queue` (reuses `ops_snapshot`, optional `owner_id`; `queue_jobs_global` is the ARQ depth across all owners and ignores the filter).
 
 Sessions carry a `session_version` (DB users) or a root credential fingerprint (argon2-derived key + HMAC of current `ADMIN_ROOT_*`); password reset, role change, and deactivation bump the version so older cookies stop working. Changing or clearing root env invalidates root sessions the same way.
 
 Login rate limiting keys the IP from `request.client.host` only. By default the API process uses uvicorn `--no-proxy-headers`. Behind a reverse proxy enable `--proxy-headers` via `UVICORN_PROXY_HEADERS=1` and set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy (see ENVIRONMENT).
 
-Login failures use a generic `401 invalid credentials`; rate limits return `429`. `REVIEW_API_KEY` / owner API keys never authenticate the admin API.
+Login failures use a generic `401 invalid credentials`; rate limits return `429`. Rate-limit counters get `INCR` + TTL atomically (Lua); a counter found without TTL gets one again. `REVIEW_API_KEY` / owner API keys never authenticate the admin API.
 
 <!-- section: webhooks -->
 ## Webhooks

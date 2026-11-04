@@ -101,7 +101,7 @@ Worker log lines to look for: `worker ready`, `queued review_run=`, `job start`,
 ### API answers `202`, nothing appears on GitHub
 
 1. `GET /api/v1/ops/status`.
-2. `queue_jobs > 0` and `in_flight.running = 0`: **the worker does not consume the queue.** Is the container up (`./scripts/stack.sh status`)? Does the log show `worker ready`, or did it fail at startup (an owner config error stops the worker with exit code 1)? Does `:9100/metrics` answer?
+2. `queue_jobs_global > 0` and `in_flight.running = 0`: **the worker does not consume the queue.** Is the container up (`./scripts/stack.sh status`)? Does the log show `worker ready`, or did it fail at startup (an owner config error stops the worker with exit code 1)? Does `:9100/metrics` answer?
 3. `last_failures[].error_code = CODEX_QUOTA`: **no model quota.** The review does not hang; it fails within about 30–40 s. Top up billing for the key's organization. Until then, repeated requests only add failed runs.
 4. `CODEX_AUTH`: the key does not reach the sandbox. Check `OPENAI_API_KEY` (or the owner's key) in the **worker** environment, then recreate the worker.
 5. `status=completed` right away on the same SHA: the run was reused (webhook, or `force: false`). The manual API defaults to `force: true`; the Actions example sends `force: false`.

@@ -41,7 +41,13 @@ from app.services.admin_sessions import (
     create_session,
     destroy_session,
 )
-from app.services.admin_user_ops import reset_password_atomic, update_user_atomic
+from app.services.admin_user_ops import (
+    AdminLoginConflictError,
+    LastActiveAdminError,
+    create_admin_user,
+    reset_password_atomic,
+    update_user_atomic,
+)
 
 router = APIRouter()
 
@@ -266,9 +272,10 @@ async def create_user(
         is_active=True,
         session_version=0,
     )
-    session.add(user)
-    await session.commit()
-    await session.refresh(user)
+    try:
+        await create_admin_user(session, user)
+    except AdminLoginConflictError:
+        raise HTTPException(status_code=409, detail="login already exists") from None
     return _user_public(user)
 
 
@@ -300,13 +307,19 @@ async def update_user(
     if new_role is None and new_active is None:
         return _user_public(user)
 
-    updated = await update_user_atomic(
-        session,
-        user_id=user_id,
-        role=new_role,
-        is_active=new_active,
-        bump_session=bump,
-    )
+    rootless = not (get_settings().admin_root_login or "").strip()
+    try:
+        updated = await update_user_atomic(
+            session,
+            user_id=user_id,
+            role=new_role,
+            is_active=new_active,
+            bump_session=bump,
+            protect_last_admin=rootless,
+        )
+    except LastActiveAdminError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="cannot demote or deactivate the last active admin") from None
     await session.commit()
     if updated is None:
         raise HTTPException(status_code=404, detail="user not found")
