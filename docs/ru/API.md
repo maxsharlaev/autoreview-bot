@@ -147,7 +147,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 
 Опциональный JSON под `/api/v1/admin` (`ADMIN_API_ENABLED`, по умолчанию `false`). Если выключено — маршруты не монтируются (`404`).
 
-**Аутентификация:** `POST /login` с JSON `{"login","password"}` (нужен `Content-Type: application/json`). Успех ставит HttpOnly cookie сессии (`opr_admin_session`, `SameSite=Strict`, `Secure` из `ADMIN_COOKIE_SECURE`). Сессии в Redis с `ADMIN_SESSION_TTL_SECONDS`. `POST /logout` сбрасывает cookie; `GET /me` — `{login, role, kind}`.
+**Аутентификация:** `POST /login` с JSON `{"login","password"}` (нужен `Content-Type: application/json`). Успех ставит HttpOnly cookie сессии (`opr_admin_session`, `SameSite=Strict`, `Secure` из `ADMIN_COOKIE_SECURE`). Сессии в Redis с `ADMIN_SESSION_TTL_SECONDS`. `POST /logout` (тоже `Content-Type: application/json`, как все мутирующие маршруты админки) сбрасывает cookie; `GET /me` — `{login, role, kind}`.
 
 CSRF: cookie `SameSite=Strict`, мутирующие методы принимают только JSON — держите админку first-party; отдельный CSRF-токен в этом MVP не вводим.
 

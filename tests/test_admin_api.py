@@ -877,3 +877,45 @@ async def test_saturated_argon2_does_not_starve_sync_dependencies() -> None:
                 assert all(r.status_code == 401 for r in await asyncio.gather(*logins))
     finally:
         pool.total_tokens = saved
+
+
+def test_logout_requires_json_content_type() -> None:
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+    ):
+        client = _client(session, redis, settings)
+        assert (
+            client.post(
+                "/api/v1/admin/login",
+                headers={"Content-Type": "application/json"},
+                json={"login": ROOT_LOGIN, "password": ROOT_PASSWORD},
+            ).status_code
+            == 200
+        )
+        form = client.post("/api/v1/admin/logout", data={"x": "1"})
+        assert form.status_code == 415
+        assert client.get("/api/v1/admin/me").status_code == 200
+        assert client.post("/api/v1/admin/logout", json={}).status_code == 200
+        assert client.get("/api/v1/admin/me").status_code == 401
+
+
+def test_every_mutating_admin_route_requires_json() -> None:
+    from app.api.v1.admin import ensure_json_content_type, router
+    from fastapi.routing import APIRoute
+
+    def deps(route: APIRoute) -> set:
+        found, stack = set(), list(route.dependant.dependencies)
+        while stack:
+            d = stack.pop()
+            found.add(d.call)
+            stack.extend(d.dependencies)
+        return found
+
+    mutating = [r for r in router.routes if isinstance(r, APIRoute) and r.methods & {"POST", "PUT", "PATCH", "DELETE"}]
+    assert mutating
+    for route in mutating:
+        assert ensure_json_content_type in deps(route), route.path

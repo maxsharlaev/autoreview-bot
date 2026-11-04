@@ -231,6 +231,7 @@ async def login(
 @router.post("/logout")
 async def logout(
     request: Request,
+    _: JsonContentType,
     principal: AdminPrincipalDep,
 ) -> Response:
     redis = request.app.state.redis

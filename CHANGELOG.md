@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AR-007:** admin API without root env fails startup unless an active DB admin exists (message points to `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD` for bootstrap); in rootless mode demoting/deactivating the last active admin returns `409` (check + update under `pg_advisory_xact_lock`).
 - **AR-008:** `POST /api/v1/admin/users` maps a concurrent duplicate-login `IntegrityError` to `409` (rollback) instead of `500`.
 - **AR-009:** admin login rate-limit counters use one Lua script for `INCR` + `EXPIRE`; keys without TTL self-repair.
+- **AR-019:** `POST /api/v1/admin/logout` requires `Content-Type: application/json` (`415` otherwise) like the other mutating admin routes, so a cross-site form cannot log the admin out.
 - **AR-017:** removed `ADMIN_SESSION_COOKIE_NAME`; the admin cookie name is fixed to `opr_admin_session`.
 - **AR-018:** admin argon2 hash/verify (login, create user, reset password, startup root warm-up) runs off the event loop via `anyio.to_thread` with a dedicated per-loop `CapacityLimiter(2)`; queued calls wait on the event loop and do not occupy shared worker threads.
 - **AR-016:** pytest marker `postgres` on all `TEST_DATABASE_URL` tests; CI `test-migrations` runs `pytest -m postgres` instead of a file list (adds the admin session-version DB test).
