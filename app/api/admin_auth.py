@@ -10,8 +10,7 @@ from typing import Annotated, Literal
 from fastapi import Cookie, Depends, HTTPException, Request
 
 from app.config import get_settings
-from app.services.admin_passwords import run_argon2
-from app.services.admin_root_crypto import get_root_fingerprint
+from app.services.admin_root_crypto import get_root_credentials
 from app.services.admin_sessions import destroy_session, load_session
 
 AdminRole = Literal["admin", "viewer"]
@@ -54,15 +53,13 @@ async def require_admin_principal(
         raise HTTPException(status_code=401, detail="not authenticated")
 
     if session.kind == "root":
-        root_login = settings.admin_root_login if isinstance(settings.admin_root_login, str) else ""
-        root_password = settings.admin_root_password if isinstance(settings.admin_root_password, str) else ""
-        root_login = root_login.strip()
-        if not root_login or not root_password:
+        root = get_root_credentials()  # startup snapshot; no hashing per request
+        if root is None:
             await destroy_session(redis, token)
             raise HTTPException(status_code=401, detail="not authenticated")
-        expected = await run_argon2(get_root_fingerprint, root_login, root_password)
+        root_login = root.login
         presented = session.root_fingerprint or ""
-        if not _hmac_eq(expected, presented) or not _hmac_eq(session.login, root_login):
+        if not _hmac_eq(root.fingerprint, presented) or not _hmac_eq(session.login, root_login):
             await destroy_session(redis, token)
             raise HTTPException(status_code=401, detail="not authenticated")
         return AdminPrincipal(

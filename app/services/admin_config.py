@@ -9,11 +9,9 @@ from app.services.admin_passwords import (
     MAX_ADMIN_LOGIN_LENGTH,
     MAX_ADMIN_PASSWORD_LENGTH,
     MIN_ROOT_PASSWORD_LENGTH,
-    clear_root_password_hash,
-    get_root_password_hash,
     root_password_too_short,
 )
-from app.services.admin_root_crypto import clear_root_fingerprint_cache, warm_root_fingerprint_cache
+from app.services.admin_root_crypto import clear_root_credentials, load_root_credentials
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,7 +33,7 @@ def validate_admin_env(settings: Settings) -> None:
     and a set password must be at least MIN_ROOT_PASSWORD_LENGTH characters.
     """
     if settings.admin_api_enabled is not True:
-        clear_root_fingerprint_cache()
+        clear_root_credentials()
         return
 
     raw_login = settings.admin_root_login
@@ -54,11 +52,8 @@ def validate_admin_env(settings: Settings) -> None:
     if len(password) > MAX_ADMIN_PASSWORD_LENGTH:
         raise AdminApiConfigError(f"ADMIN_ROOT_PASSWORD must be at most {MAX_ADMIN_PASSWORD_LENGTH} characters")
 
-    if has_login and has_password:
-        return
-    else:
-        clear_root_fingerprint_cache()
-        clear_root_password_hash()
+    if not (has_login and has_password):
+        clear_root_credentials()
 
 
 def log_admin_root_status(settings: Settings) -> None:
@@ -110,7 +105,7 @@ async def assert_admin_bootstrap_possible(
 
 
 async def warm_admin_root_caches(settings: Settings) -> None:
-    """Precompute root fingerprint + argon2 hash in a worker thread (off the event loop)."""
+    """Compute root hash + fingerprint once, in a worker thread; login/auth only read them."""
     if settings.admin_api_enabled is not True:
         return
     login = (settings.admin_root_login or "").strip()
@@ -119,8 +114,4 @@ async def warm_admin_root_caches(settings: Settings) -> None:
         return
     from app.services.admin_passwords import run_argon2
 
-    def _warm() -> None:
-        warm_root_fingerprint_cache(login, password)
-        get_root_password_hash(password)
-
-    await run_argon2(_warm)
+    await run_argon2(load_root_credentials, login, password)

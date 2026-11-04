@@ -1,10 +1,10 @@
-"""Root session material: argon2-derived key + HMAC fingerprint (cached in-process)."""
+"""Root session material: argon2-derived key + HMAC fingerprint (computed once at startup)."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
-import threading
+from dataclasses import dataclass
 
 from argon2.low_level import Type, hash_secret_raw
 
@@ -15,10 +15,6 @@ _ROOT_ARGON2_MEMORY = 65536
 _ROOT_ARGON2_PARALLELISM = 1
 _ROOT_KEY_LEN = 32
 _ROOT_HMAC_MSG = b"root-session"
-
-_lock = threading.Lock()
-_cache_creds: tuple[str, str] | None = None
-_cache_fingerprint: str | None = None
 
 
 def _derive_root_key(login: str, password: str) -> bytes:
@@ -39,31 +35,40 @@ def fingerprint_from_key(key: bytes) -> str:
 
 
 def compute_root_fingerprint(login: str, password: str) -> str:
-    """Derive argon2 key then HMAC; expensive — prefer get_root_fingerprint()."""
+    """Derive argon2 key then HMAC; expensive — done once in load_root_credentials()."""
     return fingerprint_from_key(_derive_root_key(login, password))
 
 
-def get_root_fingerprint(login: str, password: str) -> str:
-    """Return cached fingerprint for (login, password); recompute on change."""
-    global _cache_creds, _cache_fingerprint
-    creds = (login, password)
-    with _lock:
-        if _cache_creds == creds and _cache_fingerprint is not None:
-            return _cache_fingerprint
-        fp = compute_root_fingerprint(login, password)
-        _cache_creds = creds
-        _cache_fingerprint = fp
-        return fp
+@dataclass(frozen=True)
+class RootCredentials:
+    """Root material computed once at startup; root changes need .env + restart."""
+
+    login: str
+    password_hash: str  # argon2 (same hasher as DB users)
+    fingerprint: str  # session fingerprint
 
 
-def clear_root_fingerprint_cache() -> None:
-    global _cache_creds, _cache_fingerprint
-    with _lock:
-        _cache_creds = None
-        _cache_fingerprint = None
+_root: RootCredentials | None = None
 
 
-def warm_root_fingerprint_cache(login: str, password: str) -> str:
-    """Compute and cache at startup. Returns the fingerprint."""
-    clear_root_fingerprint_cache()
-    return get_root_fingerprint(login, password)
+def load_root_credentials(login: str, password: str) -> RootCredentials:
+    """Expensive (two argon2 runs); call once at startup, off the event loop."""
+    global _root
+    from app.services.admin_passwords import hash_password
+
+    _root = RootCredentials(
+        login=login,
+        password_hash=hash_password(password),
+        fingerprint=compute_root_fingerprint(login, password),
+    )
+    return _root
+
+
+def get_root_credentials() -> RootCredentials | None:
+    """Cheap synchronous read; None means root is not configured (non-root login only)."""
+    return _root
+
+
+def clear_root_credentials() -> None:
+    global _root
+    _root = None

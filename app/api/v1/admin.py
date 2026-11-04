@@ -31,13 +31,11 @@ from app.metrics import ops_snapshot
 from app.models import AdminUser, PullRequest, Repository, ReviewRun
 from app.services.admin_passwords import (
     MIN_ADMIN_PASSWORD_LENGTH,
-    aget_root_password_hash,
     ahash_password,
     averify_password,
     password_too_short,
-    run_argon2,
 )
-from app.services.admin_root_crypto import get_root_fingerprint
+from app.services.admin_root_crypto import get_root_credentials
 from app.services.admin_sessions import (
     check_and_bump_rate_limit,
     create_session,
@@ -178,7 +176,6 @@ async def login(
 
     login_name = body.login.strip()
     password = body.password
-    root_login = (settings.admin_root_login or "").strip()
     authenticated_kind: str | None = None
     role = "admin"
     user_id: str | None = None
@@ -188,22 +185,22 @@ async def login(
 
     # Every attempt (root included) does the same work: one DB lookup, then one argon2 verify.
     found = (await session.execute(select(AdminUser).where(AdminUser.login == login_name))).scalar_one_or_none()
-    is_root = bool(root_login) and _secure_eq(login_name, root_login)
-    expected = settings.admin_root_password or ""
+    root = get_root_credentials()
+    is_root = root is not None and _secure_eq(login_name, root.login)
     if is_root:
         # Root takes precedence over a same-named DB row (startup also rejects that collision).
-        pw_hash = await aget_root_password_hash(expected) if expected else _DUMMY_HASH
+        pw_hash = root.password_hash
     else:
         db_user = found
         pw_hash = db_user.password_hash if db_user is not None else _DUMMY_HASH
     ok = await averify_password(pw_hash, password)
 
     if is_root:
-        if expected and ok:
+        if ok:
             authenticated_kind = "root"
             role = "admin"
             user_id = None
-            root_fingerprint = await run_argon2(get_root_fingerprint, root_login, expected)
+            root_fingerprint = root.fingerprint
     else:
         if db_user is not None and db_user.is_active and ok and db_user.role in ("admin", "viewer"):
             authenticated_kind = "user"

@@ -11,10 +11,7 @@ from redis.asyncio import Redis
 
 # Re-export for callers / tests
 from app.services.admin_root_crypto import (  # noqa: F401
-    clear_root_fingerprint_cache,
     compute_root_fingerprint,
-    get_root_fingerprint,
-    warm_root_fingerprint_cache,
 )
 
 AdminRole = Literal["admin", "viewer"]

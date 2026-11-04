@@ -8,9 +8,10 @@ from app.services import admin_root_crypto as crypto_mod
 from app.services.admin_config import AdminApiConfigError, validate_admin_env
 from app.services.admin_passwords import MIN_ROOT_PASSWORD_LENGTH
 from app.services.admin_root_crypto import (
-    clear_root_fingerprint_cache,
+    clear_root_credentials,
     compute_root_fingerprint,
-    get_root_fingerprint,
+    get_root_credentials,
+    load_root_credentials,
 )
 
 
@@ -23,20 +24,20 @@ def test_no_fixed_pepper_fast_verifier_constant() -> None:
 
 
 def test_fingerprint_changes_with_password() -> None:
-    clear_root_fingerprint_cache()
+    clear_root_credentials()
     a = compute_root_fingerprint("root", "password-sixteen1")
     b = compute_root_fingerprint("root", "password-sixteen2")
     assert a != b
     assert len(a) == 64
 
 
-def test_get_root_fingerprint_caches() -> None:
-    clear_root_fingerprint_cache()
-    first = get_root_fingerprint("root", "password-sixteen1")
-    second = get_root_fingerprint("root", "password-sixteen1")
-    assert first == second
-    third = get_root_fingerprint("root", "password-sixteen2")
-    assert third != first
+def test_load_root_credentials_snapshot() -> None:
+    clear_root_credentials()
+    assert get_root_credentials() is None
+    creds = load_root_credentials("root", "password-sixteen1")
+    assert get_root_credentials() is creds
+    assert creds.fingerprint == compute_root_fingerprint("root", "password-sixteen1")
+    clear_root_credentials()
 
 
 def test_root_password_min_16_at_startup() -> None:
@@ -53,4 +54,4 @@ def test_root_password_min_16_at_startup() -> None:
         admin_root_password="sixteen-chars-ok",  # 16
     )
     validate_admin_env(settings)
-    clear_root_fingerprint_cache()
+    clear_root_credentials()

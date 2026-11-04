@@ -60,6 +60,23 @@ def _settings(**kwargs: Any) -> Settings:
     return Settings(**base)
 
 
+@pytest.fixture(scope="module")
+def _root_creds():  # noqa: ANN202
+    from app.services import admin_root_crypto
+
+    creds = admin_root_crypto.load_root_credentials(ROOT_LOGIN, ROOT_PASSWORD)
+    yield creds
+    admin_root_crypto.clear_root_credentials()
+
+
+@pytest.fixture(autouse=True)
+def _startup_root(_root_creds, monkeypatch):  # noqa: ANN001, ANN202
+    # Mirrors warm_admin_root_caches at startup for the default _settings() root.
+    from app.services import admin_root_crypto
+
+    monkeypatch.setattr(admin_root_crypto, "_root", _root_creds)
+
+
 class FakeRedis:
     def __init__(self) -> None:
         self.store: dict[str, Any] = {}
@@ -365,8 +382,10 @@ def test_root_session_rejected_after_password_change() -> None:
             == 200
         )
         assert client.get("/api/v1/admin/me").status_code == 200
-        # Rotate root password in config (fingerprint changes).
-        settings.admin_root_password = "root-password-99"
+        # Rotate root password in .env + restart (startup recomputes the fingerprint).
+        from app.services.admin_root_crypto import load_root_credentials
+
+        load_root_credentials(ROOT_LOGIN, "root-password-rotated")
         assert client.get("/api/v1/admin/me").status_code == 401
 
 
@@ -387,8 +406,10 @@ def test_root_session_rejected_after_root_removed() -> None:
             ).status_code
             == 200
         )
-        settings.admin_root_login = ""
-        settings.admin_root_password = ""
+        # Root removed from .env + restart: startup leaves no root credentials.
+        from app.services.admin_root_crypto import clear_root_credentials
+
+        clear_root_credentials()
         assert client.get("/api/v1/admin/me").status_code == 401
 
 
@@ -743,8 +764,17 @@ def test_login_does_exactly_one_argon2_verify(login: str, password: str, status:
     session.seed_user(_make_user(login="erin", password=ADMIN_PASSWORD, role="admin"))
     redis = FakeRedis()
     settings = _settings()
-    admin_passwords.get_root_password_hash(ROOT_PASSWORD)  # startup warm-up
+    import anyio.to_thread
+
     spy = MagicMock(side_effect=admin_passwords.verify_password)
+    argon2_dispatches: list[object] = []
+    real_run_sync = anyio.to_thread.run_sync
+
+    async def counting_run_sync(fn, *args, **kwargs):  # noqa: ANN001, ANN202
+        if kwargs.get("limiter") is not None:  # argon2 pool (sync FastAPI deps use the default pool)
+            argon2_dispatches.append(fn)
+        return await real_run_sync(fn, *args, **kwargs)
+
     lookups: list[str] = []
     real_execute = session.execute
 
@@ -759,6 +789,7 @@ def test_login_does_exactly_one_argon2_verify(login: str, password: str, status:
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.services.admin_passwords.verify_password", spy),
+        patch("anyio.to_thread.run_sync", counting_run_sync),
     ):
         client = _client(session, redis, settings)
         r = client.post(
@@ -769,17 +800,20 @@ def test_login_does_exactly_one_argon2_verify(login: str, password: str, status:
     assert r.status_code == status
     assert spy.call_count == 1
     assert len(lookups) == 1
+    assert len(argon2_dispatches) == 1
 
 
-def test_root_password_hash_cached_and_refreshed() -> None:
-    from app.services import admin_passwords
+def test_root_credentials_computed_once_and_not_rehashed() -> None:
+    from app.services import admin_passwords, admin_root_crypto
 
-    admin_passwords.clear_root_password_hash()
-    h1 = admin_passwords.get_root_password_hash(ROOT_PASSWORD)
-    assert admin_passwords.get_root_password_hash(ROOT_PASSWORD) == h1
-    assert admin_passwords.verify_password(h1, ROOT_PASSWORD)
-    h2 = admin_passwords.get_root_password_hash("another-root-pass-16")
-    assert h2 != h1 and not admin_passwords.verify_password(h2, ROOT_PASSWORD)
+    creds = admin_root_crypto.get_root_credentials()
+    assert creds is not None and creds.login == ROOT_LOGIN
+    assert admin_passwords.verify_password(creds.password_hash, ROOT_PASSWORD)
+    # Settings changes without restart do not touch the startup snapshot.
+    validate_admin_env(_settings(admin_root_password="another-root-pass-16"))
+    assert admin_root_crypto.get_root_credentials() is creds
+    validate_admin_env(_settings(admin_root_login="", admin_root_password=""))
+    assert admin_root_crypto.get_root_credentials() is None
 
 
 def test_root_env_max_lengths() -> None:
