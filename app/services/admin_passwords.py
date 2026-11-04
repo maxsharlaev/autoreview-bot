@@ -15,6 +15,9 @@ _HASHER = PasswordHasher()
 MIN_ADMIN_PASSWORD_LENGTH = 12
 # Env-only root (startup validation)
 MIN_ROOT_PASSWORD_LENGTH = 16
+# Upper bounds shared by request bodies and root env validation
+MAX_ADMIN_LOGIN_LENGTH = 128
+MAX_ADMIN_PASSWORD_LENGTH = 1024
 
 
 def hash_password(password: str) -> str:

@@ -769,3 +769,27 @@ def test_root_password_hash_cached_and_refreshed() -> None:
     assert admin_passwords.verify_password(h1, ROOT_PASSWORD)
     h2 = admin_passwords.get_root_password_hash("another-root-pass-16")
     assert h2 != h1 and not admin_passwords.verify_password(h2, ROOT_PASSWORD)
+
+
+def test_root_env_max_lengths() -> None:
+    from app.services.admin_passwords import MAX_ADMIN_LOGIN_LENGTH, MAX_ADMIN_PASSWORD_LENGTH
+
+    validate_admin_env(_settings(admin_root_login="l" * MAX_ADMIN_LOGIN_LENGTH))
+    validate_admin_env(_settings(admin_root_password="p" * MAX_ADMIN_PASSWORD_LENGTH))
+    with pytest.raises(AdminApiConfigError, match="ADMIN_ROOT_LOGIN must be at most"):
+        validate_admin_env(_settings(admin_root_login="l" * (MAX_ADMIN_LOGIN_LENGTH + 1)))
+    with pytest.raises(AdminApiConfigError, match="ADMIN_ROOT_PASSWORD must be at most"):
+        validate_admin_env(_settings(admin_root_password="p" * (MAX_ADMIN_PASSWORD_LENGTH + 1)))
+    validate_admin_env(_settings())
+
+
+def test_login_body_max_lengths() -> None:
+    from app.api.v1.admin_schemas import AdminLoginRequest
+    from app.services.admin_passwords import MAX_ADMIN_LOGIN_LENGTH, MAX_ADMIN_PASSWORD_LENGTH
+    from pydantic import ValidationError
+
+    AdminLoginRequest(login="l" * MAX_ADMIN_LOGIN_LENGTH, password="p" * MAX_ADMIN_PASSWORD_LENGTH)
+    with pytest.raises(ValidationError):
+        AdminLoginRequest(login="l" * (MAX_ADMIN_LOGIN_LENGTH + 1), password="p")
+    with pytest.raises(ValidationError):
+        AdminLoginRequest(login="l", password="p" * (MAX_ADMIN_PASSWORD_LENGTH + 1))

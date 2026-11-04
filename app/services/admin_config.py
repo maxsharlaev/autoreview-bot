@@ -6,6 +6,8 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.services.admin_passwords import (
+    MAX_ADMIN_LOGIN_LENGTH,
+    MAX_ADMIN_PASSWORD_LENGTH,
     MIN_ROOT_PASSWORD_LENGTH,
     clear_root_password_hash,
     get_root_password_hash,
@@ -47,6 +49,10 @@ def validate_admin_env(settings: Settings) -> None:
         raise AdminApiConfigError("ADMIN_ROOT_LOGIN and ADMIN_ROOT_PASSWORD must both be set, or both empty")
     if has_password and root_password_too_short(password):
         raise AdminApiConfigError(f"ADMIN_ROOT_PASSWORD must be at least {MIN_ROOT_PASSWORD_LENGTH} characters")
+    if len(login) > MAX_ADMIN_LOGIN_LENGTH:
+        raise AdminApiConfigError(f"ADMIN_ROOT_LOGIN must be at most {MAX_ADMIN_LOGIN_LENGTH} characters")
+    if len(password) > MAX_ADMIN_PASSWORD_LENGTH:
+        raise AdminApiConfigError(f"ADMIN_ROOT_PASSWORD must be at most {MAX_ADMIN_PASSWORD_LENGTH} characters")
 
     if has_login and has_password:
         warm_root_fingerprint_cache(login, password)

@@ -8,12 +8,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.services.admin_passwords import MAX_ADMIN_LOGIN_LENGTH, MAX_ADMIN_PASSWORD_LENGTH
+
 
 class AdminLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    login: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=1, max_length=1024)
+    login: str = Field(min_length=1, max_length=MAX_ADMIN_LOGIN_LENGTH)
+    password: str = Field(min_length=1, max_length=MAX_ADMIN_PASSWORD_LENGTH)
 
 
 class AdminMeResponse(BaseModel):
@@ -38,8 +40,8 @@ class AdminUserPublic(BaseModel):
 class AdminUserCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    login: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=1, max_length=1024)
+    login: str = Field(min_length=1, max_length=MAX_ADMIN_LOGIN_LENGTH)
+    password: str = Field(min_length=1, max_length=MAX_ADMIN_PASSWORD_LENGTH)
     role: Literal["admin", "viewer"] = "viewer"
 
 
@@ -53,7 +55,7 @@ class AdminUserUpdateRequest(BaseModel):
 class AdminPasswordResetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    password: str = Field(min_length=1, max_length=1024)
+    password: str = Field(min_length=1, max_length=MAX_ADMIN_PASSWORD_LENGTH)
 
 
 class AdminUserListResponse(BaseModel):
