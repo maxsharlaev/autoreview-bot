@@ -62,7 +62,7 @@ docker exec review-test-db createdb -U postgres review_test
 TEST_DATABASE_URL=postgresql+asyncpg://postgres:test@localhost:5432/review_test pytest -rs
 ```
 
-CI runs the full suite without a database, then the database tests (`tests/test_migration_*.py` and `tests/test_*_db.py`, listed in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)) against Postgres, then builds the Docker image. When you add a database test, add it to that list.
+CI runs the full suite without a database, then the database tests (every test marked `@pytest.mark.postgres`, selected with `pytest -m postgres` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)) against Postgres, then builds the Docker image. When you add a database test, mark it `postgres` (module-level `pytestmark` is fine); no file list to update.
 
 `tests/test_docs.py` checks that every configuration key and environment variable is documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md) / [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md), and that relative links and anchors in Markdown files resolve.
 

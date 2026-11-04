@@ -24,7 +24,7 @@ def _skip_reason() -> str | None:
 
 
 _skip = _skip_reason()
-pytestmark = [pytest.mark.skipif(bool(_skip), reason=_skip or ""), pytest.mark.asyncio]
+pytestmark = [pytest.mark.skipif(bool(_skip), reason=_skip or ""), pytest.mark.asyncio, pytest.mark.postgres]
 
 
 def _asyncpg_url() -> str:

@@ -32,6 +32,8 @@ def _validate_test_database_url() -> str | None:
 _skip_reason = _validate_test_database_url()
 requires_test_postgres = pytest.mark.skipif(bool(_skip_reason), reason=_skip_reason or "")
 
+pytestmark = pytest.mark.postgres
+
 
 def _get_asyncpg_url() -> str:
     """Convert TEST_DATABASE_URL to asyncpg format."""

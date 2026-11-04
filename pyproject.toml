@@ -43,6 +43,9 @@ include = ["app*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "postgres: needs a real Postgres via TEST_DATABASE_URL (run in CI with `pytest -m postgres`)",
+]
 
 [tool.ruff]
 target-version = "py312"

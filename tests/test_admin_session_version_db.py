@@ -26,6 +26,8 @@ def _validate_test_database_url() -> str | None:
 _skip = _validate_test_database_url()
 requires_test_postgres = pytest.mark.skipif(bool(_skip), reason=_skip or "")
 
+pytestmark = pytest.mark.postgres
+
 
 def _asyncpg_url() -> str:
     url = TEST_DB_URL
@@ -42,7 +44,9 @@ async def test_concurrent_password_resets_bump_version_twice() -> None:
     from app.services.admin_sessions import create_session, load_session
     from app.services.admin_user_ops import reset_password_atomic
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from tests.test_admin_guards_db import _upgrade_head
 
+    _upgrade_head()
     engine = create_async_engine(_asyncpg_url())
     factory = async_sessionmaker(engine, expire_on_commit=False)
     user_id = uuid.uuid4()
