@@ -186,20 +186,25 @@ async def login(
     root_fingerprint: str | None = None
     db_user: AdminUser | None = None
 
-    if root_login and _secure_eq(login_name, root_login):
-        expected = settings.admin_root_password or ""
-        # Same single argon2 verify as the DB-user path (no plaintext compare timing gap).
-        root_hash = await aget_root_password_hash(expected) if expected else _DUMMY_HASH
-        ok = await averify_password(root_hash, password)
+    # Every attempt (root included) does the same work: one DB lookup, then one argon2 verify.
+    found = (await session.execute(select(AdminUser).where(AdminUser.login == login_name))).scalar_one_or_none()
+    is_root = bool(root_login) and _secure_eq(login_name, root_login)
+    expected = settings.admin_root_password or ""
+    if is_root:
+        # Root takes precedence over a same-named DB row (startup also rejects that collision).
+        pw_hash = await aget_root_password_hash(expected) if expected else _DUMMY_HASH
+    else:
+        db_user = found
+        pw_hash = db_user.password_hash if db_user is not None else _DUMMY_HASH
+    ok = await averify_password(pw_hash, password)
+
+    if is_root:
         if expected and ok:
             authenticated_kind = "root"
             role = "admin"
             user_id = None
             root_fingerprint = await run_argon2(get_root_fingerprint, root_login, expected)
     else:
-        db_user = (await session.execute(select(AdminUser).where(AdminUser.login == login_name))).scalar_one_or_none()
-        pw_hash = db_user.password_hash if db_user is not None else _DUMMY_HASH
-        ok = await averify_password(pw_hash, password)
         if db_user is not None and db_user.is_active and ok and db_user.role in ("admin", "viewer"):
             authenticated_kind = "user"
             role = db_user.role

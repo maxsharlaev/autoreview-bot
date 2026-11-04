@@ -745,6 +745,16 @@ def test_login_does_exactly_one_argon2_verify(login: str, password: str, status:
     settings = _settings()
     admin_passwords.get_root_password_hash(ROOT_PASSWORD)  # startup warm-up
     spy = MagicMock(side_effect=admin_passwords.verify_password)
+    lookups: list[str] = []
+    real_execute = session.execute
+
+    async def counting_execute(stmt, *args, **kwargs):  # noqa: ANN001, ANN202
+        sql = session._compiled(stmt).lower()
+        if sql.lstrip().startswith("select") and "admin_users" in sql:
+            lookups.append(sql)
+        return await real_execute(stmt, *args, **kwargs)
+
+    session.execute = counting_execute  # type: ignore[method-assign]
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
@@ -758,6 +768,7 @@ def test_login_does_exactly_one_argon2_verify(login: str, password: str, status:
         )
     assert r.status_code == status
     assert spy.call_count == 1
+    assert len(lookups) == 1
 
 
 def test_root_password_hash_cached_and_refreshed() -> None:
