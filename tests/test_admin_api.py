@@ -828,3 +828,52 @@ async def test_slow_password_verify_does_not_block_other_requests() -> None:
             assert me.status_code == 401
             assert not login.done()
             assert (await login).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_saturated_argon2_does_not_starve_sync_dependencies() -> None:
+    import asyncio
+    import time
+
+    import anyio.to_thread
+    import httpx
+    from app.services import admin_passwords
+
+    real_verify = admin_passwords.verify_password
+
+    def slow_verify(password_hash: str, password: str) -> bool:
+        time.sleep(0.6)
+        return real_verify(password_hash, password)
+
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings(admin_login_rate_limit_per_ip=1000, admin_login_rate_limit_per_login=1000)
+    app = _app(session, redis)
+    pool = anyio.to_thread.current_default_thread_limiter()
+    saved = pool.total_tokens
+    pool.total_tokens = 4  # small shared pool: 8 queued logins would exhaust it if they held threads
+    try:
+        with (
+            patch("app.api.admin_auth.get_settings", return_value=settings),
+            patch("app.api.v1.admin.get_settings", return_value=settings),
+            patch("app.services.admin_passwords.verify_password", slow_verify),
+        ):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                logins = [
+                    asyncio.create_task(
+                        client.post("/api/v1/admin/login", json={"login": f"u{i}", "password": "whatever-pass"})
+                    )
+                    for i in range(8)
+                ]
+                await asyncio.sleep(0.1)
+                started = time.monotonic()
+                # ensure_json_content_type is a sync dependency -> runs in the shared pool.
+                probe = await client.post("/api/v1/admin/login", content="x", headers={"Content-Type": "text/plain"})
+                elapsed = time.monotonic() - started
+                assert probe.status_code == 415
+                assert elapsed < 0.4
+                assert sum(t.done() for t in logins) == 0
+                assert all(r.status_code == 401 for r in await asyncio.gather(*logins))
+    finally:
+        pool.total_tokens = saved

@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AR-008:** `POST /api/v1/admin/users` maps a concurrent duplicate-login `IntegrityError` to `409` (rollback) instead of `500`.
 - **AR-009:** admin login rate-limit counters use one Lua script for `INCR` + `EXPIRE`; keys without TTL self-repair.
 - **AR-017:** removed `ADMIN_SESSION_COOKIE_NAME`; the admin cookie name is fixed to `opr_admin_session`.
-- **AR-018:** admin argon2 hash/verify (login, create user, reset password, startup root warm-up) runs off the event loop via `anyio.to_thread`, at most 2 at once.
+- **AR-018:** admin argon2 hash/verify (login, create user, reset password, startup root warm-up) runs off the event loop via `anyio.to_thread` with a dedicated per-loop `CapacityLimiter(2)`; queued calls wait on the event loop and do not occupy shared worker threads.
 - **AR-016:** pytest marker `postgres` on all `TEST_DATABASE_URL` tests; CI `test-migrations` runs `pytest -m postgres` instead of a file list (adds the admin session-version DB test).
 - **AR-015:** shared max lengths (login 128, password 1024) for admin request bodies and `ADMIN_ROOT_LOGIN` / `ADMIN_ROOT_PASSWORD`; oversized root env fails startup.
 - **AR-014:** admin root login verifies against an argon2 hash of `ADMIN_ROOT_PASSWORD` computed once per process, so every failed login (root, existing user, unknown user) does exactly one argon2 verify (no timing leak of the root login).

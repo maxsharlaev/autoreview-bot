@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import threading
+import weakref
 from collections.abc import Callable
 
+import anyio
 import anyio.to_thread
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -63,17 +66,25 @@ def root_password_too_short(password: str) -> bool:
     return password_too_short(password, minimum=MIN_ROOT_PASSWORD_LENGTH)
 
 
-# Argon2 runs in worker threads, at most 2 at a time, so logins never block the event loop.
-_ARGON2_SLOTS = threading.BoundedSemaphore(2)
+# Argon2 runs in worker threads under a dedicated limiter (2 at a time). Queued calls wait
+# on the event loop, not inside shared pool threads. One limiter per loop (tests use many).
+ARGON2_MAX_CONCURRENCY = 2
+_ARGON2_LIMITERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, anyio.CapacityLimiter] = (
+    weakref.WeakKeyDictionary()
+)
 
 
-def _bounded[T](fn: Callable[..., T], *args: object) -> T:
-    with _ARGON2_SLOTS:
-        return fn(*args)
+def _argon2_limiter() -> anyio.CapacityLimiter:
+    loop = asyncio.get_running_loop()
+    limiter = _ARGON2_LIMITERS.get(loop)
+    if limiter is None:
+        limiter = anyio.CapacityLimiter(ARGON2_MAX_CONCURRENCY)
+        _ARGON2_LIMITERS[loop] = limiter
+    return limiter
 
 
 async def run_argon2[T](fn: Callable[..., T], *args: object) -> T:
-    return await anyio.to_thread.run_sync(_bounded, fn, *args)
+    return await anyio.to_thread.run_sync(fn, *args, limiter=_argon2_limiter())
 
 
 async def averify_password(password_hash: str, password: str) -> bool:
