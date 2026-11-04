@@ -1041,3 +1041,133 @@ def test_findings_suppress_validation_and_not_found() -> None:
         assert client.post(url, json={"status": "accepted", "reason": "ok"}).status_code == 404
         assert client.post(f"/api/v1/admin/findings/{fid}/unsuppress", json={}).status_code == 404
         assert client.get(f"/api/v1/admin/findings/{fid}").status_code == 404
+
+
+# ---- sensitive comment cleanup (unit; DB flow in test_admin_comment_cleanup_db.py) --------
+
+
+class FakeGitHub:
+    def __init__(self, error_status: int | None = None) -> None:
+        self.calls: list[tuple[str, str, int]] = []
+        self.error_status = error_status
+
+    async def delete_issue_comment(self, owner: str, repo: str, comment_id: int) -> None:
+        from app.adapters.github import GitHubError
+
+        self.calls.append((owner, repo, comment_id))
+        if self.error_status is not None:
+            raise GitHubError("boom", status_code=self.error_status)
+
+
+def _cleanup_run(**over: Any) -> SimpleNamespace:
+    base = {
+        "id": uuid.uuid4(),
+        "owner_id": "default",
+        "pull_request_id": uuid.uuid4(),
+        "pull_request": SimpleNamespace(number=7, repository=SimpleNamespace(full_name="acme/repo")),
+        "head_sha": "b" * 40,
+        "status": "completed",
+        "trigger": "webhook",
+        "created_at": None,
+        "updated_at": None,
+        "comment_url": "https://github.com/acme/repo/pull/7#issuecomment-123",
+        "has_sensitive_content": True,
+        "error_code": None,
+        "skip_reason": None,
+        "comment_cleaned_by": None,
+        "comment_cleaned_at": None,
+        "comment_cleanup_reason": None,
+    }
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _cleanup_call(run: SimpleNamespace, github: FakeGitHub | None, *, login: tuple[str, str] | None = None, **kw: Any):
+    session = FakeSession()
+    session.seed_user(_make_user(login="vera", password=VIEWER_PASSWORD, role="viewer"))
+    session._run = run
+    redis = FakeRedis()
+    settings = _settings()
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin._github_for_owner", return_value=github),
+    ):
+        client = _client(session, redis, settings)
+        _login_as(client, *(login or (ROOT_LOGIN, ROOT_PASSWORD)))
+        return client.post(f"/api/v1/admin/runs/{run.id}/cleanup-comment", **({"json": {}} | kw))
+
+
+def test_cleanup_deletes_comment_via_owner_github() -> None:
+    gh = FakeGitHub()
+    r = _cleanup_call(_cleanup_run(), gh)
+    assert r.status_code == 200
+    assert gh.calls == [("acme", "repo", 123)]
+
+
+@pytest.mark.parametrize(("error", "status"), [(404, 200), (403, 502), (500, 502), (503, 502)])
+def test_cleanup_github_errors(error: int, status: int) -> None:
+    gh = FakeGitHub(error_status=error)
+    assert _cleanup_call(_cleanup_run(), gh).status_code == status
+    assert len(gh.calls) == 1
+
+
+def test_cleanup_repeat_is_idempotent_without_github_call() -> None:
+    gh = FakeGitHub()
+    run = _cleanup_run(comment_cleaned_at=datetime.now(UTC), comment_cleaned_by=ROOT_LOGIN)
+    assert _cleanup_call(run, gh).status_code == 200
+    assert gh.calls == []
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"comment_url": None},
+        {"has_sensitive_content": False},
+        {"has_sensitive_content": None},
+        {"comment_url": "https://github.com/acme/repo/pull/7"},
+        {"comment_url": "https://evil.example/acme/repo/pull/7#issuecomment-123"},
+        {"comment_url": "http://github.com/acme/repo/pull/7#issuecomment-123"},
+        {"comment_url": "https://github.com/other/repo/pull/7#issuecomment-123"},
+        {"comment_url": "https://github.com/acme/repo/commit/abc#issuecomment-123"},
+        {"comment_url": "https://github.com/acme/repo/pull/8#issuecomment-123"},
+        {"comment_url": "https://[github.com/acme/repo/pull/7#issuecomment-123"},
+    ],
+)
+def test_cleanup_conflicts(over: dict) -> None:
+    gh = FakeGitHub()
+    assert _cleanup_call(_cleanup_run(**over), gh).status_code == 409
+    assert gh.calls == []
+
+
+def test_cleanup_owner_not_configured_and_roles() -> None:
+    assert _cleanup_call(_cleanup_run(), None).status_code == 409
+    gh = FakeGitHub()
+    assert _cleanup_call(_cleanup_run(), gh, login=("vera", VIEWER_PASSWORD)).status_code == 403
+    assert _cleanup_call(_cleanup_run(), gh, json=None, data={"reason": "x"}).status_code == 415
+    assert _cleanup_call(_cleanup_run(), gh, json={"reason": "x" * 1001}).status_code == 422
+    assert gh.calls == []
+
+
+def test_cleanup_accepts_issue_url_and_repo_case() -> None:
+    gh = FakeGitHub()
+    run = _cleanup_run(comment_url="https://github.com/ACME/Repo/issues/7#issuecomment-9")
+    assert _cleanup_call(run, gh).status_code == 200
+    assert gh.calls == [("acme", "repo", 9)]
+
+
+def test_cleanup_transport_error_is_502_without_audit() -> None:
+    import httpx
+    from app.adapters.github import GitHubAppClient
+
+    client = GitHubAppClient.__new__(GitHubAppClient)
+
+    async def token(*_a: Any) -> str:
+        return "t"
+
+    client.installation_token = token  # type: ignore[method-assign]
+    run = _cleanup_run()
+    with patch("httpx.AsyncClient.request", side_effect=httpx.ConnectTimeout("timed out")):
+        r = _cleanup_call(run, client)  # type: ignore[arg-type]
+    assert r.status_code == 502
+    assert run.comment_cleaned_at is None

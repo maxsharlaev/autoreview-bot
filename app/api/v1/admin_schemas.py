@@ -80,6 +80,9 @@ class AdminRunItem(BaseModel):
     has_sensitive_content: bool | None = None
     error_code: str | None = None
     skip_reason: str | None = None
+    comment_cleaned_by: str | None = None
+    comment_cleaned_at: datetime | None = None
+    comment_cleanup_reason: str | None = None
 
 
 class AdminRunListResponse(BaseModel):
@@ -153,3 +156,9 @@ class AdminFindingSuppressRequest(BaseModel):
 
 class AdminFindingUnsuppressRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class AdminCommentCleanupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=MAX_FINDING_REASON_LENGTH)

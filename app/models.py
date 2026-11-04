@@ -155,6 +155,10 @@ class ReviewRun(TimestampMixin, Base):
     # True when the published comment, unredacted, would carry security finding details or Jira text.
     # None = unknown: rows from before migration 008, or runs that published no review comment.
     has_sensitive_content: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Manual admin cleanup of the published comment (deleted on GitHub); NULL until cleaned.
+    comment_cleaned_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    comment_cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    comment_cleanup_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Check run / commit status bookkeeping (see app.services.progress_status)
     progress_status: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
