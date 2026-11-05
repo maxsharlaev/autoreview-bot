@@ -162,3 +162,85 @@ class AdminCommentCleanupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = Field(default=None, max_length=MAX_FINDING_REASON_LENGTH)
+
+
+class AdminSpaceItem(BaseModel):
+    """A GitHub installation (space) accessible to the bot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    login: str
+    type: Literal["User", "Organization"]
+
+
+class AdminSpaceListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AdminSpaceItem]
+
+
+class AdminOpenFindings(BaseModel):
+    """Open findings aggregated by severity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    P0: int = 0
+    P1: int = 0
+    P2: int = 0
+    P3: int = 0
+
+
+class AdminRepoItem(BaseModel):
+    """A repository within a space with aggregated counts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str
+    open_pr_count: int
+    open_findings: AdminOpenFindings
+    last_run_at: datetime | None = None
+
+
+class AdminRepoListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AdminRepoItem]
+
+
+class AdminRepoPRItem(BaseModel):
+    """An open pull request in a repository."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    number: int
+    title: str
+    head_sha_short: str
+    last_run_status: str | None = None
+
+
+class AdminRepoFindingItem(BaseModel):
+    """An open finding in a repository."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    stable_id: str
+    severity: str
+    title: str
+    path: str
+    line: int | None = None
+    pull_request_number: int
+
+
+class AdminRepoDetailResponse(BaseModel):
+    """Detailed repository info with open PRs and findings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str
+    open_prs: list[AdminRepoPRItem]
+    open_findings: list[AdminRepoFindingItem]
+    open_findings_count: int
+    limit: int
+    offset: int

@@ -614,3 +614,76 @@ class GitHubAppClient:
             _evict_on_401=True,
         )
         return response.json()
+
+    async def list_app_installations(self) -> list[dict[str, Any]]:
+        """List all installations accessible to the authenticated GitHub App.
+
+        Returns a list of installation objects with account info (login, type).
+        Requires App authentication (not PAT).
+        """
+        if self._personal_token():
+            raise GitHubError("list_app_installations requires GitHub App authentication, not PAT")
+        installations: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = await self._request(
+                "GET",
+                f"{API}/app/installations",
+                token=self._jwt(),
+                params={"per_page": 100, "page": page},
+            )
+            batch = response.json()
+            if not batch:
+                break
+            installations.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return installations
+
+    async def list_installation_repos(self, installation_id: int) -> list[dict[str, Any]]:
+        """List repositories accessible to a specific installation.
+
+        Returns repository objects with full_name, visibility, etc.
+        """
+        app_id = self._app_id()
+        private_key = self._private_key_pem()
+        if not app_id or not private_key.strip():
+            raise GitHubError("list_installation_repos requires GitHub App authentication")
+
+        cache_key = (app_id, installation_id)
+        if cache_key in _INSTALLATION_TOKEN_CACHE:
+            token, expires_at = _INSTALLATION_TOKEN_CACHE[cache_key]
+            if time.time() >= expires_at - 60:
+                token = None
+        else:
+            token = None
+
+        if token is None:
+            response = await self._request(
+                "POST",
+                f"{API}/app/installations/{installation_id}/access_tokens",
+                token=self._jwt(),
+            )
+            data = response.json()
+            token = data["token"]
+            _INSTALLATION_TOKEN_CACHE[cache_key] = (token, time.time() + 3500)
+
+        repos: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = await self._request(
+                "GET",
+                f"{API}/installation/repositories",
+                token=token,
+                params={"per_page": 100, "page": page},
+            )
+            data = response.json()
+            batch = data.get("repositories", [])
+            if not batch:
+                break
+            repos.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return repos

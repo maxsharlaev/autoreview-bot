@@ -27,10 +27,18 @@ from app.api.v1.admin_schemas import (
     AdminFindingUnsuppressRequest,
     AdminLoginRequest,
     AdminMeResponse,
+    AdminOpenFindings,
     AdminPasswordResetRequest,
     AdminQueueResponse,
+    AdminRepoDetailResponse,
+    AdminRepoFindingItem,
+    AdminRepoItem,
+    AdminRepoListResponse,
+    AdminRepoPRItem,
     AdminRunItem,
     AdminRunListResponse,
+    AdminSpaceItem,
+    AdminSpaceListResponse,
     AdminUserCreateRequest,
     AdminUserListResponse,
     AdminUserPublic,
@@ -761,3 +769,275 @@ async def get_queue(
     )
     snap["queue_jobs_global"] = snap.pop("queue_jobs")
     return AdminQueueResponse.model_validate(snap)
+
+
+def _github_for_default_owner() -> GitHubAppClient | None:
+    """Get a GitHub client for the default owner (for space listing)."""
+    registry = get_owner_registry()
+    ctx = registry.get_default()
+    if ctx is None:
+        return None
+    return GitHubAppClient.from_credentials(ctx.github, owner_id=ctx.id)
+
+
+@router.get("/spaces", response_model=AdminSpaceListResponse)
+async def list_spaces(
+    _: AdminPrincipalDep,
+) -> AdminSpaceListResponse:
+    """List GitHub installations (spaces) accessible to the bot."""
+    github = _github_for_default_owner()
+    if github is None:
+        raise HTTPException(status_code=503, detail="no owner configured")
+    try:
+        installations = await github.list_app_installations()
+    except GitHubError as exc:
+        if exc.status_code == 401:
+            raise HTTPException(status_code=503, detail="github authentication failed") from None
+        raise HTTPException(status_code=502, detail="github api error") from None
+
+    items = []
+    for inst in installations:
+        account = inst.get("account") or {}
+        login = account.get("login") or ""
+        acc_type = account.get("type") or "User"
+        if login:
+            items.append(
+                AdminSpaceItem(
+                    id=int(inst.get("id") or 0),
+                    login=login,
+                    type=acc_type if acc_type in ("User", "Organization") else "User",
+                )
+            )
+    return AdminSpaceListResponse(items=items)
+
+
+async def _get_open_findings_by_severity(
+    session: Any,
+    full_name: str,
+) -> AdminOpenFindings:
+    """Count open findings grouped by severity for a repository."""
+    result = await session.execute(
+        select(Finding.severity, func.count(Finding.id))
+        .join(PullRequest, Finding.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
+        .group_by(Finding.severity)
+    )
+    counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    for severity, count in result.all():
+        if severity in counts:
+            counts[severity] = count
+    return AdminOpenFindings(**counts)
+
+
+async def _get_last_run_at(session: Any, full_name: str) -> Any:
+    """Get the most recent run timestamp for a repository."""
+    result = await session.execute(
+        select(func.max(ReviewRun.created_at))
+        .join(PullRequest, ReviewRun.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(Repository.full_name == full_name)
+    )
+    return result.scalar_one_or_none()
+
+
+@router.get("/spaces/{space}/repos", response_model=AdminRepoListResponse)
+async def list_space_repos(
+    space: str,
+    session: SessionDep,
+    _: AdminPrincipalDep,
+    hide_empty_prs: Annotated[bool, Query()] = True,
+) -> AdminRepoListResponse:
+    """List repositories in a space with open PR counts and open findings by severity.
+
+    Args:
+        space: The installation login (org or user name)
+        hide_empty_prs: If True (default), exclude repos with 0 open PRs
+    """
+    github = _github_for_default_owner()
+    if github is None:
+        raise HTTPException(status_code=503, detail="no owner configured")
+
+    registry = get_owner_registry()
+    installations = []
+    try:
+        installations = await github.list_app_installations()
+    except GitHubError as exc:
+        if exc.status_code == 401:
+            raise HTTPException(status_code=503, detail="github authentication failed") from None
+        raise HTTPException(status_code=502, detail="github api error") from None
+
+    target_installation_id: int | None = None
+    for inst in installations:
+        account = inst.get("account") or {}
+        if (account.get("login") or "").lower() == space.lower():
+            target_installation_id = int(inst.get("id") or 0)
+            break
+
+    if target_installation_id is None:
+        raise HTTPException(status_code=404, detail="space not found")
+
+    try:
+        repos = await github.list_installation_repos(target_installation_id)
+    except GitHubError as exc:
+        logger.warning("Failed to list repos for installation %s: %s", target_installation_id, exc)
+        raise HTTPException(status_code=502, detail="github api error") from None
+
+    items: list[AdminRepoItem] = []
+    for repo_data in repos:
+        full_name = repo_data.get("full_name") or ""
+        if not full_name:
+            continue
+
+        route = registry.resolve(full_name, installation_id=target_installation_id)
+        if route.rejected():
+            continue
+
+        owner_name, repo_name = full_name.split("/", 1)
+        owner_ctx = registry.get(route.owner_id)
+        if owner_ctx is None:
+            continue
+
+        gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
+        try:
+            open_prs = await gh_client.list_open_pulls(owner_name, repo_name)
+            open_pr_count = len(open_prs)
+        except GitHubError:
+            open_pr_count = 0
+
+        if hide_empty_prs and open_pr_count == 0:
+            continue
+
+        open_findings = await _get_open_findings_by_severity(session, full_name)
+        last_run_at = await _get_last_run_at(session, full_name)
+
+        items.append(
+            AdminRepoItem(
+                full_name=full_name,
+                open_pr_count=open_pr_count,
+                open_findings=open_findings,
+                last_run_at=last_run_at,
+            )
+        )
+
+    return AdminRepoListResponse(items=items)
+
+
+@router.get("/repos/{owner}/{repo}", response_model=AdminRepoDetailResponse)
+async def get_repo_detail(
+    owner: str,
+    repo: str,
+    session: SessionDep,
+    _: AdminPrincipalDep,
+    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminRepoDetailResponse:
+    """Get detailed repository info: open PRs and open findings with pagination."""
+    full_name = f"{owner}/{repo}"
+    registry = get_owner_registry()
+    route = registry.resolve(full_name)
+    if route.rejected():
+        raise HTTPException(status_code=404, detail="repository not found or not accessible")
+
+    owner_ctx = registry.get(route.owner_id)
+    if owner_ctx is None:
+        raise HTTPException(status_code=404, detail="owner not configured")
+
+    gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
+
+    try:
+        open_prs_data = await gh_client.list_open_pulls(owner, repo)
+    except GitHubError as exc:
+        logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
+        raise HTTPException(status_code=502, detail="github api error") from None
+
+    open_pr_numbers = {pr.get("number") for pr in open_prs_data}
+
+    last_runs_subq = (
+        select(
+            ReviewRun.pull_request_id,
+            func.max(ReviewRun.created_at).label("max_created_at"),
+        )
+        .group_by(ReviewRun.pull_request_id)
+        .subquery()
+    )
+
+    last_run_status_q = (
+        select(PullRequest.number, ReviewRun.status)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .join(ReviewRun, ReviewRun.pull_request_id == PullRequest.id)
+        .join(
+            last_runs_subq,
+            (ReviewRun.pull_request_id == last_runs_subq.c.pull_request_id)
+            & (ReviewRun.created_at == last_runs_subq.c.max_created_at),
+        )
+        .where(Repository.full_name == full_name, PullRequest.number.in_(open_pr_numbers))
+    )
+    result = await session.execute(last_run_status_q)
+    pr_statuses = {row[0]: row[1] for row in result.all()}
+
+    open_prs: list[AdminRepoPRItem] = []
+    for pr_data in open_prs_data:
+        number = pr_data.get("number")
+        if number is None:
+            continue
+        head_sha = pr_data.get("head", {}).get("sha") or ""
+        open_prs.append(
+            AdminRepoPRItem(
+                number=number,
+                title=pr_data.get("title") or "",
+                head_sha_short=head_sha[:7] if head_sha else "",
+                last_run_status=pr_statuses.get(number),
+            )
+        )
+
+    count_q = (
+        select(func.count())
+        .select_from(Finding)
+        .join(PullRequest, Finding.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
+    )
+    total_findings = int((await session.execute(count_q)).scalar_one())
+
+    findings_q = (
+        select(Finding)
+        .join(PullRequest, Finding.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
+        .order_by(Finding.severity, Finding.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    findings_result = await session.execute(findings_q)
+    findings_rows = findings_result.scalars().all()
+
+    pr_id_to_number: dict[Any, int] = {}
+    pr_ids = {f.pull_request_id for f in findings_rows}
+    if pr_ids:
+        pr_q = select(PullRequest.id, PullRequest.number).where(PullRequest.id.in_(pr_ids))
+        pr_result = await session.execute(pr_q)
+        pr_id_to_number = {row[0]: row[1] for row in pr_result.all()}
+
+    open_findings: list[AdminRepoFindingItem] = []
+    for finding in findings_rows:
+        open_findings.append(
+            AdminRepoFindingItem(
+                id=finding.id,
+                stable_id=finding.stable_id,
+                severity=finding.severity,
+                title=finding.title,
+                path=finding.path,
+                line=finding.line,
+                pull_request_number=pr_id_to_number.get(finding.pull_request_id, 0),
+            )
+        )
+
+    return AdminRepoDetailResponse(
+        full_name=full_name,
+        open_prs=open_prs,
+        open_findings=open_findings,
+        open_findings_count=total_findings,
+        limit=limit,
+        offset=offset,
+    )
