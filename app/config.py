@@ -213,6 +213,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     review_api_key: str = ""
     admin_api_enabled: bool = False
+    admin_ui_enabled: bool = False
+    admin_ui_dist: str = "admin_ui_out"
+    admin_ui_base_path: str = "/control"
     admin_root_login: str = ""
     admin_root_password: str = ""
     admin_session_ttl_seconds: int = Field(default=28800, gt=0, le=604800)
@@ -227,6 +230,20 @@ class Settings(BaseSettings):
     log_format: str = "text"
     metrics_port: int = 9100
     run_migrations: bool = False
+
+    @field_validator("admin_ui_base_path")
+    @classmethod
+    def validate_admin_ui_base_path(cls, value: str) -> str:
+        """URL path prefix for the static control UI (must match the Next.js export basePath)."""
+        raw = (value or "").strip() or "/control"
+        if not raw.startswith("/") or raw.endswith("/") or "//" in raw or ".." in raw:
+            raise ValueError(
+                "ADMIN_UI_BASE_PATH must be an absolute URL path without a trailing slash "
+                '(default "/control"; example "/ops")'
+            )
+        if not re.fullmatch(r"/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*", raw):
+            raise ValueError("ADMIN_UI_BASE_PATH may only contain letters, digits, and . _ ~ - path segments")
+        return raw
 
     def github_private_key_pem(self) -> str:
         key = self.github_app_private_key.replace("\\n", "\n").strip()

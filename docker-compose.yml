@@ -29,6 +29,8 @@ services:
     build:
       context: .
       target: api
+      args:
+        ADMIN_UI_BASE_PATH: ${ADMIN_UI_BASE_PATH:-/control}
     env_file:
       - .env
     environment:
@@ -47,6 +49,8 @@ services:
     build:
       context: .
       target: api
+      args:
+        ADMIN_UI_BASE_PATH: ${ADMIN_UI_BASE_PATH:-/control}
     env_file:
       - .env
     environment:

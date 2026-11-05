@@ -32,7 +32,7 @@
 
 | Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **Панель администратора (прогоны, очередь, управление findings)** | **in progress** | Опционально (`ADMIN_UI_ENABLED=false`); очередь/прогоны, фильтры, безопасный повтор, журнал аудита. Статусы подавления `accepted` / `false_positive` (оркестратор: не поднимаются снова); admin JSON API / UI и очистка чувствительных комментариев (`has_sensitive_content`) ещё впереди. Авторизация отдельно от публичного API |
+| **Панель администратора (прогоны, очередь, управление findings)** | **in progress** | Admin JSON API уже влит (sessions, findings suppress, runs + sensitive cleanup, users, queue). Каркас control UI на `/control` (`ADMIN_UI_ENABLED=false` по умолчанию; включать вместе с `ADMIN_API_ENABLED`). Страницы findings/runs/queue/users, safe retry и richer audit UI ещё впереди. Authz отдельно от public API |
 
 <!-- section: container-strict-review-path -->
 ### Контейнер / строгий путь ревью

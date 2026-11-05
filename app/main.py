@@ -122,6 +122,16 @@ def create_app() -> FastAPI:
 
         admin_api.mount_admin_api(application)
         logger.info("Admin API mounted at /api/v1/admin")
+    if settings.admin_ui_enabled is True:
+        # validate_admin_env already rejects UI without API; keep the mount gated the same way.
+        if settings.admin_api_enabled is not True:
+            raise RuntimeError(
+                "ADMIN_UI_ENABLED=true requires ADMIN_API_ENABLED=true "
+                "(control UI login and session calls use /api/v1/admin)"
+            )
+        from app.api.admin_ui import mount_admin_ui
+
+        mount_admin_ui(application, settings)
     return application
 
 

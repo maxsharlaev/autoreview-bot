@@ -36,6 +36,9 @@ Column **Read by**: `api` (FastAPI), `worker` (ARQ worker and Codex runs), `migr
 | --- | --- | --- | --- |
 | `REVIEW_API_KEY` | `""` | api | Operator key for `/api/v1/reviews*` and `/api/v1/ops/status`, valid for every owner. Generate a long random value; it is not a GitHub token. Without it those endpoints answer `401`. |
 | `ADMIN_API_ENABLED` | `false` | api | When `true`, mounts `/api/v1/admin/*` (session cookie auth). Default off. |
+| `ADMIN_UI_ENABLED` | `false` | api | When `true`, serves the static control UI at `ADMIN_UI_BASE_PATH` (Next.js export). Default off. **Requires** `ADMIN_API_ENABLED=true` (startup fails otherwise — login/session routes live under `/api/v1/admin`). |
+| `ADMIN_UI_DIST` | `admin_ui_out` | api | Directory with the built UI (`index.html`). The api image ships it at `/app/admin_ui_out`. |
+| `ADMIN_UI_BASE_PATH` | `/control` | api (build + runtime) | URL path where the control UI is served (no trailing slash). Baked into the Next.js export as `basePath` at **image build** (`docker compose build` / build-arg); must match the running api env. Changing it requires rebuilding the `api` image (a plain recreate is not enough). |
 | `ADMIN_ROOT_LOGIN` | `""` | api | Optional env-only root login (set together with `ADMIN_ROOT_PASSWORD`, or leave both empty; ≤ 128 chars). |
 | `ADMIN_ROOT_PASSWORD` | `""` | api | Optional env-only root password (16..1024 chars; out of range fails startup). Not stored in DB; root stays usable even when DB users exist (recovery). Remove both root vars and restart to disable. Must not collide with `admin_users.login`. |
 | `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | Admin session TTL in Redis (default 8h). 1..604800 (7 days); invalid values fail startup. |

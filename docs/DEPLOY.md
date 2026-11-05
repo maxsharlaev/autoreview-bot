@@ -192,6 +192,13 @@ A GitHub App (or repository) webhook to `/api/v1/pull-request`. Every delivery m
 
 Running both triggers on one repository does not create duplicate runs for one SHA (see [API.md](API.md#concurrency-guarantees)) but doubles the requests.
 
+<!-- section: admin-control-ui-optional -->
+## Admin control UI (optional)
+
+Opt-in static panel at **`ADMIN_UI_BASE_PATH`** (default **`/control/`**, not `/admin`). Set `ADMIN_API_ENABLED=true` and `ADMIN_UI_ENABLED=true` in `.env` (UI alone is rejected at startup). The api image embeds the Next.js export under `/app/admin_ui_out` (`ADMIN_UI_DIST`). The path is a **build-arg**: it is baked into the static assets when you `docker compose build` (or rebuild) `api`. After changing `ADMIN_UI_BASE_PATH` in `.env`, rebuild the `api` image and recreate the container — a restart/recreate alone still serves the old path inside the bundle. Keep the runtime env equal to the build-arg.
+
+Use TLS in production so `ADMIN_COOKIE_SECURE=true` (default) works. The session cookie is `SameSite=Strict`: the UI and API must share one origin. For local plain HTTP set `ADMIN_COOKIE_SECURE=false` and open the UI via the api port (e.g. `http://127.0.0.1:8000/control/`), not a separate Next dev port without a same-origin proxy.
+
 <!-- section: observability-your-stack -->
 ## Observability (your stack)
 

@@ -26,12 +26,18 @@ class AdminApiConfigError(ValueError):
 
 
 def validate_admin_env(settings: Settings) -> None:
-    """Validate ADMIN_* env when the admin API is enabled.
+    """Validate ADMIN_* env for API/UI enablement and the optional env root.
 
-    When ADMIN_API_ENABLED is false, root env vars are ignored (no startup failure).
-    When enabled: root is optional, but login/password must be both set or both empty,
-    and a set password must be at least MIN_ROOT_PASSWORD_LENGTH characters.
+    When ADMIN_API_ENABLED is false, root env vars are ignored (no startup failure),
+    but ADMIN_UI_ENABLED=true is rejected (the UI needs /api/v1/admin login routes).
+    When the API is enabled: root is optional, but login/password must be both set or
+    both empty, and a set password must be at least MIN_ROOT_PASSWORD_LENGTH characters.
     """
+    if settings.admin_ui_enabled is True and settings.admin_api_enabled is not True:
+        raise AdminApiConfigError(
+            "ADMIN_UI_ENABLED=true requires ADMIN_API_ENABLED=true "
+            "(control UI login and session calls use /api/v1/admin)"
+        )
     if settings.admin_api_enabled is not True:
         clear_root_credentials()
         return
