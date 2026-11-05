@@ -186,3 +186,89 @@ class TestClearCaches:
 
         assert len(_INSTALLATION_TOKEN_CACHE) == 0
         assert len(_INSTALLATION_ID_CACHE) == 0
+
+
+class TestListInstallationReposTokenEviction:
+    """AR-011: Token eviction on 401 during list_installation_repos."""
+
+    @pytest.fixture(autouse=True)
+    def clear_caches(self):
+        _clear_caches()
+        yield
+        _clear_caches()
+
+    @pytest.mark.asyncio
+    async def test_401_evicts_cached_token(self):
+        """401 during list_installation_repos should evict the cached token."""
+        from types import SimpleNamespace
+
+        client = _make_client()
+        client._installation_id = 67890
+        app_id = 12345
+        installation_id = 67890
+        cache_key = (app_id, installation_id)
+
+        async def mock_request(method, url, token=None, **kwargs):
+            if "installation/repositories" in url:
+                raise GitHubError("401 Bad credentials", status_code=401)
+            mock = MagicMock()
+            mock.json.return_value = {"token": "ghs_test123"}
+            return mock
+
+        _INSTALLATION_TOKEN_CACHE[cache_key] = ("ghs_cached_token", time.time() + 3600)
+
+        credentials = SimpleNamespace(
+            kind="app",
+            app_id=app_id,
+            private_key_pem="-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+        )
+
+        with (
+            patch.object(client, "_jwt", return_value="mock_jwt"),
+            patch.object(client, "_request", side_effect=mock_request),
+            patch.object(client, "_credentials", credentials),
+        ):
+            assert cache_key in _INSTALLATION_TOKEN_CACHE
+
+            with pytest.raises(GitHubError, match="401"):
+                await client.list_installation_repos(installation_id)
+
+            assert cache_key not in _INSTALLATION_TOKEN_CACHE
+
+    @pytest.mark.asyncio
+    async def test_non_401_does_not_evict_token(self):
+        """Non-401 errors should not evict the cached token."""
+        from types import SimpleNamespace
+
+        client = _make_client()
+        client._installation_id = 67890
+        app_id = 12345
+        installation_id = 67890
+        cache_key = (app_id, installation_id)
+
+        async def mock_request(method, url, token=None, **kwargs):
+            if "installation/repositories" in url:
+                raise GitHubError("500 Internal Server Error", status_code=500)
+            mock = MagicMock()
+            mock.json.return_value = {"token": "ghs_test123"}
+            return mock
+
+        _INSTALLATION_TOKEN_CACHE[cache_key] = ("ghs_cached_token", time.time() + 3600)
+
+        credentials = SimpleNamespace(
+            kind="app",
+            app_id=app_id,
+            private_key_pem="-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+        )
+
+        with (
+            patch.object(client, "_jwt", return_value="mock_jwt"),
+            patch.object(client, "_request", side_effect=mock_request),
+            patch.object(client, "_credentials", credentials),
+        ):
+            assert cache_key in _INSTALLATION_TOKEN_CACHE
+
+            with pytest.raises(GitHubError, match="500"):
+                await client.list_installation_repos(installation_id)
+
+            assert cache_key in _INSTALLATION_TOKEN_CACHE

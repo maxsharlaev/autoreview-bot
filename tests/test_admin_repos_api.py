@@ -227,7 +227,7 @@ def test_space_repos_not_found() -> None:
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
-        resp = client.get("/api/v1/admin/spaces/nonexistent/repos")
+        resp = client.get("/api/v1/admin/spaces/9999/repos")
         assert resp.status_code == 404
         assert "space not found" in resp.json()["detail"]
 
@@ -363,7 +363,7 @@ def test_spaces_dedupes_shared_app() -> None:
 
 
 def test_space_repos_uses_correct_owner_client() -> None:
-    """Test that repos are listed using the owning context's GitHub client."""
+    """Test that repos are listed using the space's installation ID for PR listing."""
     session = FakeSession()
     redis = FakeRedis()
     settings = _settings()
@@ -383,11 +383,11 @@ def test_space_repos_uses_correct_owner_client() -> None:
 
     from app.adapters.github import GitHubAppClient
 
-    created_clients: list[str] = []
+    captured_installation_ids: list[int | None] = []
 
     @classmethod
-    def tracking_from_credentials(cls, credentials, owner_id="default", **kwargs):
-        created_clients.append(owner_id)
+    def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
+        captured_installation_ids.append(installation_id)
         return AsyncMock(list_installation_repos=AsyncMock(return_value=[]))
 
     with (
@@ -399,6 +399,92 @@ def test_space_repos_uses_correct_owner_client() -> None:
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
-        resp = client.get("/api/v1/admin/spaces/beta-inc/repos")
+        resp = client.get("/api/v1/admin/spaces/2002/repos")
         assert resp.status_code == 200
-        assert "owner-b" in created_clients
+        assert 2002 in captured_installation_ids
+
+
+def test_spaces_duplicate_login_different_apps() -> None:
+    """AR-008: Two Apps installed on the same org should be disambiguated by installation ID."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "owner-a"),
+            (2001, "acme-corp", "Organization", "owner-b"),
+        ]
+    )
+    registry = FakeOwnerRegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+            "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+        }
+    )
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 2
+        ids = [item["id"] for item in data["items"]]
+        assert 1001 in ids
+        assert 2001 in ids
+
+
+def test_spaces_enumeration_error_returns_502() -> None:
+    """AR-010: GitHub API errors during enumeration return 502."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    from app.adapters.github import GitHubError
+    from app.api.v1.admin import _EnumerationError
+
+    registry = FakeOwnerRegistry()
+    enum_error = _EnumerationError(12345, "default", GitHubError("test error", status_code=500))
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(side_effect=enum_error)),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces")
+        assert resp.status_code == 502
+        assert "github api error" in resp.json()["detail"]
+
+
+def test_space_repos_enumeration_error_returns_502() -> None:
+    """AR-010: GitHub API errors during enumeration in space repos endpoint return 502."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    from app.adapters.github import GitHubError
+    from app.api.v1.admin import _EnumerationError
+
+    registry = FakeOwnerRegistry()
+    enum_error = _EnumerationError(12345, "default", GitHubError("test error", status_code=500))
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(side_effect=enum_error)),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces/1001/repos")
+        assert resp.status_code == 502
+        assert "github api error" in resp.json()["detail"]

@@ -782,11 +782,24 @@ class _InstallationInfo:
     owner_id: str
 
 
+class _EnumerationError(Exception):
+    """Raised when GitHub App installation enumeration fails."""
+
+    def __init__(self, app_id: int, owner_id: str, cause: GitHubError) -> None:
+        self.app_id = app_id
+        self.owner_id = owner_id
+        self.cause = cause
+        super().__init__(f"Failed to enumerate installations for app {app_id} (owner {owner_id})")
+
+
 async def _enumerate_all_installations() -> tuple[list[_InstallationInfo], dict[int, str]]:
     """Enumerate installations from all App-backed owners, deduped by installation ID.
 
     Returns:
         Tuple of (installations list, installation_id -> owner_id map)
+
+    Raises:
+        _EnumerationError: If any GitHub App fails to enumerate installations.
     """
     registry = get_owner_registry()
     if not registry.owners:
@@ -809,8 +822,7 @@ async def _enumerate_all_installations() -> tuple[list[_InstallationInfo], dict[
         try:
             app_installations = await gh_client.list_app_installations()
         except GitHubError as exc:
-            logger.warning("Failed to list installations for owner %s: %s", owner_id, exc)
-            continue
+            raise _EnumerationError(app_id, owner_id, exc) from exc
 
         for inst in app_installations:
             inst_id = int(inst.get("id") or 0)
@@ -838,7 +850,11 @@ async def list_spaces(
     _: AdminPrincipalDep,
 ) -> AdminSpaceListResponse:
     """List GitHub installations (spaces) accessible to the bot across all App-backed owners."""
-    installations, _ = await _enumerate_all_installations()
+    try:
+        installations, _ = await _enumerate_all_installations()
+    except _EnumerationError as exc:
+        logger.warning("Failed to enumerate installations: %s", exc)
+        raise HTTPException(status_code=502, detail="github api error") from None
     if not installations:
         registry = get_owner_registry()
         if not registry.owners:
@@ -879,9 +895,9 @@ async def _get_last_run_at(session: Any, full_name: str) -> Any:
     return result.scalar_one_or_none()
 
 
-@router.get("/spaces/{space}/repos", response_model=AdminRepoListResponse)
+@router.get("/spaces/{installation_id}/repos", response_model=AdminRepoListResponse)
 async def list_space_repos(
-    space: str,
+    installation_id: int,
     session: SessionDep,
     _: AdminPrincipalDep,
     hide_empty_prs: Annotated[bool, Query()] = True,
@@ -889,10 +905,14 @@ async def list_space_repos(
     """List repositories in a space with open PR counts and open findings by severity.
 
     Args:
-        space: The installation login (org or user name)
+        installation_id: The GitHub App installation ID (unique per space)
         hide_empty_prs: If True (default), exclude repos with 0 open PRs
     """
-    installations, installation_to_owner = await _enumerate_all_installations()
+    try:
+        installations, installation_to_owner = await _enumerate_all_installations()
+    except _EnumerationError as exc:
+        logger.warning("Failed to enumerate installations: %s", exc)
+        raise HTTPException(status_code=502, detail="github api error") from None
     if not installations:
         registry = get_owner_registry()
         if not registry.owners:
@@ -901,7 +921,7 @@ async def list_space_repos(
 
     target_installation: _InstallationInfo | None = None
     for inst in installations:
-        if inst.login.lower() == space.lower():
+        if inst.id == installation_id:
             target_installation = inst
             break
 
@@ -914,11 +934,13 @@ async def list_space_repos(
     if space_owner_ctx is None:
         raise HTTPException(status_code=503, detail="owner not configured")
 
-    gh_client = GitHubAppClient.from_credentials(space_owner_ctx.github, owner_id=space_owner_id)
+    gh_client = GitHubAppClient.from_credentials(
+        space_owner_ctx.github, owner_id=space_owner_id, installation_id=installation_id
+    )
     try:
-        repos = await gh_client.list_installation_repos(target_installation.id)
+        repos = await gh_client.list_installation_repos(installation_id)
     except GitHubError as exc:
-        logger.warning("Failed to list repos for installation %s: %s", target_installation.id, exc)
+        logger.warning("Failed to list repos for installation %s: %s", installation_id, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
 
     items: list[AdminRepoItem] = []
@@ -927,7 +949,7 @@ async def list_space_repos(
         if not full_name:
             continue
 
-        route = registry.resolve(full_name, installation_id=target_installation.id)
+        route = registry.resolve(full_name, installation_id=installation_id)
         if route.rejected():
             continue
 
@@ -936,10 +958,12 @@ async def list_space_repos(
         if owner_ctx is None:
             continue
 
-        gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
+        repo_gh_client = GitHubAppClient.from_credentials(
+            owner_ctx.github, owner_id=route.owner_id, installation_id=installation_id
+        )
         open_pr_count: int | None
         try:
-            open_prs = await gh_client.list_open_pulls(owner_name, repo_name)
+            open_prs = await repo_gh_client.list_open_pulls(owner_name, repo_name)
             open_pr_count = len(open_prs)
         except GitHubError as exc:
             logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
