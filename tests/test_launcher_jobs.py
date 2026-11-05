@@ -205,8 +205,7 @@ def test_run_review_job_classifies_quota_from_docker_logs(staged) -> None:
     fake = FakeDocker()
     fake.wait_code = 1
     fake.logs = lambda container_id, tail=200: (  # type: ignore[method-assign]
-        "Error: Quota exceeded. Check your plan and billing details.\n"
-        "opr-review: codex exit 1"
+        "Error: Quota exceeded. Check your plan and billing details.\nopr-review: codex exit 1"
     )
 
     with pytest.raises(LauncherJobError, match="codex exit 1") as excinfo:
@@ -220,8 +219,7 @@ def test_run_review_job_classifies_auth_from_logs(staged) -> None:
     fake = FakeDocker()
     fake.wait_code = 1
     fake.logs = lambda container_id, tail=200: (  # type: ignore[method-assign]
-        "Error: 401 Unauthorized: Missing bearer or basic authentication\n"
-        "opr-review: codex exit 1"
+        "Error: 401 Unauthorized: Missing bearer or basic authentication\nopr-review: codex exit 1"
     )
 
     with pytest.raises(LauncherJobError, match="codex exit 1") as excinfo:
