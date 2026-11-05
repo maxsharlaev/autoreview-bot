@@ -5,16 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from app.api.admin_ui import CONTROL_MOUNT, mount_admin_ui
+from app.api.admin_ui import mount_admin_ui
 from app.config import Settings
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 
 def _settings(**over: object) -> Settings:
     base = {
         "admin_ui_enabled": False,
         "admin_ui_dist": "admin_ui_out",
+        "admin_ui_base_path": "/control",
         "admin_api_enabled": False,
     }
     base.update(over)
@@ -29,7 +31,7 @@ def test_control_not_mounted_when_disabled() -> None:
     app = FastAPI()
     mount_admin_ui(app, _settings(admin_ui_enabled=False, admin_ui_dist=str(_fixture_dist())))
     client = TestClient(app)
-    assert client.get(CONTROL_MOUNT + "/").status_code == 404
+    assert client.get("/control/").status_code == 404
 
 
 def test_control_serves_index_when_enabled(tmp_path: Path) -> None:
@@ -43,13 +45,34 @@ def test_control_serves_index_when_enabled(tmp_path: Path) -> None:
     mount_admin_ui(app, _settings(admin_ui_enabled=True, admin_ui_dist=str(dist)))
     client = TestClient(app)
 
-    root = client.get(CONTROL_MOUNT + "/")
+    root = client.get("/control/")
     assert root.status_code == 200
     assert b"Control fixture" in root.content
 
-    login = client.get(CONTROL_MOUNT + "/login/")
+    login = client.get("/control/login/")
     assert login.status_code == 200
     assert b"Sign in" in login.content
+
+
+def test_custom_base_path_mount(tmp_path: Path) -> None:
+    dist = tmp_path / "out"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><h1>Ops</h1>", encoding="utf-8")
+    app = FastAPI()
+    mount_admin_ui(app, _settings(admin_ui_enabled=True, admin_ui_dist=str(dist), admin_ui_base_path="/ops"))
+    client = TestClient(app)
+    assert client.get("/ops/").status_code == 200
+    assert b"Ops" in client.get("/ops/").content
+    assert client.get("/control/").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["control", "/control/", "/", "//x", "/ops/../x", "/ops space"],
+)
+def test_invalid_admin_ui_base_path(path: str) -> None:
+    with pytest.raises(ValidationError):
+        _settings(admin_ui_base_path=path)
 
 
 def test_control_missing_dist_fails_closed(tmp_path: Path) -> None:
@@ -63,3 +86,7 @@ def test_repo_fixture_tree_has_login_page() -> None:
     dist = _fixture_dist()
     assert (dist / "index.html").is_file()
     assert (dist / "login" / "index.html").is_file()
+
+
+def test_blank_base_path_defaults_to_control() -> None:
+    assert _settings(admin_ui_base_path="  ").admin_ui_base_path == "/control"

@@ -1,5 +1,8 @@
 # Admin control UI (static export). Built for the api image only.
+# ADMIN_UI_BASE_PATH is baked into the Next.js export; changing it requires an image rebuild.
 FROM node:22-bookworm-slim AS admin-ui
+ARG ADMIN_UI_BASE_PATH=/control
+ENV ADMIN_UI_BASE_PATH=$ADMIN_UI_BASE_PATH
 WORKDIR /ui
 COPY admin-ui/package.json admin-ui/package-lock.json ./
 RUN npm ci
@@ -30,6 +33,8 @@ RUN pip install --no-cache-dir .
 RUN chmod +x ./scripts/run-api.sh
 
 FROM base AS api
+ARG ADMIN_UI_BASE_PATH=/control
+ENV ADMIN_UI_BASE_PATH=$ADMIN_UI_BASE_PATH
 COPY --from=admin-ui /ui/out /app/admin_ui_out
 ENV ADMIN_UI_DIST=/app/admin_ui_out
 EXPOSE 8000

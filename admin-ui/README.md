@@ -17,3 +17,7 @@ npm run dev
 ```
 
 Do not point the browser at `:3000` for login against `:8000` — the session cookie will not be sent.
+
+## Base path
+
+`ADMIN_UI_BASE_PATH` (default `/control`) sets Next.js `basePath` at **build** time. The running API must mount the same path. After changing it in `.env`, rebuild the api image (`docker compose build api`).

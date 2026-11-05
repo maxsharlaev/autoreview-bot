@@ -195,9 +195,9 @@ Webhook GitHub App (или репозитория) на `/api/v1/pull-request`. 
 <!-- section: admin-control-ui-optional -->
 ## Admin control UI (опционально)
 
-Опциональная статическая панель на **`/control/`** (не `/admin`). В `.env`: `ADMIN_API_ENABLED=true` и `ADMIN_UI_ENABLED=true`, затем recreate `api`. Образ api кладёт Next.js export в `/app/admin_ui_out` (`ADMIN_UI_DIST`).
+Опциональная статическая панель на **`ADMIN_UI_BASE_PATH`** (по умолчанию **`/control/`**, не `/admin`). В `.env`: `ADMIN_API_ENABLED=true` и `ADMIN_UI_ENABLED=true`. Образ api кладёт Next.js export в `/app/admin_ui_out` (`ADMIN_UI_DIST`). Путь — **build-arg**: он вшивается в статику при `docker compose build` (или rebuild) `api`. После смены `ADMIN_UI_BASE_PATH` в `.env` пересоберите образ `api` и recreate контейнер — одного restart/recreate недостаточно, в бандле останется старый path. Runtime env должен совпадать с build-arg.
 
-В проде — TLS, чтобы работал `ADMIN_COOKIE_SECURE=true` (default). Cookie сессии `SameSite=Strict`: UI и API на одном origin. Для локального plain HTTP: `ADMIN_COOKIE_SECURE=false` и открывайте UI через порт api (`http://127.0.0.1:8000/control/`), а не отдельный порт Next без same-origin proxy.
+В проде — TLS, чтобы работал `ADMIN_COOKIE_SECURE=true` (default). Cookie сессии `SameSite=Strict`: UI и API на одном origin. Для локального plain HTTP: `ADMIN_COOKIE_SECURE=false` и открывайте UI через порт api (например `http://127.0.0.1:8000/control/`), а не отдельный порт Next без same-origin proxy.
 
 <!-- section: observability-your-stack -->
 ## Наблюдаемость (ваш стек)

@@ -1,4 +1,4 @@
-"""Optional static admin control UI (Next.js export) under ``/control``."""
+"""Optional static admin control UI (Next.js export) under ``ADMIN_UI_BASE_PATH``."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
-CONTROL_MOUNT = "/control"
 DEFAULT_ADMIN_UI_DIST = "admin_ui_out"
+DEFAULT_ADMIN_UI_BASE_PATH = "/control"
 
 
 class _ControlStaticFiles(StaticFiles):
@@ -34,8 +34,13 @@ def resolve_admin_ui_dist(settings: Settings) -> Path:
     return Path(raw).expanduser()
 
 
+def admin_ui_base_path(settings: Settings) -> str:
+    """Normalized mount path (validated on Settings load)."""
+    return (settings.admin_ui_base_path or DEFAULT_ADMIN_UI_BASE_PATH).rstrip("/") or DEFAULT_ADMIN_UI_BASE_PATH
+
+
 def mount_admin_ui(application: FastAPI, settings: Settings) -> None:
-    """Mount ``/control`` when enabled and the export directory contains ``index.html``."""
+    """Mount the control UI when enabled and the export directory contains ``index.html``."""
     if settings.admin_ui_enabled is not True:
         return
     root = resolve_admin_ui_dist(settings).resolve()
@@ -45,5 +50,6 @@ def mount_admin_ui(application: FastAPI, settings: Settings) -> None:
             "(expected index.html). Build admin-ui (npm ci && npm run build) and copy out/ "
             "to that path, or set ADMIN_UI_DIST."
         )
-    application.mount(CONTROL_MOUNT, _ControlStaticFiles(directory=str(root), html=True), name="admin-ui")
-    logger.info("Admin UI mounted at %s (dist=%s)", CONTROL_MOUNT, root)
+    mount = admin_ui_base_path(settings)
+    application.mount(mount, _ControlStaticFiles(directory=str(root), html=True), name="admin-ui")
+    logger.info("Admin UI mounted at %s (dist=%s)", mount, root)
