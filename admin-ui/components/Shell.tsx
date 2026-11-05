@@ -6,6 +6,8 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 import { logout, type AdminMe } from "@/lib/api";
 
+const ENV_BADGE = (process.env.NEXT_PUBLIC_ADMIN_ENV ?? "local").trim();
+
 const NAV_ITEMS = [
   { href: "/findings/", label: "Findings" },
   { href: "/runs/", label: "Runs" },
@@ -82,7 +84,7 @@ export function Shell({ children, user, pageTitle }: ShellProps) {
       <main className="main-content">
         <header className="topbar">
           <h1 className="topbar-title">{pageTitle}</h1>
-          <span className="topbar-badge">local</span>
+          {ENV_BADGE && <span className="topbar-badge">{ENV_BADGE}</span>}
         </header>
         <div className="content-area">{children}</div>
       </main>
