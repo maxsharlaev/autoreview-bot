@@ -197,7 +197,7 @@ class AdminRepoItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     full_name: str
-    open_pr_count: int
+    open_pr_count: int | None
     open_findings: AdminOpenFindings
     last_run_at: datetime | None = None
 

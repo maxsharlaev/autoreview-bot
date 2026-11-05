@@ -606,14 +606,24 @@ class GitHubAppClient:
 
     async def list_open_pulls(self, owner: str, repo: str) -> list[dict[str, Any]]:
         token = await self.installation_token(owner, repo)
-        response = await self._request(
-            "GET",
-            f"{API}/repos/{owner}/{repo}/pulls",
-            token=token,
-            params={"state": "open", "per_page": 100},
-            _evict_on_401=True,
-        )
-        return response.json()
+        pulls: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = await self._request(
+                "GET",
+                f"{API}/repos/{owner}/{repo}/pulls",
+                token=token,
+                params={"state": "open", "per_page": 100, "page": page},
+                _evict_on_401=True,
+            )
+            batch = response.json()
+            if not batch:
+                break
+            pulls.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return pulls
 
     async def list_app_installations(self) -> list[dict[str, Any]]:
         """List all installations accessible to the authenticated GitHub App.

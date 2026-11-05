@@ -899,11 +899,13 @@ async def list_space_repos(
             continue
 
         gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
+        open_pr_count: int | None
         try:
             open_prs = await gh_client.list_open_pulls(owner_name, repo_name)
             open_pr_count = len(open_prs)
-        except GitHubError:
-            open_pr_count = 0
+        except GitHubError as exc:
+            logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
+            open_pr_count = None
 
         if hide_empty_prs and open_pr_count == 0:
             continue
@@ -929,13 +931,18 @@ async def get_repo_detail(
     repo: str,
     session: SessionDep,
     _: AdminPrincipalDep,
+    installation_id: Annotated[int | None, Query(description="GitHub installation ID for routing")] = None,
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> AdminRepoDetailResponse:
-    """Get detailed repository info: open PRs and open findings with pagination."""
+    """Get detailed repository info: open PRs and open findings with pagination.
+
+    Args:
+        installation_id: Optional GitHub installation ID for routing repos via installation claims.
+    """
     full_name = f"{owner}/{repo}"
     registry = get_owner_registry()
-    route = registry.resolve(full_name)
+    route = registry.resolve(full_name, installation_id=installation_id)
     if route.rejected():
         raise HTTPException(status_code=404, detail="repository not found or not accessible")
 
@@ -1005,7 +1012,7 @@ async def get_repo_detail(
         .join(PullRequest, Finding.pull_request_id == PullRequest.id)
         .join(Repository, PullRequest.repository_id == Repository.id)
         .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
-        .order_by(Finding.severity, Finding.created_at.desc())
+        .order_by(Finding.severity, Finding.created_at.desc(), Finding.id)
         .limit(limit)
         .offset(offset)
     )
