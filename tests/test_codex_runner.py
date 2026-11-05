@@ -50,6 +50,12 @@ def test_classify_codex_quota() -> None:
     )
 
 
+def test_classify_codex_quota_exceeded_phrase() -> None:
+    """The newer OpenAI quota phrase must also map to CODEX_QUOTA."""
+    assert classify_codex_error("Quota exceeded. Check your plan and billing details.") == CODEX_QUOTA
+    assert classify_codex_error("error: quota exceeded for this billing period") == CODEX_QUOTA
+
+
 def test_classify_codex_auth() -> None:
     assert classify_codex_error("401 Unauthorized: Missing bearer or basic authentication") == CODEX_AUTH
 

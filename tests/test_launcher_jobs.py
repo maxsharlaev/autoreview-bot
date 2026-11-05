@@ -179,3 +179,49 @@ def test_run_review_job_maps_exit_44_to_codex_timeout(staged) -> None:
     with pytest.raises(LauncherJobError, match="timed out") as excinfo:
         run_review_job(job_id=job_id, checkout_ref=ref, proxy_token="opr_job_test_token_ok", client=fake)  # type: ignore[arg-type]
     assert excinfo.value.code == "CODEX_TIMEOUT"
+
+
+def test_run_review_job_classifies_quota_from_session_log(staged) -> None:
+    """Launcher classifies CODEX_QUOTA from session log, not just last docker log line."""
+    base, job_id, ref = staged
+    fake = FakeDocker()
+    fake.wait_code = 1
+    fake.logs = lambda container_id, tail=200: "opr-review: codex exit 1"  # type: ignore[method-assign]
+    work = base / job_id / ".opr-work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "codex-session.log").write_text(
+        "Error: Quota exceeded. Check your plan and billing details.\nopr-review: codex exit 1",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LauncherJobError, match="codex exit 1") as excinfo:
+        run_review_job(job_id=job_id, checkout_ref=ref, proxy_token="opr_job_test_token_ok", client=fake)  # type: ignore[arg-type]
+    assert excinfo.value.code == "CODEX_QUOTA"
+
+
+def test_run_review_job_classifies_quota_from_docker_logs(staged) -> None:
+    """Launcher classifies CODEX_QUOTA from docker logs when session log is absent."""
+    _, job_id, ref = staged
+    fake = FakeDocker()
+    fake.wait_code = 1
+    fake.logs = lambda container_id, tail=200: (  # type: ignore[method-assign]
+        "Error: Quota exceeded. Check your plan and billing details.\nopr-review: codex exit 1"
+    )
+
+    with pytest.raises(LauncherJobError, match="codex exit 1") as excinfo:
+        run_review_job(job_id=job_id, checkout_ref=ref, proxy_token="opr_job_test_token_ok", client=fake)  # type: ignore[arg-type]
+    assert excinfo.value.code == "CODEX_QUOTA"
+
+
+def test_run_review_job_classifies_auth_from_logs(staged) -> None:
+    """Launcher classifies CODEX_AUTH from logs."""
+    _, job_id, ref = staged
+    fake = FakeDocker()
+    fake.wait_code = 1
+    fake.logs = lambda container_id, tail=200: (  # type: ignore[method-assign]
+        "Error: 401 Unauthorized: Missing bearer or basic authentication\nopr-review: codex exit 1"
+    )
+
+    with pytest.raises(LauncherJobError, match="codex exit 1") as excinfo:
+        run_review_job(job_id=job_id, checkout_ref=ref, proxy_token="opr_job_test_token_ok", client=fake)  # type: ignore[arg-type]
+    assert excinfo.value.code == "CODEX_AUTH"

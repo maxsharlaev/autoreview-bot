@@ -24,6 +24,8 @@ from app.launcher.timeouts import (
     max_review_timeout_seconds,
     validate_checkout_orphan_ttl,
 )
+from app.services.codex_runner import classify_codex_error
+from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_UNAVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -215,8 +217,20 @@ def run_review_job(
                     "CODEX_TIMEOUT",
                     f"review container timed out: {snippet[:240]}",
                 )
+            session_log = work / "codex-session.log"
+            full_text = ""
+            if session_log.is_file():
+                try:
+                    full_text = session_log.read_text(encoding="utf-8", errors="replace")[-16000:]
+                except OSError:
+                    pass
+            if not full_text:
+                full_text = logs[-16000:] if logs else ""
+            code = classify_codex_error(full_text) if full_text.strip() else "CODEX_SANDBOX"
+            if code not in (CODEX_QUOTA, CODEX_AUTH, CODEX_UNAVAILABLE):
+                code = "CODEX_SANDBOX"
             raise LauncherJobError(
-                "CODEX_SANDBOX",
+                code,
                 f"review container exit {status_code}: {snippet[:240]}",
             )
         if not out_file.is_file():

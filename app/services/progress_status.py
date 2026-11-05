@@ -20,7 +20,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from app.config import AppConfig
 from app.services.constants import (
+    CODEX_AUTH,
+    CODEX_QUOTA,
     CODEX_SANDBOX,
+    CODEX_UNAVAILABLE,
     GIT_FORBIDDEN,
     GIT_REF_NOT_FOUND,
     GITHUB_UNAVAILABLE,
@@ -90,6 +93,9 @@ _FAILURE_TEXT = {
     GIT_FORBIDDEN: "the repository could not be cloned",
     GIT_REF_NOT_FOUND: "the head commit could not be fetched",
     CODEX_SANDBOX: "the review sandbox is unavailable",
+    CODEX_QUOTA: "model provider quota exceeded — check plan and billing",
+    CODEX_AUTH: "model API key missing or rejected",
+    CODEX_UNAVAILABLE: "the model service was unavailable",
 }
 
 
