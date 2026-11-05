@@ -1,4 +1,5 @@
 #!/bin/sh
+# Keep LF line endings (see .gitattributes); required for Docker/Alpine images.
 # Launch the FastAPI process.
 # Default: --no-proxy-headers (do not trust X-Forwarded-* from the peer).
 # Enable only with UVICORN_PROXY_HEADERS=1 and UVICORN_FORWARDED_ALLOW_IPS=<proxy>.

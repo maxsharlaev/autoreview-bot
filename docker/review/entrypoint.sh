@@ -1,4 +1,5 @@
 #!/bin/bash
+# Keep LF line endings (see .gitattributes); required for Docker/Alpine images.
 # Run Codex against /checkout (read-only mount) with policy from /opt/opr-policy.
 # Expects: CODEX_API_KEY (and OPENAI_API_KEY), OPR_MODEL, optional OPR_* tunables.
 # Writes JSON result to /work/out.json. Fail closed if Linux sandbox cannot start.

@@ -16,6 +16,25 @@
 
 Конфигурация остаётся совместимой: у новых ключей есть значения по умолчанию, сохраняющие прежнее поведение, а неизвестные ключи верхнего уровня YAML игнорируются. После изменения `config.yaml` или `.env` перезапустите API и worker.
 
+<!-- section: shell-scripts-lf-on-windows -->
+## Shell-скрипты должны оставаться LF (checkout на Windows)
+
+`.gitattributes` принудительно держит `*.sh` / `*.bash` в LF, чтобы Docker-образы (в частности `scripts/run-api.sh` в api) не ломали Alpine/`sh` ошибкой `set: Illegal option -`.
+
+Если репозиторий уже был checkout'нут на Windows **до** появления этого атрибута, Git может оставить CRLF-копии неизменённых скриптов в worktree. После `git pull` восстановите их из HEAD (безопасно; затирает только локальные правки этих путей):
+
+```bash
+git checkout HEAD -- scripts/run-api.sh scripts/stack.sh docker/review/entrypoint.sh
+```
+
+PowerShell:
+
+```powershell
+git checkout HEAD -- scripts/run-api.sh scripts/stack.sh docker/review/entrypoint.sh
+```
+
+Затем пересоберите образы (`./scripts/stack.sh up` / `.\scripts\stack.ps1 up`). Если CRLF всё ещё есть (`git grep -I $'\r' -- '*.sh'`), повторите тот же `checkout` после проверки, что `.gitattributes` на месте.
+
 <!-- section: migrations -->
 ## Миграции
 
