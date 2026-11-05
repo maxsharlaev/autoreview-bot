@@ -1,22 +1,13 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getMe, logout, type AdminMe } from "@/lib/api";
-
-const NAV = [
-  { href: "/findings/", label: "Findings" },
-  { href: "/runs/", label: "Runs" },
-  { href: "/queue/", label: "Queue" },
-  { href: "/users/", label: "Users" },
-] as const;
+import { getMe, type AdminMe } from "@/lib/api";
+import { Shell } from "@/components/Shell";
 
 export default function ControlHomePage() {
   const router = useRouter();
   const [me, setMe] = useState<AdminMe | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,58 +23,32 @@ export default function ControlHomePage() {
     };
   }, [router]);
 
-  async function onLogout() {
-    setBusy(true);
-    setError(null);
-    try {
-      await logout();
-      router.replace("/login/");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "logout failed");
-      setBusy(false);
-    }
-  }
-
   if (!me) {
     return (
-      <main>
+      <div className="login-container">
         <p className="muted">Checking session…</p>
-      </main>
+      </div>
     );
   }
 
   return (
-    <>
-      <header className="shell-header">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <nav>
-            <strong style={{ marginRight: "1rem" }}>Control</strong>
-            {NAV.map((item) => (
-              <Link key={item.href} href={item.href}>
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-          <div className="row">
-            <span className="muted">
-              {me.login} · {me.role}
-            </span>
-            <button type="button" className="secondary" disabled={busy} onClick={onLogout}>
-              Log out
-            </button>
-          </div>
-        </div>
-      </header>
-      <main>
+    <Shell user={me} pageTitle="Dashboard">
+      <div className="card-grid">
         <div className="card">
-          <h1>Control panel</h1>
+          <h2>Welcome to Control</h2>
           <p className="muted">
-            Skeleton only. Findings, runs, queue and users pages are placeholders; the JSON API is already
-            available under <code>/api/v1/admin</code>.
+            This is the operator control panel for Open PR Review. Navigate using the sidebar to
+            manage findings, view runs, monitor the queue, or manage users.
           </p>
-          {error ? <p className="error">{error}</p> : null}
         </div>
-      </main>
-    </>
+        <div className="card">
+          <h2>API Access</h2>
+          <p className="muted">
+            The admin JSON API is available at <code>/api/v1/admin</code>. All UI pages are
+            placeholders that will connect to this API in upcoming releases.
+          </p>
+        </div>
+      </div>
+    </Shell>
   );
 }

@@ -31,6 +31,7 @@ services:
       target: api
       args:
         ADMIN_UI_BASE_PATH: ${ADMIN_UI_BASE_PATH:-/control}
+        NEXT_PUBLIC_ADMIN_ENV: ${NEXT_PUBLIC_ADMIN_ENV:-}
     env_file:
       - .env
     environment:
@@ -51,6 +52,7 @@ services:
       target: api
       args:
         ADMIN_UI_BASE_PATH: ${ADMIN_UI_BASE_PATH:-/control}
+        NEXT_PUBLIC_ADMIN_ENV: ${NEXT_PUBLIC_ADMIN_ENV:-}
     env_file:
       - .env
     environment:

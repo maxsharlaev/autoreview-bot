@@ -21,3 +21,7 @@ Do not point the browser at `:3000` for login against `:8000` — the session co
 ## Base path
 
 `ADMIN_UI_BASE_PATH` (default `/control`) sets Next.js `basePath` at **build** time. The running API must mount the same path. After changing it in `.env`, rebuild the api image (`docker compose build api`).
+
+## Environment badge
+
+`NEXT_PUBLIC_ADMIN_ENV` sets the label shown in the top bar (e.g. `staging`, `prod`). It is a **build-arg** baked into the Next.js export at image build, same pattern as `ADMIN_UI_BASE_PATH`. Set it in `.env` and rebuild the api image (`docker compose build api`). If unset or empty after trim, the badge is hidden.

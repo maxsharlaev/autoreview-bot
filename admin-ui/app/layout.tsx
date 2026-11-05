@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Open PR Review Control",
+  title: "Control | Open PR Review",
   description: "Operator control panel",
 };
 

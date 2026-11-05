@@ -25,16 +25,17 @@ export default function LoginPage() {
   }
 
   return (
-    <main>
-      <div className="card">
+    <div className="login-container">
+      <div className="login-card">
         <h1>Sign in</h1>
-        <p className="muted">Open PR Review operator control panel.</p>
+        <p className="muted">Open PR Review operator control panel</p>
         <form onSubmit={onSubmit}>
           <label htmlFor="login">Login</label>
           <input
             id="login"
             name="login"
             autoComplete="username"
+            placeholder="Enter your login"
             value={loginName}
             onChange={(e) => setLoginName(e.target.value)}
             required
@@ -45,16 +46,17 @@ export default function LoginPage() {
             name="password"
             type="password"
             autoComplete="current-password"
+            placeholder="Enter your password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
           />
-          {error ? <p className="error">{error}</p> : null}
-          <button type="submit" disabled={busy}>
+          {error && <p className="error">{error}</p>}
+          <button type="submit" className="primary submit-btn" disabled={busy}>
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>
       </div>
-    </main>
+    </div>
   );
 }
