@@ -6,6 +6,7 @@ import logging
 import re
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from urllib.parse import urlsplit
@@ -771,43 +772,83 @@ async def get_queue(
     return AdminQueueResponse.model_validate(snap)
 
 
-def _github_for_default_owner() -> GitHubAppClient | None:
-    """Get a GitHub client for the default owner (for space listing)."""
+@dataclass
+class _InstallationInfo:
+    """Installation info with owning context for multi-owner support."""
+
+    id: int
+    login: str
+    acc_type: str
+    owner_id: str
+
+
+async def _enumerate_all_installations() -> tuple[list[_InstallationInfo], dict[int, str]]:
+    """Enumerate installations from all App-backed owners, deduped by installation ID.
+
+    Returns:
+        Tuple of (installations list, installation_id -> owner_id map)
+    """
     registry = get_owner_registry()
-    ctx = registry.get_default()
-    if ctx is None:
-        return None
-    return GitHubAppClient.from_credentials(ctx.github, owner_id=ctx.id)
+    if not registry.owners:
+        return [], {}
+
+    seen_app_ids: set[int] = set()
+    installation_to_owner: dict[int, str] = {}
+    installations: list[_InstallationInfo] = []
+
+    for owner_id, ctx in registry.owners.items():
+        if ctx.github.kind != "app" or not ctx.github.app_id:
+            continue
+
+        app_id = ctx.github.app_id
+        if app_id in seen_app_ids:
+            continue
+        seen_app_ids.add(app_id)
+
+        gh_client = GitHubAppClient.from_credentials(ctx.github, owner_id=owner_id)
+        try:
+            app_installations = await gh_client.list_app_installations()
+        except GitHubError as exc:
+            logger.warning("Failed to list installations for owner %s: %s", owner_id, exc)
+            continue
+
+        for inst in app_installations:
+            inst_id = int(inst.get("id") or 0)
+            if inst_id in installation_to_owner:
+                continue
+            account = inst.get("account") or {}
+            login = account.get("login") or ""
+            acc_type = account.get("type") or "User"
+            if login:
+                installation_to_owner[inst_id] = owner_id
+                installations.append(
+                    _InstallationInfo(
+                        id=inst_id,
+                        login=login,
+                        acc_type=acc_type if acc_type in ("User", "Organization") else "User",
+                        owner_id=owner_id,
+                    )
+                )
+
+    return installations, installation_to_owner
 
 
 @router.get("/spaces", response_model=AdminSpaceListResponse)
 async def list_spaces(
     _: AdminPrincipalDep,
 ) -> AdminSpaceListResponse:
-    """List GitHub installations (spaces) accessible to the bot."""
-    github = _github_for_default_owner()
-    if github is None:
-        raise HTTPException(status_code=503, detail="no owner configured")
-    try:
-        installations = await github.list_app_installations()
-    except GitHubError as exc:
-        if exc.status_code == 401:
-            raise HTTPException(status_code=503, detail="github authentication failed") from None
-        raise HTTPException(status_code=502, detail="github api error") from None
+    """List GitHub installations (spaces) accessible to the bot across all App-backed owners."""
+    installations, _ = await _enumerate_all_installations()
+    if not installations:
+        registry = get_owner_registry()
+        if not registry.owners:
+            raise HTTPException(status_code=503, detail="no owner configured")
+        raise HTTPException(status_code=503, detail="no app-backed owners configured")
 
-    items = []
-    for inst in installations:
-        account = inst.get("account") or {}
-        login = account.get("login") or ""
-        acc_type = account.get("type") or "User"
-        if login:
-            items.append(
-                AdminSpaceItem(
-                    id=int(inst.get("id") or 0),
-                    login=login,
-                    type=acc_type if acc_type in ("User", "Organization") else "User",
-                )
-            )
+    items = [
+        AdminSpaceItem(id=inst.id, login=inst.login, type=inst.acc_type)
+        for inst in installations
+    ]
     return AdminSpaceListResponse(items=items)
 
 
@@ -854,33 +895,33 @@ async def list_space_repos(
         space: The installation login (org or user name)
         hide_empty_prs: If True (default), exclude repos with 0 open PRs
     """
-    github = _github_for_default_owner()
-    if github is None:
-        raise HTTPException(status_code=503, detail="no owner configured")
+    installations, installation_to_owner = await _enumerate_all_installations()
+    if not installations:
+        registry = get_owner_registry()
+        if not registry.owners:
+            raise HTTPException(status_code=503, detail="no owner configured")
+        raise HTTPException(status_code=503, detail="no app-backed owners configured")
 
-    registry = get_owner_registry()
-    installations = []
-    try:
-        installations = await github.list_app_installations()
-    except GitHubError as exc:
-        if exc.status_code == 401:
-            raise HTTPException(status_code=503, detail="github authentication failed") from None
-        raise HTTPException(status_code=502, detail="github api error") from None
-
-    target_installation_id: int | None = None
+    target_installation: _InstallationInfo | None = None
     for inst in installations:
-        account = inst.get("account") or {}
-        if (account.get("login") or "").lower() == space.lower():
-            target_installation_id = int(inst.get("id") or 0)
+        if inst.login.lower() == space.lower():
+            target_installation = inst
             break
 
-    if target_installation_id is None:
+    if target_installation is None:
         raise HTTPException(status_code=404, detail="space not found")
 
+    registry = get_owner_registry()
+    space_owner_id = target_installation.owner_id
+    space_owner_ctx = registry.get(space_owner_id)
+    if space_owner_ctx is None:
+        raise HTTPException(status_code=503, detail="owner not configured")
+
+    gh_client = GitHubAppClient.from_credentials(space_owner_ctx.github, owner_id=space_owner_id)
     try:
-        repos = await github.list_installation_repos(target_installation_id)
+        repos = await gh_client.list_installation_repos(target_installation.id)
     except GitHubError as exc:
-        logger.warning("Failed to list repos for installation %s: %s", target_installation_id, exc)
+        logger.warning("Failed to list repos for installation %s: %s", target_installation.id, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
 
     items: list[AdminRepoItem] = []
@@ -889,7 +930,7 @@ async def list_space_repos(
         if not full_name:
             continue
 
-        route = registry.resolve(full_name, installation_id=target_installation_id)
+        route = registry.resolve(full_name, installation_id=target_installation.id)
         if route.rejected():
             continue
 
@@ -960,25 +1001,25 @@ async def get_repo_detail(
 
     open_pr_numbers = {pr.get("number") for pr in open_prs_data}
 
-    last_runs_subq = (
-        select(
-            ReviewRun.pull_request_id,
-            func.max(ReviewRun.created_at).label("max_created_at"),
-        )
-        .group_by(ReviewRun.pull_request_id)
+    row_num = func.row_number().over(
+        partition_by=ReviewRun.pull_request_id,
+        order_by=[ReviewRun.created_at.desc(), ReviewRun.id.desc()],
+    ).label("rn")
+
+    ranked_runs = (
+        select(ReviewRun.pull_request_id, ReviewRun.status, row_num)
         .subquery()
     )
 
     last_run_status_q = (
-        select(PullRequest.number, ReviewRun.status)
+        select(PullRequest.number, ranked_runs.c.status)
         .join(Repository, PullRequest.repository_id == Repository.id)
-        .join(ReviewRun, ReviewRun.pull_request_id == PullRequest.id)
-        .join(
-            last_runs_subq,
-            (ReviewRun.pull_request_id == last_runs_subq.c.pull_request_id)
-            & (ReviewRun.created_at == last_runs_subq.c.max_created_at),
+        .join(ranked_runs, ranked_runs.c.pull_request_id == PullRequest.id)
+        .where(
+            Repository.full_name == full_name,
+            PullRequest.number.in_(open_pr_numbers),
+            ranked_runs.c.rn == 1,
         )
-        .where(Repository.full_name == full_name, PullRequest.number.in_(open_pr_numbers))
     )
     result = await session.execute(last_run_status_q)
     pr_statuses = {row[0]: row[1] for row in result.all()}

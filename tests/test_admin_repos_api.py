@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from app.api.v1 import admin as admin_api
+from app.api.v1.admin import _InstallationInfo
 from app.config import Settings, get_settings
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -80,11 +81,11 @@ def _login_as_root(client: TestClient) -> None:
 
 
 class FakeOwnerContext:
-    def __init__(self, owner_id: str = "default") -> None:
+    def __init__(self, owner_id: str = "default", app_id: int = 12345) -> None:
         self.id = owner_id
         self.github = SimpleNamespace(
             kind="app",
-            app_id=12345,
+            app_id=app_id,
             private_key_pem="-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
             installation_id=0,
             token=None,
@@ -94,8 +95,8 @@ class FakeOwnerContext:
 
 class FakeOwnerRegistry:
     def __init__(self, owners: dict[str, Any] | None = None) -> None:
-        self.owners = owners or {"default": FakeOwnerContext()}
-        self._default = next(iter(self.owners.values()), None)
+        self.owners = {"default": FakeOwnerContext()} if owners is None else owners
+        self._default = next(iter(self.owners.values()), None) if self.owners else None
 
     def get(self, owner_id: str) -> Any:
         return self.owners.get(owner_id)
@@ -107,38 +108,20 @@ class FakeOwnerRegistry:
         return SimpleNamespace(owner_id="default", reason="default_fallback", rejected=lambda: False)
 
 
-class FakeGitHubClient:
-    def __init__(
-        self,
-        *,
-        installations: list[dict[str, Any]] | None = None,
-        repos: list[dict[str, Any]] | None = None,
-        open_prs: list[dict[str, Any]] | None = None,
-        error: Exception | None = None,
-    ) -> None:
-        self.installations = installations or []
-        self.repos = repos or []
-        self.open_prs = open_prs or []
-        self.error = error
-        self.calls: list[str] = []
+def _make_installations(
+    items: list[tuple[int, str, str, str]],
+) -> tuple[list[_InstallationInfo], dict[int, str]]:
+    """Create installation info for testing.
 
-    async def list_app_installations(self) -> list[dict[str, Any]]:
-        self.calls.append("list_app_installations")
-        if self.error:
-            raise self.error
-        return self.installations
-
-    async def list_installation_repos(self, installation_id: int) -> list[dict[str, Any]]:
-        self.calls.append(f"list_installation_repos:{installation_id}")
-        if self.error:
-            raise self.error
-        return self.repos
-
-    async def list_open_pulls(self, owner: str, repo: str) -> list[dict[str, Any]]:
-        self.calls.append(f"list_open_pulls:{owner}/{repo}")
-        if self.error:
-            raise self.error
-        return self.open_prs
+    Args:
+        items: List of (id, login, type, owner_id) tuples
+    """
+    installations = [
+        _InstallationInfo(id=item[0], login=item[1], acc_type=item[2], owner_id=item[3])
+        for item in items
+    ]
+    installation_to_owner = {inst.id: inst.owner_id for inst in installations}
+    return installations, installation_to_owner
 
 
 def test_spaces_requires_auth() -> None:
@@ -159,18 +142,17 @@ def test_spaces_lists_installations() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations = [
-        {"id": 1001, "account": {"login": "acme-corp", "type": "Organization"}},
-        {"id": 1002, "account": {"login": "user123", "type": "User"}},
-    ]
-    github = FakeGitHubClient(installations=installations)
+    installations, inst_map = _make_installations([
+        (1001, "acme-corp", "Organization", "default"),
+        (1002, "user123", "User", "default"),
+    ])
     registry = FakeOwnerRegistry()
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
-        patch("app.api.v1.admin._github_for_default_owner", return_value=github),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
@@ -190,10 +172,13 @@ def test_spaces_no_owner_configured() -> None:
     redis = FakeRedis()
     settings = _settings()
 
+    empty_registry = FakeOwnerRegistry(owners={})
+
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
-        patch("app.api.v1.admin._github_for_default_owner", return_value=None),
+        patch("app.api.v1.admin.get_owner_registry", return_value=empty_registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=([], {}))),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
@@ -202,27 +187,25 @@ def test_spaces_no_owner_configured() -> None:
         assert "no owner configured" in resp.json()["detail"]
 
 
-def test_spaces_github_auth_error() -> None:
+def test_spaces_no_app_backed_owners() -> None:
+    """Test when owners exist but none have App credentials."""
     session = FakeSession()
     redis = FakeRedis()
     settings = _settings()
 
-    from app.adapters.github import GitHubError
-
-    github = FakeGitHubClient(error=GitHubError("auth failed", status_code=401))
     registry = FakeOwnerRegistry()
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
-        patch("app.api.v1.admin._github_for_default_owner", return_value=github),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=([], {}))),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
         resp = client.get("/api/v1/admin/spaces")
         assert resp.status_code == 503
-        assert "authentication failed" in resp.json()["detail"]
+        assert "no app-backed owners configured" in resp.json()["detail"]
 
 
 def test_space_repos_not_found() -> None:
@@ -230,17 +213,16 @@ def test_space_repos_not_found() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations = [
-        {"id": 1001, "account": {"login": "acme-corp", "type": "Organization"}},
-    ]
-    github = FakeGitHubClient(installations=installations)
+    installations, inst_map = _make_installations([
+        (1001, "acme-corp", "Organization", "default"),
+    ])
     registry = FakeOwnerRegistry()
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
-        patch("app.api.v1.admin._github_for_default_owner", return_value=github),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
@@ -291,17 +273,16 @@ def test_viewer_can_read_spaces() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations = [
-        {"id": 1001, "account": {"login": "acme-corp", "type": "Organization"}},
-    ]
-    github = FakeGitHubClient(installations=installations)
+    installations, inst_map = _make_installations([
+        (1001, "acme-corp", "Organization", "default"),
+    ])
     registry = FakeOwnerRegistry()
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
-        patch("app.api.v1.admin._github_for_default_owner", return_value=github),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
@@ -309,24 +290,57 @@ def test_viewer_can_read_spaces() -> None:
         assert resp.status_code == 200
 
 
-def test_spaces_skips_empty_logins() -> None:
+def test_spaces_multi_owner_different_apps() -> None:
+    """Test that installations from multiple App-backed owners are all listed."""
     session = FakeSession()
     redis = FakeRedis()
     settings = _settings()
 
-    installations = [
-        {"id": 1001, "account": {"login": "acme-corp", "type": "Organization"}},
-        {"id": 1002, "account": {"login": "", "type": "User"}},
-        {"id": 1003, "account": None},
-    ]
-    github = FakeGitHubClient(installations=installations)
-    registry = FakeOwnerRegistry()
+    installations, inst_map = _make_installations([
+        (1001, "acme-corp", "Organization", "owner-a"),
+        (1002, "beta-inc", "Organization", "owner-b"),
+        (1003, "user123", "User", "owner-a"),
+    ])
+    registry = FakeOwnerRegistry(owners={
+        "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+        "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+    })
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
-        patch("app.api.v1.admin._github_for_default_owner", return_value=github),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 3
+        logins = {item["login"] for item in data["items"]}
+        assert logins == {"acme-corp", "beta-inc", "user123"}
+
+
+def test_spaces_dedupes_shared_app() -> None:
+    """Test that installations are deduped when owners share the same App."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    installations, inst_map = _make_installations([
+        (1001, "acme-corp", "Organization", "owner-a"),
+    ])
+    registry = FakeOwnerRegistry(owners={
+        "owner-a": FakeOwnerContext("owner-a", app_id=12345),
+        "owner-b": FakeOwnerContext("owner-b", app_id=12345),
+    })
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
@@ -337,26 +351,39 @@ def test_spaces_skips_empty_logins() -> None:
         assert data["items"][0]["login"] == "acme-corp"
 
 
-def test_spaces_normalizes_unknown_type() -> None:
+def test_space_repos_uses_correct_owner_client() -> None:
+    """Test that repos are listed using the owning context's GitHub client."""
     session = FakeSession()
     redis = FakeRedis()
     settings = _settings()
 
-    installations = [
-        {"id": 1001, "account": {"login": "test-bot", "type": "Bot"}},
-    ]
-    github = FakeGitHubClient(installations=installations)
-    registry = FakeOwnerRegistry()
+    installations, inst_map = _make_installations([
+        (1001, "acme-corp", "Organization", "owner-a"),
+        (2002, "beta-inc", "Organization", "owner-b"),
+    ])
+    registry = FakeOwnerRegistry(owners={
+        "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+        "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+    })
+
+    from app.adapters.github import GitHubAppClient
+
+    created_clients: list[str] = []
+
+    @classmethod
+    def tracking_from_credentials(cls, credentials, owner_id="default", **kwargs):
+        created_clients.append(owner_id)
+        return AsyncMock(list_installation_repos=AsyncMock(return_value=[]))
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
-        patch("app.api.v1.admin._github_for_default_owner", return_value=github),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
+        patch.object(GitHubAppClient, "from_credentials", tracking_from_credentials),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
-        resp = client.get("/api/v1/admin/spaces")
+        resp = client.get("/api/v1/admin/spaces/beta-inc/repos")
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["items"][0]["type"] == "User"
+        assert "owner-b" in created_clients
