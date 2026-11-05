@@ -36,7 +36,7 @@
 | --- | --- | --- | --- |
 | `REVIEW_API_KEY` | `""` | api | Операторский ключ для `/api/v1/reviews*` и `/api/v1/ops/status`, действует для всех owner'ов. Сгенерируйте длинное случайное значение; это не токен GitHub. Без него эти эндпойнты отвечают `401`. |
 | `ADMIN_API_ENABLED` | `false` | api | При `true` монтирует `/api/v1/admin/*` (сессия в cookie). По умолчанию выкл. |
-| `ADMIN_UI_ENABLED` | `false` | api | При `true` отдаёт статическую control UI на `/control` (Next.js export). По умолчанию выкл. Включайте вместе с `ADMIN_API_ENABLED`. |
+| `ADMIN_UI_ENABLED` | `false` | api | При `true` отдаёт статическую control UI на `ADMIN_UI_BASE_PATH` (Next.js export). По умолчанию выкл. **Требует** `ADMIN_API_ENABLED=true` (иначе старт падает — login/session живут под `/api/v1/admin`). |
 | `ADMIN_UI_DIST` | `admin_ui_out` | api | Каталог со сборкой UI (`index.html`). В api-образе путь `/app/admin_ui_out`. |
 | `ADMIN_UI_BASE_PATH` | `/control` | api (build + runtime) | URL-путь control UI (без trailing slash). Вшивается в Next.js export как `basePath` на **сборке образа** (`docker compose build` / build-arg); должен совпадать с env у running api. Смена значения требует пересборки образа `api` (одного recreate недостаточно). |
 | `ADMIN_ROOT_LOGIN` | `""` | api | Опциональный login root только из env (вместе с `ADMIN_ROOT_PASSWORD`, или оба пустые; ≤ 128 символов). |

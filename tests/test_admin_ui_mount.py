@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from app.api.admin_ui import mount_admin_ui
 from app.config import Settings
+from app.services.admin_config import AdminApiConfigError, validate_admin_env
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -102,3 +103,10 @@ def test_unknown_client_route_falls_back_to_index(tmp_path: Path) -> None:
     res = client.get("/control/client-route/")
     assert res.status_code == 200
     assert b"Control fixture" in res.content
+
+
+def test_ui_requires_admin_api() -> None:
+    with pytest.raises(AdminApiConfigError, match="ADMIN_API_ENABLED"):
+        validate_admin_env(_settings(admin_ui_enabled=True, admin_api_enabled=False))
+    validate_admin_env(_settings(admin_ui_enabled=True, admin_api_enabled=True))
+    validate_admin_env(_settings(admin_ui_enabled=False, admin_api_enabled=False))
