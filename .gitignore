@@ -28,4 +28,7 @@ tmp/
 
 
 _lease_b64.txt
-
+# Admin UI
+admin-ui/node_modules/
+admin-ui/.next/
+admin-ui/out/

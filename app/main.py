@@ -122,6 +122,10 @@ def create_app() -> FastAPI:
 
         admin_api.mount_admin_api(application)
         logger.info("Admin API mounted at /api/v1/admin")
+    if settings.admin_ui_enabled is True:
+        from app.api.admin_ui import mount_admin_ui
+
+        mount_admin_ui(application, settings)
     return application
 
 

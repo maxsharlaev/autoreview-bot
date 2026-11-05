@@ -148,7 +148,7 @@ Operator key only. Returns `in_flight` (pending/running counts), `queue_jobs` (A
 <!-- section: admin-api -->
 ## Admin API
 
-Opt-in JSON under `/api/v1/admin` (`ADMIN_API_ENABLED`, default `false`). When disabled the routes are not mounted (`404`).
+Opt-in JSON under `/api/v1/admin` (`ADMIN_API_ENABLED`, default `false`). When disabled the routes are not mounted (`404`). Optional static control UI at `/control` when `ADMIN_UI_ENABLED=true` (see [DEPLOY.md](DEPLOY.md#admin-control-ui-optional)).
 
 **Auth:** `POST /login` with JSON `{"login","password"}` (require `Content-Type: application/json`). Success sets an HttpOnly session cookie (`opr_admin_session`, `SameSite=Strict`, `Secure` from `ADMIN_COOKIE_SECURE`). Sessions live in Redis with `ADMIN_SESSION_TTL_SECONDS`. `POST /logout` (also `Content-Type: application/json`, like every mutating admin route) clears the cookie; `GET /me` returns `{login, role, kind}`.
 

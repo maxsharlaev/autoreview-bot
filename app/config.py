@@ -213,6 +213,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     review_api_key: str = ""
     admin_api_enabled: bool = False
+    admin_ui_enabled: bool = False
+    admin_ui_dist: str = "admin_ui_out"
     admin_root_login: str = ""
     admin_root_password: str = ""
     admin_session_ttl_seconds: int = Field(default=28800, gt=0, le=604800)

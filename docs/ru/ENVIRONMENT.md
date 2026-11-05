@@ -36,6 +36,8 @@
 | --- | --- | --- | --- |
 | `REVIEW_API_KEY` | `""` | api | Операторский ключ для `/api/v1/reviews*` и `/api/v1/ops/status`, действует для всех owner'ов. Сгенерируйте длинное случайное значение; это не токен GitHub. Без него эти эндпойнты отвечают `401`. |
 | `ADMIN_API_ENABLED` | `false` | api | При `true` монтирует `/api/v1/admin/*` (сессия в cookie). По умолчанию выкл. |
+| `ADMIN_UI_ENABLED` | `false` | api | При `true` отдаёт статическую control UI на `/control` (Next.js export). По умолчанию выкл. Включайте вместе с `ADMIN_API_ENABLED`. |
+| `ADMIN_UI_DIST` | `admin_ui_out` | api | Каталог со сборкой UI (`index.html`). В api-образе путь `/app/admin_ui_out`. |
 | `ADMIN_ROOT_LOGIN` | `""` | api | Опциональный login root только из env (вместе с `ADMIN_ROOT_PASSWORD`, или оба пустые; ≤ 128 символов). |
 | `ADMIN_ROOT_PASSWORD` | `""` | api | Опциональный пароль root (16..1024 символов; вне диапазона — старт падает). В БД не пишется; root доступен даже при наличии DB-пользователей (recovery). Уберите оба root-var и перезапустите, чтобы отключить. Не должен совпадать с `admin_users.login`. |
 | `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | TTL админ-сессии в Redis (по умолчанию 8ч). 1..604800 (7 дней); невалидное значение — старт падает. |

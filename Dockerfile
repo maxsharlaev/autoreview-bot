@@ -1,3 +1,11 @@
+# Admin control UI (static export). Built for the api image only.
+FROM node:22-bookworm-slim AS admin-ui
+WORKDIR /ui
+COPY admin-ui/package.json admin-ui/package-lock.json ./
+RUN npm ci
+COPY admin-ui/ ./
+RUN npm run build
+
 FROM python:3.12-slim-bookworm AS base
 
 WORKDIR /app
@@ -22,6 +30,8 @@ RUN pip install --no-cache-dir .
 RUN chmod +x ./scripts/run-api.sh
 
 FROM base AS api
+COPY --from=admin-ui /ui/out /app/admin_ui_out
+ENV ADMIN_UI_DIST=/app/admin_ui_out
 EXPOSE 8000
 CMD ["sh", "./scripts/run-api.sh"]
 

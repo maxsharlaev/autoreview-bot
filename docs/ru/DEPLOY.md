@@ -192,6 +192,13 @@ Webhook GitHub App (или репозитория) на `/api/v1/pull-request`. 
 
 Оба триггера на одном репозитории не создают дублирующих прогонов для одного SHA (см. [API.md](API.md#гарантии-конкурентности)), но удваивают запросы.
 
+<!-- section: admin-control-ui-optional -->
+## Admin control UI (опционально)
+
+Опциональная статическая панель на **`/control/`** (не `/admin`). В `.env`: `ADMIN_API_ENABLED=true` и `ADMIN_UI_ENABLED=true`, затем recreate `api`. Образ api кладёт Next.js export в `/app/admin_ui_out` (`ADMIN_UI_DIST`).
+
+В проде — TLS, чтобы работал `ADMIN_COOKIE_SECURE=true` (default). Cookie сессии `SameSite=Strict`: UI и API на одном origin. Для локального plain HTTP: `ADMIN_COOKIE_SECURE=false` и открывайте UI через порт api (`http://127.0.0.1:8000/control/`), а не отдельный порт Next без same-origin proxy.
+
 <!-- section: observability-your-stack -->
 ## Наблюдаемость (ваш стек)
 

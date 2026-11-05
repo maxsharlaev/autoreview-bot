@@ -148,7 +148,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8000/api/v1/reviews -Header
 <!-- section: admin-api -->
 ## Admin API
 
-Опциональный JSON под `/api/v1/admin` (`ADMIN_API_ENABLED`, по умолчанию `false`). Если выключено — маршруты не монтируются (`404`).
+Опциональный JSON под `/api/v1/admin` (`ADMIN_API_ENABLED`, по умолчанию `false`). Если выключено — маршруты не монтируются (`404`). Опциональная статическая control UI на `/control` при `ADMIN_UI_ENABLED=true` (см. [DEPLOY.md](DEPLOY.md#admin-control-ui-опционально)).
 
 **Аутентификация:** `POST /login` с JSON `{"login","password"}` (нужен `Content-Type: application/json`). Успех ставит HttpOnly cookie сессии (`opr_admin_session`, `SameSite=Strict`, `Secure` из `ADMIN_COOKIE_SECURE`). Сессии в Redis с `ADMIN_SESSION_TTL_SECONDS`. `POST /logout` (тоже `Content-Type: application/json`, как все мутирующие маршруты админки) сбрасывает cookie; `GET /me` — `{login, role, kind}`.
 
