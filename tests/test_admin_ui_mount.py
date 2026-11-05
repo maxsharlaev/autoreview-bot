@@ -90,3 +90,15 @@ def test_repo_fixture_tree_has_login_page() -> None:
 
 def test_blank_base_path_defaults_to_control() -> None:
     assert _settings(admin_ui_base_path="  ").admin_ui_base_path == "/control"
+
+
+def test_unknown_client_route_falls_back_to_index(tmp_path: Path) -> None:
+    dist = tmp_path / "out"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><h1>Control fixture</h1>", encoding="utf-8")
+    app = FastAPI()
+    mount_admin_ui(app, _settings(admin_ui_enabled=True, admin_ui_dist=str(dist)))
+    client = TestClient(app)
+    res = client.get("/control/client-route/")
+    assert res.status_code == 200
+    assert b"Control fixture" in res.content
