@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **M3 PR4 docs / SECURITY:** document the final proxy token model (no revoke; unused TTL `PROXY_TOKEN_FIRST_USE_TTL_SECONDS` default **120s**; post-first-use expiry = first use + max review timeout + `PROXY_TOKEN_GRACE_SECONDS` default **30s**; per-job limits), residual risk at a high level, honest note that the proxy allowlists only `POST /v1/responses` (no catalog route; spike saw no separate catalog request with `opr_proxy`, else network isolation fails the review visibly), host firewall / SG guidance for `proxy_egress`, and config reference for proxy env vars; mark M3 **done** in ROADMAP (EN/RU); ARCHITECTURE / DEPLOY / ENVIRONMENT kept symmetric.
 
 ### Fixed
+- **ARB45-001:** after `.gitattributes` `eol=lf`, touch image/host shell scripts and document `git checkout HEAD -- …/*.sh` so existing Windows worktrees re-checkout LF (attributes-only pull left CRLF copies).
 - **model-proxy image user:** run as `modelproxy` (uid 1000), not `proxy` — Debian bookworm already has system user `proxy` (uid 13), so `useradd … proxy` failed even with a clean layer cache.
 - **Shell script line endings:** add `.gitattributes` (`*.sh` / `*.bash` → `text eol=lf`) so Windows checkouts do not turn `scripts/run-api.sh` into CRLF and break Alpine/`sh` inside the api image (`set: Illegal option -`).
 - **AR-002:** startup rejects `ADMIN_UI_ENABLED=true` without `ADMIN_API_ENABLED=true` (control UI login/session need `/api/v1/admin`).

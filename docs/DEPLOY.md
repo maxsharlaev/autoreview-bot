@@ -122,6 +122,8 @@ Custom review instructions: copy `prompts/review.md` to `prompts/local/review.md
 <!-- section: compose-scripts -->
 ## Compose helper scripts
 
+On Windows, keep shell scripts LF (see [UPGRADE.md](UPGRADE.md#shell-scripts-must-stay-lf-windows-checkouts) if an older checkout still has CRLF `*.sh` after pull).
+
 Preferred local commands (from the repo root):
 
 ```powershell

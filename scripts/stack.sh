@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Keep LF line endings (see .gitattributes); required for Docker/Alpine images.
 # Manage the autoreview-bot Compose stack (base + optional overlays).
 # Usage:
 #   ./scripts/stack.sh up

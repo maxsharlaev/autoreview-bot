@@ -122,6 +122,8 @@ features:
 <!-- section: compose-scripts -->
 ## Скрипты Compose
 
+На Windows держите shell-скрипты в LF (см. [UPGRADE.md](UPGRADE.md#shell-скрипты-должны-оставаться-lf-checkout-на-windows), если после pull в старом checkout остались CRLF `*.sh`).
+
 Предпочтительные локальные команды (из корня репозитория):
 
 ```powershell

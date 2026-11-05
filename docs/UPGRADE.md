@@ -16,6 +16,25 @@ Without Compose: stop the worker, run `alembic upgrade head` with the new code a
 
 Configuration stays compatible: new keys have defaults that keep the previous behaviour, and unknown top-level YAML keys are ignored. Restart the API and worker after changing `config.yaml` or `.env`.
 
+<!-- section: shell-scripts-lf-on-windows -->
+## Shell scripts must stay LF (Windows checkouts)
+
+`.gitattributes` forces `*.sh` / `*.bash` to LF so Docker images (especially `scripts/run-api.sh` in the api image) do not break Alpine/`sh` with `set: Illegal option -`.
+
+If this repo was already checked out on Windows **before** that attribute landed, Git may leave CRLF copies of unchanged scripts in your worktree. After `git pull`, restore them from HEAD (safe; discards only local edits to those paths):
+
+```bash
+git checkout HEAD -- scripts/run-api.sh scripts/stack.sh docker/review/entrypoint.sh
+```
+
+PowerShell:
+
+```powershell
+git checkout HEAD -- scripts/run-api.sh scripts/stack.sh docker/review/entrypoint.sh
+```
+
+Then rebuild images (`./scripts/stack.sh up` / `.\scripts\stack.ps1 up`). If you still see CRLF (`git grep -I $'\r' -- '*.sh'`), run the same `checkout` again after confirming `.gitattributes` is present.
+
 <!-- section: migrations -->
 ## Migrations
 
