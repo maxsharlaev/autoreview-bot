@@ -1,15 +1,45 @@
-import Link from "next/link";
+"use client";
 
-export default function Page() {
-  return (
-    <main>
-      <p>
-        <Link href="/">← Control</Link>
-      </p>
-      <div className="card">
-        <h1>Queue</h1>
-        <p className="muted">Coming in a later PR. Use the admin JSON API for now.</p>
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { getMe, type AdminMe } from "@/lib/api";
+import { Shell } from "@/components/Shell";
+
+export default function QueuePage() {
+  const router = useRouter();
+  const [me, setMe] = useState<AdminMe | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getMe()
+      .then((principal) => {
+        if (!cancelled) setMe(principal);
+      })
+      .catch(() => {
+        if (!cancelled) router.replace("/login/");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  if (!me) {
+    return (
+      <div className="login-container">
+        <p className="muted">Checking session…</p>
       </div>
-    </main>
+    );
+  }
+
+  return (
+    <Shell user={me} pageTitle="Queue">
+      <div className="card">
+        <h2>Queue</h2>
+        <p className="muted">
+          Coming in a later release. Use the admin JSON API at <code>/api/v1/admin/queue</code> for
+          now.
+        </p>
+      </div>
+    </Shell>
   );
 }
