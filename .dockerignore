@@ -10,3 +10,6 @@ tests
 .env
 prompts/local/
 *.pem
+admin-ui/node_modules
+admin-ui/.next
+admin-ui/out
