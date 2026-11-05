@@ -116,10 +116,7 @@ def _make_installations(
     Args:
         items: List of (id, login, type, owner_id) tuples
     """
-    installations = [
-        _InstallationInfo(id=item[0], login=item[1], acc_type=item[2], owner_id=item[3])
-        for item in items
-    ]
+    installations = [_InstallationInfo(id=item[0], login=item[1], acc_type=item[2], owner_id=item[3]) for item in items]
     installation_to_owner = {inst.id: inst.owner_id for inst in installations}
     return installations, installation_to_owner
 
@@ -142,10 +139,12 @@ def test_spaces_lists_installations() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations, inst_map = _make_installations([
-        (1001, "acme-corp", "Organization", "default"),
-        (1002, "user123", "User", "default"),
-    ])
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "default"),
+            (1002, "user123", "User", "default"),
+        ]
+    )
     registry = FakeOwnerRegistry()
 
     with (
@@ -213,9 +212,11 @@ def test_space_repos_not_found() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations, inst_map = _make_installations([
-        (1001, "acme-corp", "Organization", "default"),
-    ])
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "default"),
+        ]
+    )
     registry = FakeOwnerRegistry()
 
     with (
@@ -273,9 +274,11 @@ def test_viewer_can_read_spaces() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations, inst_map = _make_installations([
-        (1001, "acme-corp", "Organization", "default"),
-    ])
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "default"),
+        ]
+    )
     registry = FakeOwnerRegistry()
 
     with (
@@ -296,15 +299,19 @@ def test_spaces_multi_owner_different_apps() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations, inst_map = _make_installations([
-        (1001, "acme-corp", "Organization", "owner-a"),
-        (1002, "beta-inc", "Organization", "owner-b"),
-        (1003, "user123", "User", "owner-a"),
-    ])
-    registry = FakeOwnerRegistry(owners={
-        "owner-a": FakeOwnerContext("owner-a", app_id=11111),
-        "owner-b": FakeOwnerContext("owner-b", app_id=22222),
-    })
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "owner-a"),
+            (1002, "beta-inc", "Organization", "owner-b"),
+            (1003, "user123", "User", "owner-a"),
+        ]
+    )
+    registry = FakeOwnerRegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+            "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+        }
+    )
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
@@ -328,13 +335,17 @@ def test_spaces_dedupes_shared_app() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations, inst_map = _make_installations([
-        (1001, "acme-corp", "Organization", "owner-a"),
-    ])
-    registry = FakeOwnerRegistry(owners={
-        "owner-a": FakeOwnerContext("owner-a", app_id=12345),
-        "owner-b": FakeOwnerContext("owner-b", app_id=12345),
-    })
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "owner-a"),
+        ]
+    )
+    registry = FakeOwnerRegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=12345),
+            "owner-b": FakeOwnerContext("owner-b", app_id=12345),
+        }
+    )
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
@@ -357,14 +368,18 @@ def test_space_repos_uses_correct_owner_client() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    installations, inst_map = _make_installations([
-        (1001, "acme-corp", "Organization", "owner-a"),
-        (2002, "beta-inc", "Organization", "owner-b"),
-    ])
-    registry = FakeOwnerRegistry(owners={
-        "owner-a": FakeOwnerContext("owner-a", app_id=11111),
-        "owner-b": FakeOwnerContext("owner-b", app_id=22222),
-    })
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "owner-a"),
+            (2002, "beta-inc", "Organization", "owner-b"),
+        ]
+    )
+    registry = FakeOwnerRegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+            "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+        }
+    )
 
     from app.adapters.github import GitHubAppClient
 

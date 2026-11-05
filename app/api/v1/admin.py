@@ -845,10 +845,7 @@ async def list_spaces(
             raise HTTPException(status_code=503, detail="no owner configured")
         raise HTTPException(status_code=503, detail="no app-backed owners configured")
 
-    items = [
-        AdminSpaceItem(id=inst.id, login=inst.login, type=inst.acc_type)
-        for inst in installations
-    ]
+    items = [AdminSpaceItem(id=inst.id, login=inst.login, type=inst.acc_type) for inst in installations]
     return AdminSpaceListResponse(items=items)
 
 
@@ -1001,15 +998,16 @@ async def get_repo_detail(
 
     open_pr_numbers = {pr.get("number") for pr in open_prs_data}
 
-    row_num = func.row_number().over(
-        partition_by=ReviewRun.pull_request_id,
-        order_by=[ReviewRun.created_at.desc(), ReviewRun.id.desc()],
-    ).label("rn")
-
-    ranked_runs = (
-        select(ReviewRun.pull_request_id, ReviewRun.status, row_num)
-        .subquery()
+    row_num = (
+        func.row_number()
+        .over(
+            partition_by=ReviewRun.pull_request_id,
+            order_by=[ReviewRun.created_at.desc(), ReviewRun.id.desc()],
+        )
+        .label("rn")
     )
+
+    ranked_runs = select(ReviewRun.pull_request_id, ReviewRun.status, row_num).subquery()
 
     last_run_status_q = (
         select(PullRequest.number, ranked_runs.c.status)
