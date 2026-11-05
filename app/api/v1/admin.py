@@ -47,7 +47,7 @@ from app.api.v1.admin_schemas import (
 )
 from app.config import get_settings
 from app.metrics import ops_snapshot
-from app.models import AdminUser, Finding, PullRequest, Repository, ReviewRun
+from app.models import LEGACY_OWNER_ID, AdminUser, Finding, PullRequest, Repository, ReviewRun
 from app.owners.registry import get_owner_registry
 from app.services.admin_passwords import (
     MIN_ADMIN_PASSWORD_LENGTH,
@@ -876,6 +876,20 @@ async def list_spaces(
     return AdminSpaceListResponse(items=items)
 
 
+def _owner_id_filter_set(owner_id: str) -> set[str]:
+    """Build the set of owner_ids to filter by, including legacy 'default' when applicable.
+
+    When the resolved owner is the legacy default alias, rows stored with owner_id='default'
+    should also be included (they belong to that owner).
+    """
+    owner_ids = {owner_id}
+    registry = get_owner_registry()
+    legacy_default = registry.legacy_default_alias()
+    if legacy_default is not None and owner_id == legacy_default:
+        owner_ids.add(LEGACY_OWNER_ID)
+    return owner_ids
+
+
 async def _get_open_findings_by_severity(
     session: Any,
     full_name: str,
@@ -885,6 +899,7 @@ async def _get_open_findings_by_severity(
 
     Args:
         owner_id: If provided, scope findings to this owner only (for multi-owner scenarios).
+            Uses Finding.owner_id and includes legacy 'default' rows when applicable.
     """
     query = (
         select(Finding.severity, func.count(Finding.id))
@@ -893,7 +908,8 @@ async def _get_open_findings_by_severity(
         .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
     )
     if owner_id is not None:
-        query = query.where(Repository.owner_id == owner_id)
+        owner_ids = _owner_id_filter_set(owner_id)
+        query = query.where(Finding.owner_id.in_(owner_ids))
     query = query.group_by(Finding.severity)
     result = await session.execute(query)
     counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
@@ -908,6 +924,7 @@ async def _get_last_run_at(session: Any, full_name: str, owner_id: str | None = 
 
     Args:
         owner_id: If provided, scope runs to this owner only (for multi-owner scenarios).
+            Uses ReviewRun.owner_id and includes legacy 'default' rows when applicable.
     """
     query = (
         select(func.max(ReviewRun.created_at))
@@ -916,7 +933,8 @@ async def _get_last_run_at(session: Any, full_name: str, owner_id: str | None = 
         .where(Repository.full_name == full_name)
     )
     if owner_id is not None:
-        query = query.where(Repository.owner_id == owner_id)
+        owner_ids = _owner_id_filter_set(owner_id)
+        query = query.where(ReviewRun.owner_id.in_(owner_ids))
     result = await session.execute(query)
     return result.scalar_one_or_none()
 
@@ -1068,6 +1086,8 @@ async def get_repo_detail(
 
     open_pr_numbers = {pr.get("number") for pr in open_prs_data}
 
+    owner_ids = _owner_id_filter_set(route.owner_id)
+
     row_num = (
         func.row_number()
         .over(
@@ -1077,7 +1097,9 @@ async def get_repo_detail(
         .label("rn")
     )
 
-    ranked_runs = select(ReviewRun.pull_request_id, ReviewRun.status, row_num).subquery()
+    ranked_runs = (
+        select(ReviewRun.pull_request_id, ReviewRun.status, row_num).where(ReviewRun.owner_id.in_(owner_ids)).subquery()
+    )
 
     last_run_status_q = (
         select(PullRequest.number, ranked_runs.c.status)
@@ -1085,7 +1107,6 @@ async def get_repo_detail(
         .join(ranked_runs, ranked_runs.c.pull_request_id == PullRequest.id)
         .where(
             Repository.full_name == full_name,
-            Repository.owner_id == route.owner_id,
             PullRequest.number.in_(open_pr_numbers),
             ranked_runs.c.rn == 1,
         )
@@ -1115,7 +1136,7 @@ async def get_repo_detail(
         .join(Repository, PullRequest.repository_id == Repository.id)
         .where(
             Repository.full_name == full_name,
-            Repository.owner_id == route.owner_id,
+            Finding.owner_id.in_(owner_ids),
             Finding.current_status == FINDING_STATUS_OPEN,
         )
     )
@@ -1127,7 +1148,7 @@ async def get_repo_detail(
         .join(Repository, PullRequest.repository_id == Repository.id)
         .where(
             Repository.full_name == full_name,
-            Repository.owner_id == route.owner_id,
+            Finding.owner_id.in_(owner_ids),
             Finding.current_status == FINDING_STATUS_OPEN,
         )
         .order_by(Finding.severity, Finding.created_at.desc(), Finding.id)

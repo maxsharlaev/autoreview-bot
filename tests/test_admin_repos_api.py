@@ -744,3 +744,44 @@ def test_space_repos_scopes_findings_to_owner() -> None:
         assert resp.status_code == 200
 
         assert "owner-b" in passed_owner_ids
+
+
+def test_owner_id_filter_set_includes_legacy_default() -> None:
+    """AR-014: _owner_id_filter_set includes legacy 'default' when owner is legacy_default_alias."""
+    from app.api.v1.admin import _owner_id_filter_set
+
+    class LegacyDefaultRegistry(FakeOwnerRegistry):
+        def legacy_default_alias(self) -> str | None:
+            return "owner-a"
+
+    registry = LegacyDefaultRegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+        }
+    )
+
+    with patch("app.api.v1.admin.get_owner_registry", return_value=registry):
+        owner_ids = _owner_id_filter_set("owner-a")
+        assert owner_ids == {"owner-a", "default"}
+
+        owner_ids_other = _owner_id_filter_set("owner-b")
+        assert owner_ids_other == {"owner-b"}
+
+
+def test_owner_id_filter_set_no_legacy_alias() -> None:
+    """AR-014: _owner_id_filter_set returns only owner_id when no legacy_default_alias."""
+    from app.api.v1.admin import _owner_id_filter_set
+
+    class NoLegacyAliasRegistry(FakeOwnerRegistry):
+        def legacy_default_alias(self) -> str | None:
+            return None
+
+    registry = NoLegacyAliasRegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+        }
+    )
+
+    with patch("app.api.v1.admin.get_owner_registry", return_value=registry):
+        owner_ids = _owner_id_filter_set("owner-a")
+        assert owner_ids == {"owner-a"}
