@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from app.services.codex_runner import CodexRunnerError
-from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT
+from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UNAVAILABLE
 from app.services.container_executor import ContainerReviewExecutor
 from app.services.review_executor import CONTAINER_BACKEND, get_review_executor
 
@@ -370,3 +370,53 @@ async def test_container_executor_propagates_codex_timeout_from_launcher(
                 openai_api_key="sk",
             )
     assert excinfo.value.code == CODEX_TIMEOUT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("CODEX_QUOTA", CODEX_QUOTA),
+        ("CODEX_AUTH", CODEX_AUTH),
+        ("CODEX_UNAVAILABLE", CODEX_UNAVAILABLE),
+    ],
+)
+async def test_container_executor_propagates_codex_error_codes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, expected: str
+) -> None:
+    """Launcher CODEX_QUOTA, CODEX_AUTH, CODEX_UNAVAILABLE must not be remapped to SANDBOX."""
+    monkeypatch.setenv("OPR_CHECKOUT_BASE", str(tmp_path / "base"))
+    _stub_proxy_issuer(monkeypatch)
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    (checkout / "file.py").write_text("x=1\n", encoding="utf-8")
+    schema = _touch(tmp_path / "s.json", "{}")
+    out = tmp_path / "o.json"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"job_id": "x", "removed": 1, "confirmed": True})
+        return httpx.Response(
+            502,
+            json={"detail": {"code": code, "message": f"review failed: {code}"}},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://launcher") as client:
+        ex = ContainerReviewExecutor(
+            launcher_url="http://launcher",
+            launcher_token="test-launcher-token-32chars-ok",
+            checkout_base=tmp_path / "base",
+            http_client=client,
+        )
+        with pytest.raises(CodexRunnerError) as excinfo:
+            await ex.run(
+                checkout=checkout,
+                prompt="p",
+                schema_path=schema,
+                output_path=out,
+                model="m",
+                timeout_seconds=10,
+                openai_api_key="sk",
+            )
+    assert excinfo.value.code == expected

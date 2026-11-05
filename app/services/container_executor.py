@@ -25,7 +25,14 @@ from app.launcher.timeouts import (
 )
 from app.services.checkout_safety import safe_copytree
 from app.services.codex_runner import CodexRunnerError
-from app.services.constants import CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UPGRADE_REQUIRED
+from app.services.constants import (
+    CODEX_AUTH,
+    CODEX_QUOTA,
+    CODEX_SANDBOX,
+    CODEX_TIMEOUT,
+    CODEX_UNAVAILABLE,
+    CODEX_UPGRADE_REQUIRED,
+)
 from app.services.model_proxy_client import ModelProxyIssuerError, issue_job_token
 
 logger = logging.getLogger(__name__)
@@ -292,7 +299,14 @@ class ContainerReviewExecutor:
                     CODEX_UPGRADE_REQUIRED,
                     "launcher rejected review request (422); upgrade worker, launcher and model-proxy together",
                 )
-            allowed = {CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UPGRADE_REQUIRED}
+            allowed = {
+                CODEX_AUTH,
+                CODEX_QUOTA,
+                CODEX_SANDBOX,
+                CODEX_TIMEOUT,
+                CODEX_UNAVAILABLE,
+                CODEX_UPGRADE_REQUIRED,
+            }
             raise CodexRunnerError(
                 code if code in allowed else CODEX_SANDBOX,
                 message or f"launcher error HTTP {response.status_code}",

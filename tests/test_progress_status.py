@@ -574,11 +574,37 @@ def test_other_final_states() -> None:
     assert outcome(status="cancelled").conclusion == "cancelled"
     assert outcome(status="failed", error_code=HEAD_CHANGED).conclusion == "cancelled"
     failed = outcome(status="failed", error_code="CODEX_QUOTA")
-    assert failed.conclusion == "failure" and "CODEX_QUOTA" in failed.summary
+    assert failed.conclusion == "failure" and "quota exceeded" in failed.summary.lower()
     too_large = outcome(status="completed", error_code=SKIP_TOO_LARGE)
     assert too_large.conclusion == "skipped"
     assert ps._commit_state(outcome(status="cancelled")) == "error"
     assert ps._commit_state(failed) == "failure"
+
+
+def test_failure_text_for_model_errors() -> None:
+    """CODEX_QUOTA, CODEX_AUTH, CODEX_UNAVAILABLE produce human-readable text."""
+
+    def outcome(error_code: str):
+        return ps.final_outcome(
+            status="failed",
+            error_code=error_code,
+            skip_reason=None,
+            summary=None,
+            comment_url=None,
+            issue_key=None,
+            visibility="public",
+            config=AppConfig(),
+        )
+
+    quota = outcome("CODEX_QUOTA")
+    assert "quota exceeded" in quota.summary.lower()
+    assert "plan and billing" in quota.summary.lower()
+
+    auth = outcome("CODEX_AUTH")
+    assert "api key" in auth.summary.lower()
+
+    unavailable = outcome("CODEX_UNAVAILABLE")
+    assert "model service" in unavailable.summary.lower() or "unavailable" in unavailable.summary.lower()
 
 
 # --- Errors, timeouts and stale cleanup ---

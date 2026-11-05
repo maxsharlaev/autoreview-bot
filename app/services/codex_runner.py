@@ -41,6 +41,7 @@ def classify_codex_error(message: str) -> str:
             "insufficient_quota",
             "insufficient quota",
             "exceeded your current quota",
+            "quota exceeded",
             "add credits",
         )
     ):

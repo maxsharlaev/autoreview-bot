@@ -82,8 +82,10 @@ cd "$CHECKOUT"
 export LANG="${LANG:-C.UTF-8}"
 export TERM="${TERM:-dumb}"
 
+SESSION_LOG="${OPR_SESSION_LOG:-$WORK/codex-session.log}"
+
 set +e
-timeout --signal=KILL "$TIMEOUT" "${CMD[@]}" <"$PROMPT_FILE"
+timeout --signal=KILL "$TIMEOUT" "${CMD[@]}" <"$PROMPT_FILE" >"$SESSION_LOG" 2>&1
 RC=$?
 set -e
 if [[ "$RC" -eq 124 || "$RC" -eq 137 ]]; then
@@ -91,6 +93,7 @@ if [[ "$RC" -eq 124 || "$RC" -eq 137 ]]; then
   exit 44
 fi
 if [[ "$RC" -ne 0 ]]; then
+  tail -n 20 "$SESSION_LOG" | grep -iE '(error|quota|auth|401|403|credits|exceeded|insufficient)' | tail -n 3 >&2 || true
   echo "opr-review: codex exit $RC" >&2
   exit "$RC"
 fi
