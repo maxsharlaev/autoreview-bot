@@ -624,3 +624,7 @@ code {
 .finding-title {
   font-weight: 500;
 }
+
+.card-warn {
+  border-color: var(--warn);
+}

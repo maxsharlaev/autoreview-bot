@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, Suspense } from "react";
+import { useEffect, useState, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -42,6 +42,11 @@ function RepositoriesContent() {
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [detailError, setDetailError] = useState<string | null>(null);
   const [findingsOffset, setFindingsOffset] = useState(0);
+  const [findingSearchState, setFindingSearchState] = useState<"idle" | "searching" | "found" | "not_found">("idle");
+
+  const reposRequestGen = useRef(0);
+  const detailRequestGen = useRef(0);
+  const findingSearchGen = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,15 +95,17 @@ function RepositoriesContent() {
   }, [me, searchParams]);
 
   const loadRepos = useCallback(
-    (space: SpaceItem, hideEmpty: boolean) => {
+    (space: SpaceItem, hideEmpty: boolean, requestGen: number) => {
       setReposState("loading");
       setReposError(null);
       getSpaceRepos(space.id, hideEmpty)
         .then((res) => {
+          if (requestGen !== reposRequestGen.current) return;
           setRepos(res.items);
           setReposState("loaded");
         })
         .catch((err) => {
+          if (requestGen !== reposRequestGen.current) return;
           setReposError(err instanceof Error ? err.message : "Failed to load repositories");
           setReposState("error");
         });
@@ -108,21 +115,25 @@ function RepositoriesContent() {
 
   useEffect(() => {
     if (!selectedSpace || selectedRepo) return;
-    loadRepos(selectedSpace, hideEmptyPrs);
+    reposRequestGen.current += 1;
+    const currentGen = reposRequestGen.current;
+    loadRepos(selectedSpace, hideEmptyPrs, currentGen);
   }, [selectedSpace, hideEmptyPrs, loadRepos, selectedRepo]);
 
   const loadRepoDetail = useCallback(
-    (fullName: string, offset: number) => {
+    (fullName: string, offset: number, requestGen: number) => {
       if (!selectedSpace) return;
       setDetailState("loading");
       setDetailError(null);
       const [owner, repo] = fullName.split("/");
       getRepoDetail(owner, repo, selectedSpace.id, FINDINGS_LIMIT, offset)
         .then((res) => {
+          if (requestGen !== detailRequestGen.current) return;
           setRepoDetail(res);
           setDetailState("loaded");
         })
         .catch((err) => {
+          if (requestGen !== detailRequestGen.current) return;
           setDetailError(err instanceof Error ? err.message : "Failed to load repository details");
           setDetailState("error");
         });
@@ -132,8 +143,94 @@ function RepositoriesContent() {
 
   useEffect(() => {
     if (!me || !selectedSpace || !selectedRepo) return;
-    loadRepoDetail(selectedRepo, findingsOffset);
-  }, [me, selectedSpace, selectedRepo, findingsOffset, loadRepoDetail]);
+    if (findingSearchState === "searching") return;
+    detailRequestGen.current += 1;
+    const currentGen = detailRequestGen.current;
+    loadRepoDetail(selectedRepo, findingsOffset, currentGen);
+  }, [me, selectedSpace, selectedRepo, findingsOffset, loadRepoDetail, findingSearchState]);
+
+  useEffect(() => {
+    if (!me || !selectedSpace || !selectedRepo || !highlightFindingId) {
+      setFindingSearchState("idle");
+      return;
+    }
+
+    if (repoDetail) {
+      const foundInCurrent = repoDetail.open_findings.some((f) => f.id === highlightFindingId);
+      if (foundInCurrent) {
+        setFindingSearchState("found");
+        return;
+      }
+    }
+
+    if (findingSearchState === "found" || findingSearchState === "not_found") {
+      return;
+    }
+
+    findingSearchGen.current += 1;
+    const currentSearchGen = findingSearchGen.current;
+    setFindingSearchState("searching");
+
+    const [owner, repo] = selectedRepo.split("/");
+
+    async function searchForFinding() {
+      let offset = 0;
+      const maxIterations = 100;
+      let iterations = 0;
+
+      while (iterations < maxIterations) {
+        if (currentSearchGen !== findingSearchGen.current) return;
+
+        try {
+          const res = await getRepoDetail(owner, repo, selectedSpace!.id, FINDINGS_LIMIT, offset);
+
+          if (currentSearchGen !== findingSearchGen.current) return;
+
+          const foundIndex = res.open_findings.findIndex((f) => f.id === highlightFindingId);
+          if (foundIndex !== -1) {
+            setFindingsOffset(offset);
+            setRepoDetail(res);
+            setDetailState("loaded");
+            setFindingSearchState("found");
+            return;
+          }
+
+          if (offset + FINDINGS_LIMIT >= res.open_findings_count) {
+            setFindingSearchState("not_found");
+            setFindingsOffset(0);
+            detailRequestGen.current += 1;
+            const gen = detailRequestGen.current;
+            loadRepoDetail(selectedRepo!, 0, gen);
+            return;
+          }
+
+          offset += FINDINGS_LIMIT;
+          iterations++;
+        } catch {
+          if (currentSearchGen !== findingSearchGen.current) return;
+          setFindingSearchState("not_found");
+          setFindingsOffset(0);
+          detailRequestGen.current += 1;
+          const gen = detailRequestGen.current;
+          loadRepoDetail(selectedRepo!, 0, gen);
+          return;
+        }
+      }
+
+      setFindingSearchState("not_found");
+    }
+
+    searchForFinding();
+  }, [me, selectedSpace, selectedRepo, highlightFindingId, repoDetail, findingSearchState, loadRepoDetail]);
+
+  useEffect(() => {
+    if (findingSearchState === "found" && highlightFindingId && repoDetail) {
+      const element = document.getElementById(`finding-${highlightFindingId}`);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  }, [findingSearchState, highlightFindingId, repoDetail]);
 
   useEffect(() => {
     if (!selectedRepo) {
@@ -141,8 +238,15 @@ function RepositoriesContent() {
       setDetailState("idle");
       setDetailError(null);
       setFindingsOffset(0);
+      setFindingSearchState("idle");
     }
   }, [selectedRepo]);
+
+  useEffect(() => {
+    if (!highlightFindingId) {
+      setFindingSearchState("idle");
+    }
+  }, [highlightFindingId]);
 
   function handleSpaceChange(event: React.ChangeEvent<HTMLSelectElement>) {
     const id = Number(event.target.value);
@@ -221,6 +325,9 @@ function RepositoriesContent() {
   }
 
   if (selectedRepo) {
+    const isSearchingFinding = findingSearchState === "searching";
+    const findingNotFound = findingSearchState === "not_found" && highlightFindingId;
+
     return (
       <Shell user={me} pageTitle={selectedRepo}>
         <div className="breadcrumb">
@@ -229,7 +336,13 @@ function RepositoriesContent() {
           </button>
         </div>
 
-        {detailState === "loading" && !repoDetail && (
+        {isSearchingFinding && (
+          <div className="card">
+            <p className="muted">Searching for finding…</p>
+          </div>
+        )}
+
+        {detailState === "loading" && !repoDetail && !isSearchingFinding && (
           <div className="card">
             <p className="muted">Loading repository details…</p>
           </div>
@@ -244,6 +357,15 @@ function RepositoriesContent() {
 
         {detailState === "loaded" && repoDetail && (
           <>
+            {findingNotFound && (
+              <div className="card card-warn">
+                <p className="muted">
+                  Finding <code>{highlightFindingId}</code> was not found in open findings. It may
+                  have been resolved or suppressed.
+                </p>
+              </div>
+            )}
+
             <section className="section">
               <h2 className="section-title">
                 Open Pull Requests ({repoDetail.open_prs.length})
