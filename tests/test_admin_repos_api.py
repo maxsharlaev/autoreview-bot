@@ -192,13 +192,24 @@ def test_spaces_no_app_backed_owners() -> None:
     redis = FakeRedis()
     settings = _settings()
 
-    registry = FakeOwnerRegistry()
+    class NonAppOwnerContext:
+        def __init__(self, owner_id: str = "default") -> None:
+            self.id = owner_id
+            self.github = SimpleNamespace(
+                kind="pat",
+                app_id=None,
+                private_key_pem=None,
+                installation_id=0,
+                token="ghp_test",
+            )
+            self.is_default = True
+
+    registry = FakeOwnerRegistry(owners={"default": NonAppOwnerContext()})
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
-        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=([], {}))),
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
@@ -496,6 +507,12 @@ def test_repo_detail_uses_installation_id_override() -> None:
     redis = FakeRedis()
     settings = _settings()
 
+    installations, inst_map = _make_installations(
+        [
+            (2002, "acme-corp", "Organization", "default"),
+        ]
+    )
+
     registry = FakeOwnerRegistry()
 
     from app.adapters.github import GitHubAppClient, GitHubError
@@ -516,6 +533,7 @@ def test_repo_detail_uses_installation_id_override() -> None:
         patch("app.api.admin_auth.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_settings", return_value=settings),
         patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
         patch.object(GitHubAppClient, "from_credentials", tracking_from_credentials),
     ):
         client = _client(session, redis, settings)
@@ -562,10 +580,12 @@ def test_space_repos_uses_space_client_for_pr_listing() -> None:
         mock_client.list_open_pulls = AsyncMock(return_value=[{"number": 1}])
         return mock_client
 
-    async def mock_get_open_findings_by_severity(sess: Any, full_name: str) -> AdminOpenFindings:
+    async def mock_get_open_findings_by_severity(
+        sess: Any, full_name: str, owner_id: str | None = None
+    ) -> AdminOpenFindings:
         return AdminOpenFindings(P0=0, P1=0, P2=0, P3=0)
 
-    async def mock_get_last_run_at(sess: Any, full_name: str) -> Any:
+    async def mock_get_last_run_at(sess: Any, full_name: str, owner_id: str | None = None) -> Any:
         return None
 
     with (
@@ -586,3 +606,141 @@ def test_space_repos_uses_space_client_for_pr_listing() -> None:
         owner_id, inst_id = created_clients[0]
         assert owner_id == "owner-b"
         assert inst_id == 2002
+
+
+def test_repo_detail_cross_app_uses_installation_owner() -> None:
+    """AR-013: Repo detail with installation_id from different App should use that App's client."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    installations, inst_map = _make_installations(
+        [
+            (1001, "acme-corp", "Organization", "owner-a"),
+            (2002, "acme-corp", "Organization", "owner-b"),
+        ]
+    )
+
+    class RoutingToOwnerARegistry(FakeOwnerRegistry):
+        def resolve(self, full_name: str, installation_id: int | None = None, explicit_owner: str | None = None) -> Any:
+            return SimpleNamespace(owner_id="owner-a", reason="explicit", rejected=lambda: False)
+
+    registry = RoutingToOwnerARegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+            "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+        }
+    )
+
+    from app.adapters.github import GitHubAppClient, GitHubError
+
+    captured_calls: list[tuple[str, int | None]] = []
+
+    async def raise_502(*args, **kwargs):
+        raise GitHubError("test - captured", status_code=502)
+
+    @classmethod
+    def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
+        captured_calls.append((owner_id, installation_id))
+        mock_client = AsyncMock()
+        mock_client.list_open_pulls = raise_502
+        return mock_client
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
+        patch.object(GitHubAppClient, "from_credentials", tracking_from_credentials),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/repos/acme-corp/repo?installation_id=2002")
+        assert resp.status_code == 502
+
+        assert len(captured_calls) == 1
+        owner_id, inst_id = captured_calls[0]
+        assert owner_id == "owner-b"
+        assert inst_id == 2002
+
+
+def test_spaces_empty_installations_returns_empty_list() -> None:
+    """AR-015: Valid Apps with no installations should return empty list, not 503."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    registry = FakeOwnerRegistry()
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=([], {}))),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["items"] == []
+
+
+def test_space_repos_scopes_findings_to_owner() -> None:
+    """AR-014: Findings should be scoped to the resolved owner, not just full_name."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    installations, inst_map = _make_installations(
+        [
+            (2002, "beta-inc", "Organization", "owner-b"),
+        ]
+    )
+
+    class OwnerBRegistry(FakeOwnerRegistry):
+        def resolve(self, full_name: str, installation_id: int | None = None, explicit_owner: str | None = None) -> Any:
+            return SimpleNamespace(owner_id="owner-b", reason="explicit", rejected=lambda: False)
+
+    registry = OwnerBRegistry(
+        owners={
+            "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+        }
+    )
+
+    from app.adapters.github import GitHubAppClient
+    from app.api.v1 import admin as admin_module
+    from app.api.v1.admin_schemas import AdminOpenFindings
+
+    passed_owner_ids: list[str | None] = []
+
+    @classmethod
+    def mock_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
+        mock_client = AsyncMock()
+        mock_client.list_installation_repos = AsyncMock(return_value=[{"full_name": "beta-inc/repo1", "name": "repo1"}])
+        mock_client.list_open_pulls = AsyncMock(return_value=[{"number": 1}])
+        return mock_client
+
+    async def tracking_get_open_findings(sess: Any, full_name: str, owner_id: str | None = None) -> AdminOpenFindings:
+        passed_owner_ids.append(owner_id)
+        return AdminOpenFindings(P0=0, P1=0, P2=0, P3=0)
+
+    async def tracking_get_last_run_at(sess: Any, full_name: str, owner_id: str | None = None) -> Any:
+        passed_owner_ids.append(owner_id)
+        return None
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
+        patch.object(GitHubAppClient, "from_credentials", mock_from_credentials),
+        patch.object(admin_module, "_get_open_findings_by_severity", tracking_get_open_findings),
+        patch.object(admin_module, "_get_last_run_at", tracking_get_last_run_at),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces/2002/repos?hide_empty_prs=false")
+        assert resp.status_code == 200
+
+        assert "owner-b" in passed_owner_ids

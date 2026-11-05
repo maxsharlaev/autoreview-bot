@@ -845,21 +845,32 @@ async def _enumerate_all_installations() -> tuple[list[_InstallationInfo], dict[
     return installations, installation_to_owner
 
 
+def _has_app_backed_owners() -> bool:
+    """Check if any owner has App credentials configured."""
+    registry = get_owner_registry()
+    for ctx in registry.owners.values():
+        if ctx.github.kind == "app" and ctx.github.app_id:
+            return True
+    return False
+
+
 @router.get("/spaces", response_model=AdminSpaceListResponse)
 async def list_spaces(
     _: AdminPrincipalDep,
 ) -> AdminSpaceListResponse:
     """List GitHub installations (spaces) accessible to the bot across all App-backed owners."""
+    registry = get_owner_registry()
+    if not registry.owners:
+        raise HTTPException(status_code=503, detail="no owner configured")
+
+    if not _has_app_backed_owners():
+        raise HTTPException(status_code=503, detail="no app-backed owners configured")
+
     try:
         installations, _ = await _enumerate_all_installations()
     except _EnumerationError as exc:
         logger.warning("Failed to enumerate installations: %s", exc)
         raise HTTPException(status_code=502, detail="github api error") from None
-    if not installations:
-        registry = get_owner_registry()
-        if not registry.owners:
-            raise HTTPException(status_code=503, detail="no owner configured")
-        raise HTTPException(status_code=503, detail="no app-backed owners configured")
 
     items = [AdminSpaceItem(id=inst.id, login=inst.login, type=inst.acc_type) for inst in installations]
     return AdminSpaceListResponse(items=items)
@@ -868,15 +879,23 @@ async def list_spaces(
 async def _get_open_findings_by_severity(
     session: Any,
     full_name: str,
+    owner_id: str | None = None,
 ) -> AdminOpenFindings:
-    """Count open findings grouped by severity for a repository."""
-    result = await session.execute(
+    """Count open findings grouped by severity for a repository.
+
+    Args:
+        owner_id: If provided, scope findings to this owner only (for multi-owner scenarios).
+    """
+    query = (
         select(Finding.severity, func.count(Finding.id))
         .join(PullRequest, Finding.pull_request_id == PullRequest.id)
         .join(Repository, PullRequest.repository_id == Repository.id)
         .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
-        .group_by(Finding.severity)
     )
+    if owner_id is not None:
+        query = query.where(Repository.owner_id == owner_id)
+    query = query.group_by(Finding.severity)
+    result = await session.execute(query)
     counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
     for severity, count in result.all():
         if severity in counts:
@@ -884,14 +903,21 @@ async def _get_open_findings_by_severity(
     return AdminOpenFindings(**counts)
 
 
-async def _get_last_run_at(session: Any, full_name: str) -> Any:
-    """Get the most recent run timestamp for a repository."""
-    result = await session.execute(
+async def _get_last_run_at(session: Any, full_name: str, owner_id: str | None = None) -> Any:
+    """Get the most recent run timestamp for a repository.
+
+    Args:
+        owner_id: If provided, scope runs to this owner only (for multi-owner scenarios).
+    """
+    query = (
         select(func.max(ReviewRun.created_at))
         .join(PullRequest, ReviewRun.pull_request_id == PullRequest.id)
         .join(Repository, PullRequest.repository_id == Repository.id)
         .where(Repository.full_name == full_name)
     )
+    if owner_id is not None:
+        query = query.where(Repository.owner_id == owner_id)
+    result = await session.execute(query)
     return result.scalar_one_or_none()
 
 
@@ -908,16 +934,18 @@ async def list_space_repos(
         installation_id: The GitHub App installation ID (unique per space)
         hide_empty_prs: If True (default), exclude repos with 0 open PRs
     """
+    registry = get_owner_registry()
+    if not registry.owners:
+        raise HTTPException(status_code=503, detail="no owner configured")
+
+    if not _has_app_backed_owners():
+        raise HTTPException(status_code=503, detail="no app-backed owners configured")
+
     try:
         installations, installation_to_owner = await _enumerate_all_installations()
     except _EnumerationError as exc:
         logger.warning("Failed to enumerate installations: %s", exc)
         raise HTTPException(status_code=502, detail="github api error") from None
-    if not installations:
-        registry = get_owner_registry()
-        if not registry.owners:
-            raise HTTPException(status_code=503, detail="no owner configured")
-        raise HTTPException(status_code=503, detail="no app-backed owners configured")
 
     target_installation: _InstallationInfo | None = None
     for inst in installations:
@@ -966,8 +994,8 @@ async def list_space_repos(
         if hide_empty_prs and open_pr_count == 0:
             continue
 
-        open_findings = await _get_open_findings_by_severity(session, full_name)
-        last_run_at = await _get_last_run_at(session, full_name)
+        open_findings = await _get_open_findings_by_severity(session, full_name, route.owner_id)
+        last_run_at = await _get_last_run_at(session, full_name, route.owner_id)
 
         items.append(
             AdminRepoItem(
@@ -1006,9 +1034,31 @@ async def get_repo_detail(
     if owner_ctx is None:
         raise HTTPException(status_code=404, detail="owner not configured")
 
-    gh_client = GitHubAppClient.from_credentials(
-        owner_ctx.github, owner_id=route.owner_id, installation_id=installation_id
-    )
+    if installation_id is not None:
+        try:
+            installations, _ = await _enumerate_all_installations()
+        except _EnumerationError as exc:
+            logger.warning("Failed to enumerate installations: %s", exc)
+            raise HTTPException(status_code=502, detail="github api error") from None
+
+        inst_info: _InstallationInfo | None = None
+        for inst in installations:
+            if inst.id == installation_id:
+                inst_info = inst
+                break
+
+        if inst_info is None:
+            raise HTTPException(status_code=404, detail="installation not found")
+
+        inst_owner_ctx = registry.get(inst_info.owner_id)
+        if inst_owner_ctx is None:
+            raise HTTPException(status_code=503, detail="installation owner not configured")
+
+        gh_client = GitHubAppClient.from_credentials(
+            inst_owner_ctx.github, owner_id=inst_info.owner_id, installation_id=installation_id
+        )
+    else:
+        gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
 
     try:
         open_prs_data = await gh_client.list_open_pulls(owner, repo)
@@ -1035,6 +1085,7 @@ async def get_repo_detail(
         .join(ranked_runs, ranked_runs.c.pull_request_id == PullRequest.id)
         .where(
             Repository.full_name == full_name,
+            Repository.owner_id == route.owner_id,
             PullRequest.number.in_(open_pr_numbers),
             ranked_runs.c.rn == 1,
         )
@@ -1062,7 +1113,11 @@ async def get_repo_detail(
         .select_from(Finding)
         .join(PullRequest, Finding.pull_request_id == PullRequest.id)
         .join(Repository, PullRequest.repository_id == Repository.id)
-        .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
+        .where(
+            Repository.full_name == full_name,
+            Repository.owner_id == route.owner_id,
+            Finding.current_status == FINDING_STATUS_OPEN,
+        )
     )
     total_findings = int((await session.execute(count_q)).scalar_one())
 
@@ -1070,7 +1125,11 @@ async def get_repo_detail(
         select(Finding)
         .join(PullRequest, Finding.pull_request_id == PullRequest.id)
         .join(Repository, PullRequest.repository_id == Repository.id)
-        .where(Repository.full_name == full_name, Finding.current_status == FINDING_STATUS_OPEN)
+        .where(
+            Repository.full_name == full_name,
+            Repository.owner_id == route.owner_id,
+            Finding.current_status == FINDING_STATUS_OPEN,
+        )
         .order_by(Finding.severity, Finding.created_at.desc(), Finding.id)
         .limit(limit)
         .offset(offset)
