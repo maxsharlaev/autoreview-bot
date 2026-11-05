@@ -488,3 +488,101 @@ def test_space_repos_enumeration_error_returns_502() -> None:
         resp = client.get("/api/v1/admin/spaces/1001/repos")
         assert resp.status_code == 502
         assert "github api error" in resp.json()["detail"]
+
+
+def test_repo_detail_uses_installation_id_override() -> None:
+    """AR-012: Repo detail with installation_id should pass it to from_credentials()."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    registry = FakeOwnerRegistry()
+
+    from app.adapters.github import GitHubAppClient, GitHubError
+
+    captured_installation_ids: list[int | None] = []
+
+    async def raise_502(*args, **kwargs):
+        raise GitHubError("test - captured installation_id", status_code=502)
+
+    @classmethod
+    def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
+        captured_installation_ids.append(installation_id)
+        mock_client = AsyncMock()
+        mock_client.list_open_pulls = raise_502
+        return mock_client
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch.object(GitHubAppClient, "from_credentials", tracking_from_credentials),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/repos/acme/repo?installation_id=2002")
+        assert resp.status_code == 502
+        assert 2002 in captured_installation_ids
+
+
+def test_space_repos_uses_space_client_for_pr_listing() -> None:
+    """AR-009: PR listing should use the space's client, not the routed owner's."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+
+    installations, inst_map = _make_installations(
+        [
+            (2002, "beta-inc", "Organization", "owner-b"),
+        ]
+    )
+
+    class RoutingToOwnerARegistry(FakeOwnerRegistry):
+        def resolve(self, full_name: str, installation_id: int | None = None, explicit_owner: str | None = None) -> Any:
+            return SimpleNamespace(owner_id="owner-a", reason="explicit", rejected=lambda: False)
+
+    registry = RoutingToOwnerARegistry(
+        owners={
+            "owner-a": FakeOwnerContext("owner-a", app_id=11111),
+            "owner-b": FakeOwnerContext("owner-b", app_id=22222),
+        }
+    )
+
+    from app.adapters.github import GitHubAppClient
+    from app.api.v1 import admin as admin_module
+    from app.api.v1.admin_schemas import AdminOpenFindings
+
+    created_clients: list[tuple[str, int | None]] = []
+
+    @classmethod
+    def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
+        created_clients.append((owner_id, installation_id))
+        mock_client = AsyncMock()
+        mock_client.list_installation_repos = AsyncMock(return_value=[{"full_name": "beta-inc/repo1", "name": "repo1"}])
+        mock_client.list_open_pulls = AsyncMock(return_value=[{"number": 1}])
+        return mock_client
+
+    async def mock_get_open_findings_by_severity(sess: Any, full_name: str) -> AdminOpenFindings:
+        return AdminOpenFindings(P0=0, P1=0, P2=0, P3=0)
+
+    async def mock_get_last_run_at(sess: Any, full_name: str) -> Any:
+        return None
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
+        patch.object(GitHubAppClient, "from_credentials", tracking_from_credentials),
+        patch.object(admin_module, "_get_open_findings_by_severity", mock_get_open_findings_by_severity),
+        patch.object(admin_module, "_get_last_run_at", mock_get_last_run_at),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces/2002/repos?hide_empty_prs=false")
+        assert resp.status_code == 200
+
+        assert len(created_clients) == 1
+        owner_id, inst_id = created_clients[0]
+        assert owner_id == "owner-b"
+        assert inst_id == 2002

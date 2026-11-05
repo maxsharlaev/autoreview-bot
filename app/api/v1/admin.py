@@ -954,16 +954,10 @@ async def list_space_repos(
             continue
 
         owner_name, repo_name = full_name.split("/", 1)
-        owner_ctx = registry.get(route.owner_id)
-        if owner_ctx is None:
-            continue
 
-        repo_gh_client = GitHubAppClient.from_credentials(
-            owner_ctx.github, owner_id=route.owner_id, installation_id=installation_id
-        )
         open_pr_count: int | None
         try:
-            open_prs = await repo_gh_client.list_open_pulls(owner_name, repo_name)
+            open_prs = await gh_client.list_open_pulls(owner_name, repo_name)
             open_pr_count = len(open_prs)
         except GitHubError as exc:
             logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
@@ -1012,7 +1006,9 @@ async def get_repo_detail(
     if owner_ctx is None:
         raise HTTPException(status_code=404, detail="owner not configured")
 
-    gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
+    gh_client = GitHubAppClient.from_credentials(
+        owner_ctx.github, owner_id=route.owner_id, installation_id=installation_id
+    )
 
     try:
         open_prs_data = await gh_client.list_open_pulls(owner, repo)
