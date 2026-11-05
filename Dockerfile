@@ -1,8 +1,11 @@
 # Admin control UI (static export). Built for the api image only.
-# ADMIN_UI_BASE_PATH is baked into the Next.js export; changing it requires an image rebuild.
+# ADMIN_UI_BASE_PATH and NEXT_PUBLIC_ADMIN_ENV are baked into the Next.js export;
+# changing either requires an image rebuild.
 FROM node:22-bookworm-slim AS admin-ui
 ARG ADMIN_UI_BASE_PATH=/control
+ARG NEXT_PUBLIC_ADMIN_ENV
 ENV ADMIN_UI_BASE_PATH=$ADMIN_UI_BASE_PATH
+ENV NEXT_PUBLIC_ADMIN_ENV=$NEXT_PUBLIC_ADMIN_ENV
 WORKDIR /ui
 COPY admin-ui/package.json admin-ui/package-lock.json ./
 RUN npm ci

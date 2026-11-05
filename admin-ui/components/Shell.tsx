@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 import { logout, type AdminMe } from "@/lib/api";
 
-const ENV_BADGE = (process.env.NEXT_PUBLIC_ADMIN_ENV ?? "local").trim();
+const ENV_BADGE = (process.env.NEXT_PUBLIC_ADMIN_ENV ?? "").trim();
 
 const NAV_ITEMS = [
   { href: "/findings/", label: "Findings" },

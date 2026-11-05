@@ -39,6 +39,7 @@
 | `ADMIN_UI_ENABLED` | `false` | api | При `true` отдаёт статическую control UI на `ADMIN_UI_BASE_PATH` (Next.js export). По умолчанию выкл. **Требует** `ADMIN_API_ENABLED=true` (иначе старт падает — login/session живут под `/api/v1/admin`). |
 | `ADMIN_UI_DIST` | `admin_ui_out` | api | Каталог со сборкой UI (`index.html`). В api-образе путь `/app/admin_ui_out`. |
 | `ADMIN_UI_BASE_PATH` | `/control` | api (build + runtime) | URL-путь control UI (без trailing slash). Вшивается в Next.js export как `basePath` на **сборке образа** (`docker compose build` / build-arg); должен совпадать с env у running api. Смена значения требует пересборки образа `api` (одного recreate недостаточно). |
+| `NEXT_PUBLIC_ADMIN_ENV` | `""` | api (build only) | Метка в верхней панели control UI (например `staging`, `prod`). Вшивается в Next.js export на **сборке образа** (`docker compose build` / build-arg). Если не задана или пуста — бейдж скрыт. |
 | `ADMIN_ROOT_LOGIN` | `""` | api | Опциональный login root только из env (вместе с `ADMIN_ROOT_PASSWORD`, или оба пустые; ≤ 128 символов). |
 | `ADMIN_ROOT_PASSWORD` | `""` | api | Опциональный пароль root (16..1024 символов; вне диапазона — старт падает). В БД не пишется; root доступен даже при наличии DB-пользователей (recovery). Уберите оба root-var и перезапустите, чтобы отключить. Не должен совпадать с `admin_users.login`. |
 | `ADMIN_SESSION_TTL_SECONDS` | `28800` | api | TTL админ-сессии в Redis (по умолчанию 8ч). 1..604800 (7 дней); невалидное значение — старт падает. |
