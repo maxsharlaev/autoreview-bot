@@ -47,6 +47,7 @@ function RepositoriesContent() {
   const reposRequestGen = useRef(0);
   const detailRequestGen = useRef(0);
   const findingSearchGen = useRef(0);
+  const lastSearchedFindingKey = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -144,14 +145,26 @@ function RepositoriesContent() {
   useEffect(() => {
     if (!me || !selectedSpace || !selectedRepo) return;
     if (findingSearchState === "searching") return;
+    if (highlightFindingId && findingSearchState === "idle") return;
     detailRequestGen.current += 1;
     const currentGen = detailRequestGen.current;
     loadRepoDetail(selectedRepo, findingsOffset, currentGen);
-  }, [me, selectedSpace, selectedRepo, findingsOffset, loadRepoDetail, findingSearchState]);
+  }, [me, selectedSpace, selectedRepo, findingsOffset, loadRepoDetail, findingSearchState, highlightFindingId]);
 
   useEffect(() => {
+    const currentKey = selectedRepo && selectedSpace && highlightFindingId
+      ? `${selectedSpace.id}:${selectedRepo}:${highlightFindingId}`
+      : null;
+
+    if (currentKey !== lastSearchedFindingKey.current) {
+      if (lastSearchedFindingKey.current !== null || currentKey !== null) {
+        setFindingSearchState("idle");
+        findingSearchGen.current += 1;
+      }
+      lastSearchedFindingKey.current = currentKey;
+    }
+
     if (!me || !selectedSpace || !selectedRepo || !highlightFindingId) {
-      setFindingSearchState("idle");
       return;
     }
 
@@ -175,10 +188,9 @@ function RepositoriesContent() {
 
     async function searchForFinding() {
       let offset = 0;
-      const maxIterations = 100;
-      let iterations = 0;
+      let totalCount: number | null = null;
 
-      while (iterations < maxIterations) {
+      while (true) {
         if (currentSearchGen !== findingSearchGen.current) return;
 
         try {
@@ -186,8 +198,13 @@ function RepositoriesContent() {
 
           if (currentSearchGen !== findingSearchGen.current) return;
 
+          if (totalCount === null) {
+            totalCount = res.open_findings_count;
+          }
+
           const foundIndex = res.open_findings.findIndex((f) => f.id === highlightFindingId);
           if (foundIndex !== -1) {
+            detailRequestGen.current += 1;
             setFindingsOffset(offset);
             setRepoDetail(res);
             setDetailState("loaded");
@@ -195,7 +212,7 @@ function RepositoriesContent() {
             return;
           }
 
-          if (offset + FINDINGS_LIMIT >= res.open_findings_count) {
+          if (offset + FINDINGS_LIMIT >= totalCount) {
             setFindingSearchState("not_found");
             setFindingsOffset(0);
             detailRequestGen.current += 1;
@@ -205,7 +222,6 @@ function RepositoriesContent() {
           }
 
           offset += FINDINGS_LIMIT;
-          iterations++;
         } catch {
           if (currentSearchGen !== findingSearchGen.current) return;
           setFindingSearchState("not_found");
@@ -216,8 +232,6 @@ function RepositoriesContent() {
           return;
         }
       }
-
-      setFindingSearchState("not_found");
     }
 
     searchForFinding();
@@ -239,14 +253,9 @@ function RepositoriesContent() {
       setDetailError(null);
       setFindingsOffset(0);
       setFindingSearchState("idle");
+      lastSearchedFindingKey.current = null;
     }
   }, [selectedRepo]);
-
-  useEffect(() => {
-    if (!highlightFindingId) {
-      setFindingSearchState("idle");
-    }
-  }, [highlightFindingId]);
 
   function handleSpaceChange(event: React.ChangeEvent<HTMLSelectElement>) {
     const id = Number(event.target.value);
