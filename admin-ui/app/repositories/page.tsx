@@ -18,6 +18,7 @@ import {
 import { Shell } from "@/components/Shell";
 
 type LoadState = "idle" | "loading" | "loaded" | "error";
+type FindingSearchState = "idle" | "searching" | "found" | "not_found" | "error";
 
 const FINDINGS_LIMIT = 50;
 
@@ -42,7 +43,8 @@ function RepositoriesContent() {
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [detailError, setDetailError] = useState<string | null>(null);
   const [findingsOffset, setFindingsOffset] = useState(0);
-  const [findingSearchState, setFindingSearchState] = useState<"idle" | "searching" | "found" | "not_found">("idle");
+  const [findingSearchState, setFindingSearchState] = useState<FindingSearchState>("idle");
+  const [findingSearchError, setFindingSearchError] = useState<string | null>(null);
 
   const reposRequestGen = useRef(0);
   const detailRequestGen = useRef(0);
@@ -159,6 +161,7 @@ function RepositoriesContent() {
     if (currentKey !== lastSearchedFindingKey.current) {
       if (lastSearchedFindingKey.current !== null || currentKey !== null) {
         setFindingSearchState("idle");
+        setFindingSearchError(null);
         findingSearchGen.current += 1;
       }
       lastSearchedFindingKey.current = currentKey;
@@ -176,13 +179,14 @@ function RepositoriesContent() {
       }
     }
 
-    if (findingSearchState === "found" || findingSearchState === "not_found") {
+    if (findingSearchState === "found" || findingSearchState === "not_found" || findingSearchState === "error") {
       return;
     }
 
     findingSearchGen.current += 1;
     const currentSearchGen = findingSearchGen.current;
     setFindingSearchState("searching");
+    setFindingSearchError(null);
 
     const [owner, repo] = selectedRepo.split("/");
 
@@ -222,9 +226,10 @@ function RepositoriesContent() {
           }
 
           offset += FINDINGS_LIMIT;
-        } catch {
+        } catch (err) {
           if (currentSearchGen !== findingSearchGen.current) return;
-          setFindingSearchState("not_found");
+          setFindingSearchError(err instanceof Error ? err.message : "Search failed");
+          setFindingSearchState("error");
           setFindingsOffset(0);
           detailRequestGen.current += 1;
           const gen = detailRequestGen.current;
@@ -235,6 +240,10 @@ function RepositoriesContent() {
     }
 
     searchForFinding();
+
+    return () => {
+      findingSearchGen.current += 1;
+    };
   }, [me, selectedSpace, selectedRepo, highlightFindingId, repoDetail, findingSearchState, loadRepoDetail]);
 
   useEffect(() => {
@@ -253,6 +262,7 @@ function RepositoriesContent() {
       setDetailError(null);
       setFindingsOffset(0);
       setFindingSearchState("idle");
+      setFindingSearchError(null);
       lastSearchedFindingKey.current = null;
     }
   }, [selectedRepo]);
@@ -336,6 +346,7 @@ function RepositoriesContent() {
   if (selectedRepo) {
     const isSearchingFinding = findingSearchState === "searching";
     const findingNotFound = findingSearchState === "not_found" && highlightFindingId;
+    const findingSearchFailed = findingSearchState === "error" && highlightFindingId;
 
     return (
       <Shell user={me} pageTitle={selectedRepo}>
@@ -366,6 +377,18 @@ function RepositoriesContent() {
 
         {detailState === "loaded" && repoDetail && (
           <>
+            {findingSearchFailed && (
+              <div className="card card-error">
+                <p className="muted">
+                  Failed to search for finding <code>{highlightFindingId}</code>:{" "}
+                  <span className="error">{findingSearchError}</span>
+                </p>
+                <p className="muted">
+                  The finding may still exist. Try reloading the page.
+                </p>
+              </div>
+            )}
+
             {findingNotFound && (
               <div className="card card-warn">
                 <p className="muted">
