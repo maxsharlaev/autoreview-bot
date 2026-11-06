@@ -32,7 +32,7 @@ What works today on `main`, and the honest limits of each area.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| **Admin panel (runs, queue, finding management)** | **in progress** | Admin JSON API shipped (sessions, findings suppress, runs + sensitive cleanup, users, queue). Control UI skeleton at `/control` (`ADMIN_UI_ENABLED=false` by default; enable with `ADMIN_API_ENABLED`). Findings/runs/queue/users pages, safe retry, and richer audit UI still to ship. Authz separate from the public API |
+| **Admin panel (runs, queue, finding management)** | **in progress** | Admin JSON API shipped (sessions, findings suppress, runs + sensitive cleanup, users, queue, spaces/repos). Control UI at `/control` (`ADMIN_UI_ENABLED=false` by default; enable with `ADMIN_API_ENABLED`). Repositories page live (spaces selector, repos table with findings by severity, repo detail with PRs and findings). Findings/runs/queue/users pages, safe retry, and richer audit UI still to ship. Authz separate from the public API |
 
 <!-- section: container-strict-review-path -->
 ### Container / strict review path

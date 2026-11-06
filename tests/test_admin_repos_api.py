@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from app.api.v1 import admin as admin_api
@@ -17,6 +18,7 @@ from tests.test_admin_api import (
     ROOT_LOGIN,
     ROOT_PASSWORD,
     FakeRedis,
+    FakeResult,
     FakeSession,
     _settings,
 )
@@ -785,3 +787,47 @@ def test_owner_id_filter_set_no_legacy_alias() -> None:
     with patch("app.api.v1.admin.get_owner_registry", return_value=registry):
         owner_ids = _owner_id_filter_set("owner-a")
         assert owner_ids == {"owner-a"}
+
+def test_repo_detail_finding_id_resolves_offset_in_one_github_call() -> None:
+    """AR-49-007: locating a finding uses one GitHub PR list and a DB rank, not page scans."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    registry = FakeOwnerRegistry()
+    finding_id = uuid4()
+
+    original_execute = session.execute
+
+    async def execute_with_rank(stmt, *args, **kwargs):  # noqa: ANN001
+        sql = session._compiled(stmt).lower()
+        if "row_number" in sql and str(finding_id) in sql:
+            return FakeResult(scalar=51)
+        result = await original_execute(stmt, *args, **kwargs)
+        if not hasattr(result, "all"):
+            result.all = lambda: []  # type: ignore[method-assign]
+        return result
+
+    session.execute = execute_with_rank  # type: ignore[method-assign]
+
+    from app.adapters.github import GitHubAppClient
+    list_open_pulls = AsyncMock(return_value=[{"number": 1, "title": "t", "head": {"sha": "abc1234"}}])
+
+    @classmethod
+    def from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
+        mock_client = AsyncMock()
+        mock_client.list_open_pulls = list_open_pulls
+        return mock_client
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch.object(GitHubAppClient, "from_credentials", from_credentials),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get(f"/api/v1/admin/repos/acme/repo?finding_id={finding_id}&limit=50")
+        assert resp.status_code == 200
+        assert resp.json()["offset"] == 50
+        assert list_open_pulls.await_count == 1
+

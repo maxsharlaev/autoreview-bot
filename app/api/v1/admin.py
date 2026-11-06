@@ -1027,6 +1027,38 @@ async def list_space_repos(
     return AdminRepoListResponse(items=items)
 
 
+
+async def _open_finding_page_offset(
+    session: Any,
+    *,
+    full_name: str,
+    owner_ids: set[str],
+    finding_id: uuid.UUID,
+    limit: int,
+) -> int | None:
+    """Return the findings-page offset for an open finding, or None if it is absent."""
+    ranked = (
+        select(
+            Finding.id,
+            func.row_number()
+            .over(order_by=[Finding.severity.asc(), Finding.created_at.desc(), Finding.id.asc()])
+            .label("rn"),
+        )
+        .join(PullRequest, Finding.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(
+            Repository.full_name == full_name,
+            Finding.owner_id.in_(owner_ids),
+            Finding.current_status == FINDING_STATUS_OPEN,
+        )
+        .subquery()
+    )
+    rank = (await session.execute(select(ranked.c.rn).where(ranked.c.id == finding_id))).scalar_one_or_none()
+    if rank is None:
+        return None
+    return ((int(rank) - 1) // limit) * limit
+
+
 @router.get("/repos/{owner}/{repo}", response_model=AdminRepoDetailResponse)
 async def get_repo_detail(
     owner: str,
@@ -1036,11 +1068,13 @@ async def get_repo_detail(
     installation_id: Annotated[int | None, Query(description="GitHub installation ID for routing")] = None,
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
+    finding_id: Annotated[uuid.UUID | None, Query(description="Open finding to locate; overrides offset")] = None,
 ) -> AdminRepoDetailResponse:
     """Get detailed repository info: open PRs and open findings with pagination.
 
     Args:
         installation_id: Optional GitHub installation ID for routing repos via installation claims.
+        finding_id: If set, return the page that contains this open finding (or offset 0 if absent).
     """
     full_name = f"{owner}/{repo}"
     registry = get_owner_registry()
@@ -1087,6 +1121,16 @@ async def get_repo_detail(
     open_pr_numbers = {pr.get("number") for pr in open_prs_data}
 
     owner_ids = _owner_id_filter_set(route.owner_id)
+
+    if finding_id is not None:
+        located = await _open_finding_page_offset(
+            session,
+            full_name=full_name,
+            owner_ids=owner_ids,
+            finding_id=finding_id,
+            limit=limit,
+        )
+        offset = located if located is not None else 0
 
     row_num = (
         func.row_number()
