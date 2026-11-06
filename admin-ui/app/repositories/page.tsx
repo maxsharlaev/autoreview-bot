@@ -50,6 +50,7 @@ function RepositoriesContent() {
   const detailRequestGen = useRef(0);
   const findingSearchGen = useRef(0);
   const lastSearchedFindingKey = useRef<string | null>(null);
+  const searchCommittedOffset = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -148,6 +149,7 @@ function RepositoriesContent() {
     if (!me || !selectedSpace || !selectedRepo) return;
     if (findingSearchState === "searching") return;
     if (highlightFindingId && findingSearchState === "idle") return;
+    if (findingSearchState === "found" && searchCommittedOffset.current === findingsOffset) return;
     detailRequestGen.current += 1;
     const currentGen = detailRequestGen.current;
     loadRepoDetail(selectedRepo, findingsOffset, currentGen);
@@ -163,6 +165,7 @@ function RepositoriesContent() {
         setFindingSearchState("idle");
         setFindingSearchError(null);
         findingSearchGen.current += 1;
+        searchCommittedOffset.current = null;
       }
       lastSearchedFindingKey.current = currentKey;
     }
@@ -209,6 +212,7 @@ function RepositoriesContent() {
           const foundIndex = res.open_findings.findIndex((f) => f.id === highlightFindingId);
           if (foundIndex !== -1) {
             detailRequestGen.current += 1;
+            searchCommittedOffset.current = offset;
             setFindingsOffset(offset);
             setRepoDetail(res);
             setDetailState("loaded");
@@ -264,6 +268,7 @@ function RepositoriesContent() {
       setFindingSearchState("idle");
       setFindingSearchError(null);
       lastSearchedFindingKey.current = null;
+      searchCommittedOffset.current = null;
     }
   }, [selectedRepo]);
 
