@@ -198,51 +198,34 @@ function RepositoriesContent() {
     const [owner, repo] = selectedRepo.split("/");
 
     async function searchForFinding() {
-      let offset = 0;
-      let totalCount: number | null = null;
+      if (currentSearchGen !== findingSearchGen.current) return;
 
-      while (true) {
+      try {
+        const res = await getRepoDetail(
+          owner,
+          repo,
+          selectedSpace!.id,
+          FINDINGS_LIMIT,
+          0,
+          highlightFindingId
+        );
+
         if (currentSearchGen !== findingSearchGen.current) return;
 
-        try {
-          const res = await getRepoDetail(owner, repo, selectedSpace!.id, FINDINGS_LIMIT, offset);
-
-          if (currentSearchGen !== findingSearchGen.current) return;
-
-          if (totalCount === null) {
-            totalCount = res.open_findings_count;
-          }
-
-          const foundIndex = res.open_findings.findIndex((f) => f.id === highlightFindingId);
-          if (foundIndex !== -1) {
-            detailRequestGen.current += 1;
-            setFindingsOffset(offset);
-            setRepoDetail(res);
-            setDetailState("loaded");
-            setFindingSearchState("found");
-            return;
-          }
-
-          if (offset + FINDINGS_LIMIT >= totalCount) {
-            setFindingSearchState("not_found");
-            setFindingsOffset(0);
-            detailRequestGen.current += 1;
-            const gen = detailRequestGen.current;
-            loadRepoDetail(selectedRepo!, 0, gen);
-            return;
-          }
-
-          offset += FINDINGS_LIMIT;
-        } catch (err) {
-          if (currentSearchGen !== findingSearchGen.current) return;
-          setFindingSearchError(err instanceof Error ? err.message : "Search failed");
-          setFindingSearchState("error");
-          setFindingsOffset(0);
-          detailRequestGen.current += 1;
-          const gen = detailRequestGen.current;
-          loadRepoDetail(selectedRepo!, 0, gen);
-          return;
-        }
+        detailRequestGen.current += 1;
+        setFindingsOffset(res.offset);
+        setRepoDetail(res);
+        setDetailState("loaded");
+        const found = res.open_findings.some((f) => f.id === highlightFindingId);
+        setFindingSearchState(found ? "found" : "not_found");
+      } catch (err) {
+        if (currentSearchGen !== findingSearchGen.current) return;
+        setFindingSearchError(err instanceof Error ? err.message : "Search failed");
+        setFindingSearchState("error");
+        setFindingsOffset(0);
+        detailRequestGen.current += 1;
+        const gen = detailRequestGen.current;
+        loadRepoDetail(selectedRepo!, 0, gen);
       }
     }
 

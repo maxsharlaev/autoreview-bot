@@ -134,7 +134,8 @@ export function getRepoDetail(
   repo: string,
   installationId?: number,
   limit = 50,
-  offset = 0
+  offset = 0,
+  findingId?: string | null
 ): Promise<RepoDetailResponse> {
   const params = new URLSearchParams();
   if (installationId !== undefined) {
@@ -142,5 +143,8 @@ export function getRepoDetail(
   }
   params.set("limit", String(limit));
   params.set("offset", String(offset));
+  if (findingId) {
+    params.set("finding_id", findingId);
+  }
   return apiGet<RepoDetailResponse>(`/repos/${owner}/${repo}?${params}`);
 }
