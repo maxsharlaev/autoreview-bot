@@ -109,6 +109,9 @@ class FakeOwnerRegistry:
     def resolve(self, full_name: str, installation_id: int | None = None, explicit_owner: str | None = None) -> Any:
         return SimpleNamespace(owner_id="default", reason="default_fallback", rejected=lambda: False)
 
+    def legacy_default_alias(self) -> str | None:
+        return None
+
 
 def _make_installations(
     items: list[tuple[int, str, str, str]],
@@ -788,6 +791,7 @@ def test_owner_id_filter_set_no_legacy_alias() -> None:
         owner_ids = _owner_id_filter_set("owner-a")
         assert owner_ids == {"owner-a"}
 
+
 def test_repo_detail_finding_id_resolves_offset_in_one_github_call() -> None:
     """AR-49-007: locating a finding uses one GitHub PR list and a DB rank, not page scans."""
     session = FakeSession()
@@ -800,8 +804,11 @@ def test_repo_detail_finding_id_resolves_offset_in_one_github_call() -> None:
 
     async def execute_with_rank(stmt, *args, **kwargs):  # noqa: ANN001
         sql = session._compiled(stmt).lower()
-        if "row_number" in sql and str(finding_id) in sql:
+        finding_token = str(finding_id).replace("-", "")
+        if "row_number" in sql and (str(finding_id) in sql or finding_token in sql):
             return FakeResult(scalar=51)
+        if "count(" in sql:
+            return FakeResult(scalar=0)
         result = await original_execute(stmt, *args, **kwargs)
         if not hasattr(result, "all"):
             result.all = lambda: []  # type: ignore[method-assign]
@@ -810,6 +817,7 @@ def test_repo_detail_finding_id_resolves_offset_in_one_github_call() -> None:
     session.execute = execute_with_rank  # type: ignore[method-assign]
 
     from app.adapters.github import GitHubAppClient
+
     list_open_pulls = AsyncMock(return_value=[{"number": 1, "title": "t", "head": {"sha": "abc1234"}}])
 
     @classmethod
@@ -830,4 +838,3 @@ def test_repo_detail_finding_id_resolves_offset_in_one_github_call() -> None:
         assert resp.status_code == 200
         assert resp.json()["offset"] == 50
         assert list_open_pulls.await_count == 1
-

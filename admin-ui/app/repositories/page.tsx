@@ -22,6 +22,19 @@ type FindingSearchState = "idle" | "searching" | "found" | "not_found" | "error"
 
 const FINDINGS_LIMIT = 50;
 
+function detailRequestKey(spaceId: number, fullName: string, offset: number): string {
+  return `${spaceId}:${fullName}:${offset}`;
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "name" in err &&
+    (err as { name?: unknown }).name === "AbortError"
+  );
+}
+
 function RepositoriesContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -49,7 +62,17 @@ function RepositoriesContent() {
   const reposRequestGen = useRef(0);
   const detailRequestGen = useRef(0);
   const findingSearchGen = useRef(0);
-  const lastSearchedFindingKey = useRef<string | null>(null);
+  const lookupResultRef = useRef<{
+    key: string;
+    status: "searching" | "found" | "not_found" | "error";
+  } | null>(null);
+  const repoDetailRef = useRef<RepoDetailResponse | null>(null);
+  repoDetailRef.current = repoDetail;
+  const loadedDetailKeyRef = useRef<string | null>(null);
+  const detailRequestKeyRef = useRef<string | null>(null);
+  const loadRepoDetailRef = useRef<(fullName: string, offset: number, requestGen: number) => void>(
+    () => {}
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -126,12 +149,15 @@ function RepositoriesContent() {
   const loadRepoDetail = useCallback(
     (fullName: string, offset: number, requestGen: number) => {
       if (!selectedSpace) return;
+      detailRequestKeyRef.current = detailRequestKey(selectedSpace.id, fullName, offset);
       setDetailState("loading");
       setDetailError(null);
       const [owner, repo] = fullName.split("/");
       getRepoDetail(owner, repo, selectedSpace.id, FINDINGS_LIMIT, offset)
         .then((res) => {
           if (requestGen !== detailRequestGen.current) return;
+          loadedDetailKeyRef.current = `${selectedSpace.id}:${fullName}`;
+          repoDetailRef.current = res;
           setRepoDetail(res);
           setDetailState("loaded");
         })
@@ -143,6 +169,7 @@ function RepositoriesContent() {
     },
     [selectedSpace]
   );
+  loadRepoDetailRef.current = loadRepoDetail;
 
   useEffect(() => {
     if (!me || !selectedSpace || !selectedRepo) return;
@@ -155,47 +182,53 @@ function RepositoriesContent() {
     ) {
       return;
     }
+    const wantedKey = detailRequestKey(selectedSpace.id, selectedRepo, findingsOffset);
+    if (detailRequestKeyRef.current === wantedKey) return;
+    detailRequestKeyRef.current = wantedKey;
     detailRequestGen.current += 1;
     const currentGen = detailRequestGen.current;
     loadRepoDetail(selectedRepo, findingsOffset, currentGen);
   }, [me, selectedSpace, selectedRepo, findingsOffset, loadRepoDetail, findingSearchState, highlightFindingId, repoDetail]);
 
+  const userReady = me !== null;
+  const spaceId = selectedSpace?.id;
+
+  // Keyed by user / space / repo / finding. Own output (search state, loaded
+  // detail) must not retrigger the request (AR-49-008).
   useEffect(() => {
-    const currentKey = selectedRepo && selectedSpace && highlightFindingId
-      ? `${selectedSpace.id}:${selectedRepo}:${highlightFindingId}`
-      : null;
-
-    if (currentKey !== lastSearchedFindingKey.current) {
-      if (lastSearchedFindingKey.current !== null || currentKey !== null) {
-        setFindingSearchState("idle");
-        setFindingSearchError(null);
-        findingSearchGen.current += 1;
-      }
-      lastSearchedFindingKey.current = currentKey;
-    }
-
-    if (!me || !selectedSpace || !selectedRepo || !highlightFindingId) {
+    if (!userReady || spaceId == null || !selectedRepo || !highlightFindingId) {
       return;
     }
 
-    if (repoDetail) {
-      const foundInCurrent = repoDetail.open_findings.some((f) => f.id === highlightFindingId);
-      if (foundInCurrent) {
-        setFindingSearchState("found");
-        return;
-      }
-    }
-
-    if (findingSearchState === "found" || findingSearchState === "not_found" || findingSearchState === "error") {
+    const lookupKey = `${spaceId}:${selectedRepo}:${highlightFindingId}`;
+    const settled = lookupResultRef.current;
+    if (settled && settled.key === lookupKey && settled.status !== "searching") {
       return;
     }
 
+    const detail = repoDetailRef.current;
+    if (
+      detail &&
+      loadedDetailKeyRef.current === `${spaceId}:${selectedRepo}` &&
+      detail.open_findings.some((finding) => finding.id === highlightFindingId)
+    ) {
+      lookupResultRef.current = { key: lookupKey, status: "found" };
+      setFindingSearchError(null);
+      setFindingSearchState("found");
+      return;
+    }
+
+    const controller = new AbortController();
     findingSearchGen.current += 1;
     const currentSearchGen = findingSearchGen.current;
-    setFindingSearchState("searching");
+    lookupResultRef.current = { key: lookupKey, status: "searching" };
     setFindingSearchError(null);
+    setFindingSearchState("searching");
 
+    const installationId = spaceId;
     const [owner, repo] = selectedRepo.split("/");
+    const findingId = highlightFindingId;
+    const repoName = selectedRepo;
 
     async function searchForFinding() {
       if (currentSearchGen !== findingSearchGen.current) return;
@@ -204,37 +237,51 @@ function RepositoriesContent() {
         const res = await getRepoDetail(
           owner,
           repo,
-          selectedSpace!.id,
+          installationId,
           FINDINGS_LIMIT,
           0,
-          highlightFindingId
+          findingId,
+          controller.signal
         );
 
-        if (currentSearchGen !== findingSearchGen.current) return;
+        if (currentSearchGen !== findingSearchGen.current || controller.signal.aborted) return;
 
+        const found = res.open_findings.some((finding) => finding.id === findingId);
         detailRequestGen.current += 1;
+        detailRequestKeyRef.current = detailRequestKey(installationId, repoName, res.offset);
+        loadedDetailKeyRef.current = `${installationId}:${repoName}`;
+        repoDetailRef.current = res;
+        lookupResultRef.current = { key: lookupKey, status: found ? "found" : "not_found" };
         setFindingsOffset(res.offset);
         setRepoDetail(res);
         setDetailState("loaded");
-        const found = res.open_findings.some((f) => f.id === highlightFindingId);
         setFindingSearchState(found ? "found" : "not_found");
       } catch (err) {
+        if (controller.signal.aborted || isAbortError(err)) return;
         if (currentSearchGen !== findingSearchGen.current) return;
+        lookupResultRef.current = { key: lookupKey, status: "error" };
         setFindingSearchError(err instanceof Error ? err.message : "Search failed");
         setFindingSearchState("error");
         setFindingsOffset(0);
         detailRequestGen.current += 1;
         const gen = detailRequestGen.current;
-        loadRepoDetail(selectedRepo!, 0, gen);
+        loadRepoDetailRef.current(repoName, 0, gen);
       }
     }
 
     searchForFinding();
 
     return () => {
+      controller.abort();
       findingSearchGen.current += 1;
+      if (
+        lookupResultRef.current?.key === lookupKey &&
+        lookupResultRef.current.status === "searching"
+      ) {
+        lookupResultRef.current = null;
+      }
     };
-  }, [me, selectedSpace, selectedRepo, highlightFindingId, repoDetail, findingSearchState, loadRepoDetail]);
+  }, [userReady, spaceId, selectedRepo, highlightFindingId]);
 
   useEffect(() => {
     if (findingSearchState === "found" && highlightFindingId && repoDetail) {
@@ -253,7 +300,10 @@ function RepositoriesContent() {
       setFindingsOffset(0);
       setFindingSearchState("idle");
       setFindingSearchError(null);
-      lastSearchedFindingKey.current = null;
+      lookupResultRef.current = null;
+      loadedDetailKeyRef.current = null;
+      detailRequestKeyRef.current = null;
+      repoDetailRef.current = null;
     }
   }, [selectedRepo]);
 

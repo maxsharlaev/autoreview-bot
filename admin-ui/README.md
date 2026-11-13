@@ -4,6 +4,7 @@ Static Next.js export served by the API at `/control` when `ADMIN_UI_ENABLED=tru
 
 ```bash
 npm ci
+npm test
 npm run build   # writes ./out
 ```
 

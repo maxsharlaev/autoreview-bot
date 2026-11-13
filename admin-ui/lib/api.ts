@@ -76,12 +76,13 @@ async function parseError(res: Response): Promise<string> {
   }
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "GET",
     credentials: "include",
     headers: { Accept: "application/json" },
     cache: "no-store",
+    signal,
   });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json() as Promise<T>;
@@ -135,7 +136,8 @@ export function getRepoDetail(
   installationId?: number,
   limit = 50,
   offset = 0,
-  findingId?: string | null
+  findingId?: string | null,
+  signal?: AbortSignal
 ): Promise<RepoDetailResponse> {
   const params = new URLSearchParams();
   if (installationId !== undefined) {
@@ -146,5 +148,5 @@ export function getRepoDetail(
   if (findingId) {
     params.set("finding_id", findingId);
   }
-  return apiGet<RepoDetailResponse>(`/repos/${owner}/${repo}?${params}`);
+  return apiGet<RepoDetailResponse>(`/repos/${owner}/${repo}?${params}`, signal);
 }
