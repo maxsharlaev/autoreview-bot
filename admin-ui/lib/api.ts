@@ -39,6 +39,10 @@ export type RepoItem = {
 
 export type RepoListResponse = {
   items: RepoItem[];
+  limit: number;
+  offset: number;
+  has_next: boolean;
+  total_count: number | null;
 };
 
 export type RepoPRItem = {
@@ -128,10 +132,14 @@ export function getSpaces(): Promise<SpaceListResponse> {
 
 export function getSpaceRepos(
   installationId: number,
-  hideEmptyPrs = true
+  hideEmptyPrs = true,
+  limit = 50,
+  offset = 0
 ): Promise<RepoListResponse> {
   const params = new URLSearchParams();
   params.set("hide_empty_prs", String(hideEmptyPrs));
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
   return apiGet<RepoListResponse>(`/spaces/${installationId}/repos?${params}`);
 }
 

@@ -197,9 +197,10 @@ class AdminRepoItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     full_name: str
+    # Always null on the overview: REST does not report a count without listing pulls.
+    # The repository page lists one page of pulls instead.
     open_pr_count: int | None
-    # True/False when presence is known. None when GitHub could not be asked.
-    # Exact totals set this from open_pr_count; a presence probe leaves the count null.
+    # True/False when a one-item probe answered. None when GitHub could not be asked.
     has_open_prs: bool | None = None
     open_findings: AdminOpenFindings
     last_run_at: datetime | None = None
@@ -209,6 +210,10 @@ class AdminRepoListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[AdminRepoItem]
+    limit: int
+    offset: int
+    has_next: bool
+    total_count: int | None = None
 
 
 class AdminRepoPRItem(BaseModel):

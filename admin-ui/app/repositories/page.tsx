@@ -22,6 +22,7 @@ type FindingSearchState = "idle" | "searching" | "found" | "not_found" | "error"
 
 const FINDINGS_LIMIT = 50;
 const PRS_LIMIT = 50;
+const REPOS_LIMIT = 50;
 
 function detailRequestKey(
   spaceId: number,
@@ -61,6 +62,9 @@ function RepositoriesContent() {
   const [repos, setRepos] = useState<RepoItem[]>([]);
   const [reposState, setReposState] = useState<LoadState>("idle");
   const [reposError, setReposError] = useState<string | null>(null);
+  const [reposOffset, setReposOffset] = useState(0);
+  const [reposHasNext, setReposHasNext] = useState(false);
+  const [reposTotal, setReposTotal] = useState<number | null>(null);
   const [hideEmptyPrs, setHideEmptyPrs] = useState(true);
 
   const selectedRepo = searchParams.get("repo");
@@ -135,13 +139,15 @@ function RepositoriesContent() {
   }, [me, searchParams]);
 
   const loadRepos = useCallback(
-    (space: SpaceItem, hideEmpty: boolean, requestGen: number) => {
+    (space: SpaceItem, hideEmpty: boolean, offset: number, requestGen: number) => {
       setReposState("loading");
       setReposError(null);
-      getSpaceRepos(space.id, hideEmpty)
+      getSpaceRepos(space.id, hideEmpty, REPOS_LIMIT, offset)
         .then((res) => {
           if (requestGen !== reposRequestGen.current) return;
           setRepos(res.items);
+          setReposHasNext(res.has_next);
+          setReposTotal(res.total_count);
           setReposState("loaded");
         })
         .catch((err) => {
@@ -157,8 +163,8 @@ function RepositoriesContent() {
     if (!selectedSpace || selectedRepo) return;
     reposRequestGen.current += 1;
     const currentGen = reposRequestGen.current;
-    loadRepos(selectedSpace, hideEmptyPrs, currentGen);
-  }, [selectedSpace, hideEmptyPrs, loadRepos, selectedRepo]);
+    loadRepos(selectedSpace, hideEmptyPrs, reposOffset, currentGen);
+  }, [selectedSpace, hideEmptyPrs, reposOffset, loadRepos, selectedRepo]);
 
   const loadRepoDetail = useCallback(
     (fullName: string, offset: number, prOffset: number, requestGen: number) => {
@@ -343,6 +349,7 @@ function RepositoriesContent() {
     const id = Number(event.target.value);
     const space = spaces.find((s) => s.id === id);
     if (space) {
+      setReposOffset(0);
       setSelectedSpace(space);
       const params = new URLSearchParams();
       params.set("space", String(space.id));
@@ -351,7 +358,16 @@ function RepositoriesContent() {
   }
 
   function handleToggleHideEmpty() {
+    setReposOffset(0);
     setHideEmptyPrs((prev) => !prev);
+  }
+
+  function handlePrevReposPage() {
+    setReposOffset((prev) => Math.max(0, prev - REPOS_LIMIT));
+  }
+
+  function handleNextReposPage() {
+    if (reposHasNext) setReposOffset((prev) => prev + REPOS_LIMIT);
   }
 
   function formatDate(dateStr: string | null): string {
@@ -719,7 +735,7 @@ function RepositoriesContent() {
                   onChange={handleToggleHideEmpty}
                   className="toggle-input"
                 />
-                <span className="toggle-text">Hide repos without open PRs</span>
+                <span className="toggle-text">Hide repos without open PRs on this page</span>
               </label>
             </div>
           </div>
@@ -742,8 +758,8 @@ function RepositoriesContent() {
               <h2>No repositories</h2>
               <p className="muted">
                 {hideEmptyPrs
-                  ? "No repositories with open PRs found in this space. Disable the filter to see all repositories."
-                  : "No repositories found in this space."}
+                  ? "No repositories with open PRs on this page. Turn the filter off or open another page."
+                  : "No repositories on this page."}
               </p>
             </div>
           )}
@@ -818,6 +834,32 @@ function RepositoriesContent() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {reposState === "loaded" && (reposOffset > 0 || reposHasNext) && (
+            <div className="pagination">
+              <button
+                type="button"
+                className="secondary"
+                onClick={handlePrevReposPage}
+                disabled={reposOffset === 0}
+              >
+                Previous
+              </button>
+              <span className="pagination-info">
+                {reposTotal !== null
+                  ? `${reposOffset + 1}–${Math.min(reposOffset + REPOS_LIMIT, reposTotal)} of ${reposTotal}`
+                  : `page ${reposOffset / REPOS_LIMIT + 1}`}
+              </span>
+              <button
+                type="button"
+                className="secondary"
+                onClick={handleNextReposPage}
+                disabled={!reposHasNext}
+              >
+                Next
+              </button>
             </div>
           )}
         </>

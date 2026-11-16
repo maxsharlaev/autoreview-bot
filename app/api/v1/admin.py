@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import secrets
@@ -16,7 +17,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
-from app.adapters.github import GitHubAppClient, GitHubError, OpenPullSummary
+from app.adapters.github import GitHubAppClient, GitHubError
 from app.api.admin_auth import ADMIN_SESSION_COOKIE, AdminPrincipal, AdminPrincipalDep, require_admin_role
 from app.api.deps import SessionDep
 from app.api.v1.admin_schemas import (
@@ -91,6 +92,7 @@ def mount_admin_api(app: FastAPI) -> None:
 
 _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 50
+_PRESENCE_CONCURRENCY = 8
 _GENERIC_AUTH_ERROR = "invalid credentials"
 _DUMMY_HASH = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 _RATE_LIMIT_ERROR = "too many attempts"
@@ -939,18 +941,43 @@ async def _get_last_run_at(session: Any, full_name: str, owner_id: str | None = 
     return result.scalar_one_or_none()
 
 
+async def _open_pull_presence(client: GitHubAppClient, full_names: list[str]) -> dict[str, bool | None]:
+    """Whether each repository has an open pull request. One REST call per name, no later pages."""
+    semaphore = asyncio.Semaphore(_PRESENCE_CONCURRENCY)
+    presence: dict[str, bool | None] = {}
+
+    async def probe(full_name: str) -> None:
+        owner, repo = full_name.split("/", 1)
+        async with semaphore:
+            try:
+                presence[full_name] = await client.has_open_pull(owner, repo)
+            except GitHubError:
+                logger.warning("open PR presence probe failed for %s", full_name)
+                presence[full_name] = None
+
+    await asyncio.gather(*(probe(full_name) for full_name in full_names))
+    return presence
+
+
 @router.get("/spaces/{installation_id}/repos", response_model=AdminRepoListResponse)
 async def list_space_repos(
     installation_id: int,
     session: SessionDep,
     _: AdminPrincipalDep,
     hide_empty_prs: Annotated[bool, Query()] = True,
+    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> AdminRepoListResponse:
-    """List repositories in a space with open PR counts and open findings by severity.
+    """List one page of repositories in a space.
+
+    Each row records whether the repository has an open pull request, not the count.
+    The full pull-request list is loaded, one page at a time, from the repository detail.
 
     Args:
         installation_id: The GitHub App installation ID (unique per space)
-        hide_empty_prs: If True (default), exclude repos with 0 open PRs
+        hide_empty_prs: If True (default), drop repos on this page that have no open PRs
+        limit: Installation repositories per page. Also the maximum number of presence probes.
+        offset: Must be a multiple of limit. Selects that page of the installation list.
     """
     registry = get_owner_registry()
     if not registry.owners:
@@ -983,8 +1010,13 @@ async def list_space_repos(
     gh_client = GitHubAppClient.from_credentials(
         space_owner_ctx.github, owner_id=space_owner_id, installation_id=installation_id
     )
+    if offset % limit != 0:
+        raise HTTPException(status_code=422, detail="offset must be a multiple of limit")
+
     try:
-        repos = await gh_client.list_installation_repos(installation_id)
+        repos, has_next, total_count = await gh_client.list_installation_repos_page(
+            installation_id, page=(offset // limit) + 1, per_page=limit
+        )
     except GitHubError as exc:
         logger.warning("Failed to list repos for installation %s: %s", installation_id, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
@@ -1000,14 +1032,12 @@ async def list_space_repos(
             continue
         candidates.append((full_name, route.owner_id))
 
-    # One GraphQL totalCount batch per 40 repos. Presence probes run only for
-    # repositories the summary missed, and never walk later PR pages.
-    summaries = await gh_client.open_pull_summaries([full_name for full_name, _owner_id in candidates])
+    presence = await _open_pull_presence(gh_client, [full_name for full_name, _owner_id in candidates])
 
     items: list[AdminRepoItem] = []
     for full_name, owner_id in candidates:
-        summary = summaries.get(full_name, OpenPullSummary())
-        if hide_empty_prs and summary.is_empty:
+        has_open = presence.get(full_name)
+        if hide_empty_prs and has_open is False:
             continue
 
         open_findings = await _get_open_findings_by_severity(session, full_name, owner_id)
@@ -1016,14 +1046,14 @@ async def list_space_repos(
         items.append(
             AdminRepoItem(
                 full_name=full_name,
-                open_pr_count=summary.count,
-                has_open_prs=summary.has_open,
+                open_pr_count=None,
+                has_open_prs=has_open,
                 open_findings=open_findings,
                 last_run_at=last_run_at,
             )
         )
 
-    return AdminRepoListResponse(items=items)
+    return AdminRepoListResponse(items=items, limit=limit, offset=offset, has_next=has_next, total_count=total_count)
 
 
 async def _open_finding_page_offset(
@@ -1122,9 +1152,6 @@ async def get_repo_detail(
     except GitHubError as exc:
         logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
-
-    summaries = await gh_client.open_pull_summaries([full_name])
-    open_prs_count = summaries.get(full_name, OpenPullSummary()).count
 
     open_pr_numbers = {pr.get("number") for pr in open_prs_data if pr.get("number") is not None}
 
@@ -1236,7 +1263,7 @@ async def get_repo_detail(
     return AdminRepoDetailResponse(
         full_name=full_name,
         open_prs=open_prs,
-        open_prs_count=open_prs_count,
+        open_prs_count=None,
         open_prs_has_next=open_prs_has_next,
         pr_limit=pr_limit,
         pr_offset=pr_offset,

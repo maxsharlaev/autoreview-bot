@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import logging
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,38 +32,6 @@ _COMMENT_AUTHOR_LOGINS: dict[str, str] = {}
 
 # Installation ID cache TTL in seconds (1 hour)
 _INSTALLATION_ID_CACHE_TTL = 3600
-# GraphQL aliases per open-PR summary. Each alias is one repository totalCount.
-_OPEN_PR_SUMMARY_BATCH = 40
-_OPEN_PR_PRESENCE_CONCURRENCY = 8
-_REPO_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+\Z")
-
-
-def _valid_full_name(full_name: str) -> bool:
-    owner, separator, repo = full_name.partition("/")
-    return bool(separator) and bool(_REPO_COMPONENT.fullmatch(owner)) and bool(_REPO_COMPONENT.fullmatch(repo))
-
-
-def _open_pr_count_query(full_names: list[str]) -> str:
-    fields: list[str] = []
-    for index, full_name in enumerate(full_names):
-        owner, repo = full_name.split("/", 1)
-        fields.append(
-            f'r{index}: repository(owner: "{owner}", name: "{repo}") '
-            "{ pullRequests(states: [OPEN]) { totalCount } }"
-        )
-    return "query { " + " ".join(fields) + " }"
-
-
-def _graphql_total_count(node: Any) -> int | None:
-    if not isinstance(node, dict):
-        return None
-    pulls = node.get("pullRequests")
-    if not isinstance(pulls, dict):
-        return None
-    count = pulls.get("totalCount")
-    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-        return None
-    return count
 
 
 def _clear_caches() -> None:
@@ -87,25 +53,6 @@ class GitHubError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
-
-
-@dataclass(frozen=True)
-class OpenPullSummary:
-    """How many open pull requests a repository has, or only whether any exist.
-
-    ``count`` is the GraphQL total. ``has_open`` is set from that total, or from a
-    one-item REST probe when the total could not be read. Both stay None when GitHub
-    could not be asked.
-    """
-
-    count: int | None = None
-    has_open: bool | None = None
-
-    @property
-    def is_empty(self) -> bool:
-        if self.count is not None:
-            return self.count == 0
-        return self.has_open is False
 
 
 @dataclass
@@ -717,72 +664,6 @@ class GitHubAppClient:
             raise GitHubError(f"GET pulls -> unexpected body for {owner}/{repo}")
         return bool(batch)
 
-    async def open_pull_summaries(self, full_names: list[str]) -> dict[str, OpenPullSummary]:
-        """Exact open-PR counts for many repositories, falling back to presence.
-
-        Counts come from batched GraphQL ``totalCount`` queries (one request per
-        ``_OPEN_PR_SUMMARY_BATCH`` repositories). A repository the summary misses is
-        probed with a single ``per_page=1`` REST call. A failed probe stays unknown.
-        """
-        ordered: list[str] = []
-        seen: set[str] = set()
-        for name in full_names:
-            if name in seen:
-                continue
-            seen.add(name)
-            ordered.append(name)
-        result = {name: OpenPullSummary() for name in ordered}
-        valid = [name for name in ordered if _valid_full_name(name)]
-        for start in range(0, len(valid), _OPEN_PR_SUMMARY_BATCH):
-            batch = valid[start : start + _OPEN_PR_SUMMARY_BATCH]
-            await self._fill_open_pull_batch(batch, result)
-        return result
-
-    async def _fill_open_pull_batch(self, full_names: list[str], result: dict[str, OpenPullSummary]) -> None:
-        unresolved = list(full_names)
-        try:
-            owner, repo = full_names[0].split("/", 1)
-            token = await self.installation_token(owner, repo)
-            response = await self._request(
-                "POST",
-                f"{API}/graphql",
-                token=token,
-                json={"query": _open_pr_count_query(full_names)},
-                _evict_on_401=True,
-            )
-            payload = response.json()
-            data = payload.get("data") if isinstance(payload, dict) else None
-            if not isinstance(data, dict):
-                data = {}
-            still: list[str] = []
-            for index, name in enumerate(full_names):
-                count = _graphql_total_count(data.get(f"r{index}"))
-                if count is None:
-                    still.append(name)
-                    continue
-                result[name] = OpenPullSummary(count=count, has_open=count > 0)
-            unresolved = still
-        except GitHubError as exc:
-            logger.warning("open PR summary query failed (%s); probing presence", exc.status_code)
-        if unresolved:
-            await self._probe_open_pull_presence(unresolved, result)
-
-    async def _probe_open_pull_presence(self, full_names: list[str], result: dict[str, OpenPullSummary]) -> None:
-        semaphore = asyncio.Semaphore(_OPEN_PR_PRESENCE_CONCURRENCY)
-
-        async def probe(name: str) -> None:
-            owner, repo = name.split("/", 1)
-            async with semaphore:
-                try:
-                    has_open = await self.has_open_pull(owner, repo)
-                except GitHubError:
-                    logger.warning("open PR presence probe failed for %s", name)
-                    result[name] = OpenPullSummary()
-                    return
-            result[name] = OpenPullSummary(has_open=has_open)
-
-        await asyncio.gather(*(probe(name) for name in full_names))
-
     async def list_app_installations(self) -> list[dict[str, Any]]:
         """List all installations accessible to the authenticated GitHub App.
 
@@ -809,11 +690,7 @@ class GitHubAppClient:
             page += 1
         return installations
 
-    async def list_installation_repos(self, installation_id: int) -> list[dict[str, Any]]:
-        """List repositories accessible to a specific installation.
-
-        Returns repository objects with full_name, visibility, etc.
-        """
+    async def _installation_access_token(self, installation_id: int) -> str:
         app_id = self._app_id()
         private_key = self._private_key_pem()
         if not app_id or not private_key.strip():
@@ -822,41 +699,58 @@ class GitHubAppClient:
         cache_key = (app_id, installation_id)
         if cache_key in _INSTALLATION_TOKEN_CACHE:
             token, expires_at = _INSTALLATION_TOKEN_CACHE[cache_key]
-            if time.time() >= expires_at - 60:
-                token = None
-        else:
-            token = None
+            if time.time() < expires_at - 60:
+                return token
 
-        if token is None:
+        response = await self._request(
+            "POST",
+            f"{API}/app/installations/{installation_id}/access_tokens",
+            token=self._jwt(),
+        )
+        data = response.json()
+        token = data["token"]
+        _INSTALLATION_TOKEN_CACHE[cache_key] = (token, time.time() + 3500)
+        return token
+
+    async def list_installation_repos_page(
+        self, installation_id: int, *, page: int, per_page: int
+    ) -> tuple[list[dict[str, Any]], bool, int | None]:
+        """One page of installation repositories, whether another page exists, and total_count."""
+        token = await self._installation_access_token(installation_id)
+        try:
             response = await self._request(
-                "POST",
-                f"{API}/app/installations/{installation_id}/access_tokens",
-                token=self._jwt(),
+                "GET",
+                f"{API}/installation/repositories",
+                token=token,
+                params={"per_page": per_page, "page": page},
             )
-            data = response.json()
-            token = data["token"]
-            _INSTALLATION_TOKEN_CACHE[cache_key] = (token, time.time() + 3500)
+        except GitHubError as exc:
+            if exc.status_code == 401:
+                _INSTALLATION_TOKEN_CACHE.pop((self._app_id(), installation_id), None)
+            raise
+        data = response.json()
+        batch = data.get("repositories", [])
+        if not isinstance(batch, list):
+            raise GitHubError(f"GET installation/repositories -> unexpected body for {installation_id}")
+        total = data.get("total_count")
+        total_count = total if isinstance(total, int) and not isinstance(total, bool) else None
+        link = response.headers.get("link") or ""
+        has_next = 'rel="next"' in link or (not link and len(batch) == per_page)
+        return batch, has_next, total_count
 
+    async def list_installation_repos(self, installation_id: int) -> list[dict[str, Any]]:
+        """List repositories accessible to a specific installation.
+
+        Returns repository objects with full_name, visibility, etc.
+        """
         repos: list[dict[str, Any]] = []
         page = 1
         while True:
-            try:
-                response = await self._request(
-                    "GET",
-                    f"{API}/installation/repositories",
-                    token=token,
-                    params={"per_page": 100, "page": page},
-                )
-            except GitHubError as exc:
-                if exc.status_code == 401:
-                    _INSTALLATION_TOKEN_CACHE.pop(cache_key, None)
-                raise
-            data = response.json()
-            batch = data.get("repositories", [])
+            batch, has_next, _total = await self.list_installation_repos_page(installation_id, page=page, per_page=100)
             if not batch:
                 break
             repos.extend(batch)
-            if len(batch) < 100:
+            if not has_next:
                 break
             page += 1
         return repos

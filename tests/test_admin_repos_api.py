@@ -404,7 +404,7 @@ def test_space_repos_uses_correct_owner_client() -> None:
     @classmethod
     def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         captured_installation_ids.append(installation_id)
-        return AsyncMock(list_installation_repos=AsyncMock(return_value=[]))
+        return AsyncMock(list_installation_repos_page=AsyncMock(return_value=([], False, 0)))
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
@@ -571,7 +571,7 @@ def test_space_repos_uses_space_client_for_pr_listing() -> None:
         }
     )
 
-    from app.adapters.github import GitHubAppClient, OpenPullSummary
+    from app.adapters.github import GitHubAppClient
     from app.api.v1 import admin as admin_module
     from app.api.v1.admin_schemas import AdminOpenFindings
 
@@ -581,10 +581,10 @@ def test_space_repos_uses_space_client_for_pr_listing() -> None:
     def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         created_clients.append((owner_id, installation_id))
         mock_client = AsyncMock()
-        mock_client.list_installation_repos = AsyncMock(return_value=[{"full_name": "beta-inc/repo1", "name": "repo1"}])
-        mock_client.open_pull_summaries = AsyncMock(
-            return_value={"beta-inc/repo1": OpenPullSummary(count=1, has_open=True)}
+        mock_client.list_installation_repos_page = AsyncMock(
+            return_value=([{"full_name": "beta-inc/repo1", "name": "repo1"}], False, 1)
         )
+        mock_client.has_open_pull = AsyncMock(return_value=True)
         return mock_client
 
     async def mock_get_open_findings_by_severity(
@@ -715,7 +715,7 @@ def test_space_repos_scopes_findings_to_owner() -> None:
         }
     )
 
-    from app.adapters.github import GitHubAppClient, OpenPullSummary
+    from app.adapters.github import GitHubAppClient
     from app.api.v1 import admin as admin_module
     from app.api.v1.admin_schemas import AdminOpenFindings
 
@@ -724,10 +724,10 @@ def test_space_repos_scopes_findings_to_owner() -> None:
     @classmethod
     def mock_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         mock_client = AsyncMock()
-        mock_client.list_installation_repos = AsyncMock(return_value=[{"full_name": "beta-inc/repo1", "name": "repo1"}])
-        mock_client.open_pull_summaries = AsyncMock(
-            return_value={"beta-inc/repo1": OpenPullSummary(count=1, has_open=True)}
+        mock_client.list_installation_repos_page = AsyncMock(
+            return_value=([{"full_name": "beta-inc/repo1", "name": "repo1"}], False, 1)
         )
+        mock_client.has_open_pull = AsyncMock(return_value=True)
         return mock_client
 
     async def tracking_get_open_findings(sess: Any, full_name: str, owner_id: str | None = None) -> AdminOpenFindings:
@@ -828,7 +828,6 @@ def test_repo_detail_finding_id_resolves_offset_in_one_github_call() -> None:
     def from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         mock_client = AsyncMock()
         mock_client.list_open_pulls_page = list_open_pulls_page
-        mock_client.open_pull_summaries = AsyncMock(return_value={})
         return mock_client
 
     with (
@@ -846,36 +845,39 @@ def test_repo_detail_finding_id_resolves_offset_in_one_github_call() -> None:
         assert list_open_pulls_page.await_args.kwargs == {"page": 1, "per_page": 50}
 
 
-def test_space_repos_uses_one_summary_and_skips_empty() -> None:
-    """Overview asks for counts once and does not list every open pull request."""
+def test_space_repos_probes_only_the_requested_page() -> None:
+    """Overview asks whether each repo on this page has an open PR, and never lists pulls."""
     session = FakeSession()
     redis = FakeRedis()
     settings = _settings()
     installations, inst_map = _make_installations([(1001, "acme-corp", "Organization", "default")])
     registry = FakeOwnerRegistry()
 
-    from app.adapters.github import GitHubAppClient, OpenPullSummary
+    from app.adapters.github import GitHubAppClient, GitHubError
     from app.api.v1 import admin as admin_module
     from app.api.v1.admin_schemas import AdminOpenFindings
 
-    repos = [
+    page = [
         {"full_name": "acme/with-prs"},
         {"full_name": "acme/empty"},
         {"full_name": "acme/unknown"},
     ]
-    summaries = AsyncMock(
-        return_value={
-            "acme/with-prs": OpenPullSummary(count=4, has_open=True),
-            "acme/empty": OpenPullSummary(count=0, has_open=False),
-            "acme/unknown": OpenPullSummary(has_open=True),
-        }
-    )
+    listed = AsyncMock(return_value=(page, True, 1000))
+
+    async def presence(owner: str, repo: str) -> bool:
+        if repo == "empty":
+            return False
+        if repo == "unknown":
+            raise GitHubError("down", status_code=502)
+        return True
+
+    probed = AsyncMock(side_effect=presence)
 
     @classmethod
     def from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         mock_client = AsyncMock()
-        mock_client.list_installation_repos = AsyncMock(return_value=repos)
-        mock_client.open_pull_summaries = summaries
+        mock_client.list_installation_repos_page = listed
+        mock_client.has_open_pull = probed
         mock_client.list_open_pulls = AsyncMock(side_effect=AssertionError("overview listed pulls"))
         return mock_client
 
@@ -896,16 +898,19 @@ def test_space_repos_uses_one_summary_and_skips_empty() -> None:
     ):
         client = _client(session, redis, settings)
         _login_as_root(client)
-        resp = client.get("/api/v1/admin/spaces/1001/repos")
+        resp = client.get("/api/v1/admin/spaces/1001/repos?limit=50&offset=50")
         assert resp.status_code == 200
         body = resp.json()
         by_name = {item["full_name"]: item for item in body["items"]}
         assert set(by_name) == {"acme/with-prs", "acme/unknown"}
-        assert by_name["acme/with-prs"]["open_pr_count"] == 4
+        assert by_name["acme/with-prs"]["open_pr_count"] is None
         assert by_name["acme/with-prs"]["has_open_prs"] is True
-        assert by_name["acme/unknown"]["open_pr_count"] is None
-        assert by_name["acme/unknown"]["has_open_prs"] is True
-        summaries.assert_awaited_once_with(["acme/with-prs", "acme/empty", "acme/unknown"])
+        assert by_name["acme/unknown"]["has_open_prs"] is None
+        assert body["has_next"] is True
+        assert body["total_count"] == 1000
+        assert body["offset"] == 50
+        listed.assert_awaited_once_with(1001, page=2, per_page=50)
+        assert probed.await_count == 3
 
 
 def test_repo_detail_lists_one_pull_page() -> None:
@@ -926,7 +931,7 @@ def test_repo_detail_lists_one_pull_page() -> None:
 
     session.execute = execute  # type: ignore[method-assign]
 
-    from app.adapters.github import GitHubAppClient, OpenPullSummary
+    from app.adapters.github import GitHubAppClient
 
     page = AsyncMock(return_value=([{"number": 8, "title": "Later", "head": {"sha": "abcdef0"}}], True))
 
@@ -935,9 +940,6 @@ def test_repo_detail_lists_one_pull_page() -> None:
         mock_client = AsyncMock()
         mock_client.list_open_pulls_page = page
         mock_client.list_open_pulls = AsyncMock(side_effect=AssertionError("detail listed every pull"))
-        mock_client.open_pull_summaries = AsyncMock(
-            return_value={"acme/repo": OpenPullSummary(count=80, has_open=True)}
-        )
         return mock_client
 
     with (
@@ -953,7 +955,7 @@ def test_repo_detail_lists_one_pull_page() -> None:
         body = resp.json()
         assert body["pr_offset"] == 50
         assert body["pr_limit"] == 50
-        assert body["open_prs_count"] == 80
+        assert body["open_prs_count"] is None
         assert body["open_prs_has_next"] is True
         assert [item["number"] for item in body["open_prs"]] == [8]
         page.assert_awaited_once_with("acme", "repo", page=2, per_page=50)

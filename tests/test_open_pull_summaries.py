@@ -1,10 +1,10 @@
-"""Open-PR summaries: GraphQL totals, with a one-page presence fallback."""
+"""Installation repo pages and the one-call open-PR presence probe."""
 
 from __future__ import annotations
 
 import httpx
 import pytest
-from app.adapters.github import GitHubAppClient, GitHubError
+from app.adapters.github import GitHubAppClient
 
 
 def _client() -> GitHubAppClient:
@@ -18,75 +18,41 @@ def _client() -> GitHubAppClient:
 
 
 @pytest.mark.asyncio
-async def test_summary_reads_batched_totals() -> None:
+async def test_installation_repo_page_does_not_walk_further_pages() -> None:
     client = _client()
-    calls: list[tuple[str, str]] = []
+    calls: list[dict] = []
+
+    async def access_token(installation_id: int) -> str:
+        assert installation_id == 7
+        return "token"
 
     async def request(method: str, url: str, **kwargs):  # noqa: ANN003
-        calls.append((method, url))
-        assert method == "POST"
-        assert url.endswith("/graphql")
-        query = kwargs["json"]["query"]
-        assert "acme/one" not in query
-        assert 'owner: "acme"' in query
-        assert 'name: "one"' in query
-        assert 'name: "two"' in query
+        calls.append(kwargs["params"])
         return httpx.Response(
             200,
-            json={
-                "data": {
-                    "r0": {"pullRequests": {"totalCount": 3}},
-                    "r1": {"pullRequests": {"totalCount": 0}},
-                }
-            },
+            json={"total_count": 1000, "repositories": [{"full_name": "acme/one"}]},
+            headers={"link": '<https://api.github.com/installation/repositories?page=3>; rel="next"'},
         )
 
+    client._installation_access_token = access_token  # type: ignore[method-assign]
     client._request = request  # type: ignore[method-assign]
-    summaries = await client.open_pull_summaries(["acme/one", "acme/two", "acme/one"])
-    assert calls == [("POST", "https://api.github.com/graphql")]
-    assert summaries["acme/one"].count == 3
-    assert summaries["acme/one"].has_open is True
-    assert summaries["acme/two"].is_empty is True
+    batch, has_next, total = await client.list_installation_repos_page(7, page=2, per_page=50)
+    assert calls == [{"per_page": 50, "page": 2}]
+    assert [item["full_name"] for item in batch] == ["acme/one"]
+    assert has_next is True
+    assert total == 1000
 
 
 @pytest.mark.asyncio
-async def test_summary_probes_presence_when_graphql_misses_a_repo() -> None:
-    client = _client()
-    calls: list[str] = []
-
-    async def request(method: str, url: str, **kwargs):  # noqa: ANN003
-        calls.append(url)
-        if url.endswith("/graphql"):
-            return httpx.Response(
-                200,
-                json={"data": {"r0": None, "r1": {"pullRequests": {"totalCount": 2}}}, "errors": [{"path": ["r0"]}]},
-            )
-        assert kwargs["params"]["per_page"] == 1
-        return httpx.Response(200, json=[{"number": 1}])
-
-    client._request = request  # type: ignore[method-assign]
-    summaries = await client.open_pull_summaries(["acme/missing", "acme/known"])
-    assert summaries["acme/known"].count == 2
-    assert summaries["acme/missing"].count is None
-    assert summaries["acme/missing"].has_open is True
-    assert any(url.endswith("/repos/acme/missing/pulls") for url in calls)
-    assert not any(url.endswith("/repos/acme/known/pulls") for url in calls)
-
-
-@pytest.mark.asyncio
-async def test_summary_probes_presence_when_graphql_fails() -> None:
+async def test_presence_probe_requests_a_single_pull() -> None:
     client = _client()
 
     async def request(method: str, url: str, **kwargs):  # noqa: ANN003
-        if url.endswith("/graphql"):
-            raise GitHubError("down", status_code=502)
+        assert kwargs["params"] == {"state": "open", "per_page": 1, "page": 1}
         return httpx.Response(200, json=[])
 
     client._request = request  # type: ignore[method-assign]
-    summaries = await client.open_pull_summaries(["acme/repo"])
-    assert summaries["acme/repo"].count is None
-    assert summaries["acme/repo"].has_open is False
-    assert summaries["acme/repo"].is_empty is True
+    assert await client.has_open_pull("acme", "repo") is False
 
 
 @pytest.mark.asyncio
