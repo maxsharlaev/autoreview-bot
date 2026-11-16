@@ -735,7 +735,12 @@ class GitHubAppClient:
         total = data.get("total_count")
         total_count = total if isinstance(total, int) and not isinstance(total, bool) else None
         link = response.headers.get("link") or ""
-        has_next = 'rel="next"' in link or (not link and len(batch) == per_page)
+        # A full page without a Link header is not another page when total_count
+        # already ends on this one (exactly 50 repos, per_page 50).
+        if total_count is not None:
+            has_next = page * per_page < total_count
+        else:
+            has_next = 'rel="next"' in link or (not link and len(batch) == per_page)
         return batch, has_next, total_count
 
     async def list_installation_repos(self, installation_id: int) -> list[dict[str, Any]]:

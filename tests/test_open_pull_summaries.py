@@ -44,6 +44,25 @@ async def test_installation_repo_page_does_not_walk_further_pages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exact_full_page_without_link_has_no_next_page() -> None:
+    client = _client()
+    repos = [{"full_name": f"acme/repo-{index}"} for index in range(50)]
+
+    async def access_token(installation_id: int) -> str:
+        return "token"
+
+    async def request(method: str, url: str, **kwargs):  # noqa: ANN003
+        return httpx.Response(200, json={"total_count": 50, "repositories": repos})
+
+    client._installation_access_token = access_token  # type: ignore[method-assign]
+    client._request = request  # type: ignore[method-assign]
+    batch, has_next, total = await client.list_installation_repos_page(7, page=1, per_page=50)
+    assert len(batch) == 50
+    assert has_next is False
+    assert total == 50
+
+
+@pytest.mark.asyncio
 async def test_presence_probe_requests_a_single_pull() -> None:
     client = _client()
 
