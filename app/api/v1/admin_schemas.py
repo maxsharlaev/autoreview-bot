@@ -198,6 +198,9 @@ class AdminRepoItem(BaseModel):
 
     full_name: str
     open_pr_count: int | None
+    # True/False when presence is known. None when GitHub could not be asked.
+    # Exact totals set this from open_pr_count; a presence probe leaves the count null.
+    has_open_prs: bool | None = None
     open_findings: AdminOpenFindings
     last_run_at: datetime | None = None
 
@@ -240,6 +243,10 @@ class AdminRepoDetailResponse(BaseModel):
 
     full_name: str
     open_prs: list[AdminRepoPRItem]
+    open_prs_count: int | None = None
+    open_prs_has_next: bool = False
+    pr_limit: int
+    pr_offset: int
     open_findings: list[AdminRepoFindingItem]
     open_findings_count: int
     limit: int

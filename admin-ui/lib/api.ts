@@ -32,6 +32,7 @@ export type OpenFindings = {
 export type RepoItem = {
   full_name: string;
   open_pr_count: number | null;
+  has_open_prs: boolean | null;
   open_findings: OpenFindings;
   last_run_at: string | null;
 };
@@ -60,6 +61,10 @@ export type RepoFindingItem = {
 export type RepoDetailResponse = {
   full_name: string;
   open_prs: RepoPRItem[];
+  open_prs_count: number | null;
+  open_prs_has_next: boolean;
+  pr_limit: number;
+  pr_offset: number;
   open_findings: RepoFindingItem[];
   open_findings_count: number;
   limit: number;
@@ -137,7 +142,9 @@ export function getRepoDetail(
   limit = 50,
   offset = 0,
   findingId?: string | null,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  prLimit = 50,
+  prOffset = 0
 ): Promise<RepoDetailResponse> {
   const params = new URLSearchParams();
   if (installationId !== undefined) {
@@ -145,6 +152,8 @@ export function getRepoDetail(
   }
   params.set("limit", String(limit));
   params.set("offset", String(offset));
+  params.set("pr_limit", String(prLimit));
+  params.set("pr_offset", String(prOffset));
   if (findingId) {
     params.set("finding_id", findingId);
   }

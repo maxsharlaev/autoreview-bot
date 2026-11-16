@@ -11,6 +11,10 @@ describe("getRepoDetail", () => {
     const body = {
       full_name: "acme/repo",
       open_prs: [],
+      open_prs_count: 0,
+      open_prs_has_next: false,
+      pr_limit: 50,
+      pr_offset: 0,
       open_findings: [],
       open_findings_count: 0,
       limit: 50,
@@ -29,6 +33,8 @@ describe("getRepoDetail", () => {
     expect(url).toContain("/repos/acme/repo?");
     expect(url).toContain("finding_id=find-9");
     expect(url).toContain("installation_id=7");
+    expect(url).toContain("pr_limit=50");
+    expect(url).toContain("pr_offset=0");
     expect(init.signal).toBe(controller.signal);
   });
 });

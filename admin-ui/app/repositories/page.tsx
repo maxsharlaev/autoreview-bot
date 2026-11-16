@@ -21,9 +21,22 @@ type LoadState = "idle" | "loading" | "loaded" | "error";
 type FindingSearchState = "idle" | "searching" | "found" | "not_found" | "error";
 
 const FINDINGS_LIMIT = 50;
+const PRS_LIMIT = 50;
 
-function detailRequestKey(spaceId: number, fullName: string, offset: number): string {
-  return `${spaceId}:${fullName}:${offset}`;
+function detailRequestKey(
+  spaceId: number,
+  fullName: string,
+  offset: number,
+  prOffset: number
+): string {
+  return `${spaceId}:${fullName}:${offset}:${prOffset}`;
+}
+
+function openPrLabel(repo: RepoItem): string {
+  if (repo.open_pr_count !== null) return String(repo.open_pr_count);
+  if (repo.has_open_prs === true) return "1+";
+  if (repo.has_open_prs === false) return "0";
+  return "—";
 }
 
 function isAbortError(err: unknown): boolean {
@@ -56,6 +69,7 @@ function RepositoriesContent() {
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [detailError, setDetailError] = useState<string | null>(null);
   const [findingsOffset, setFindingsOffset] = useState(0);
+  const [prsOffset, setPrsOffset] = useState(0);
   const [findingSearchState, setFindingSearchState] = useState<FindingSearchState>("idle");
   const [findingSearchError, setFindingSearchError] = useState<string | null>(null);
 
@@ -70,9 +84,9 @@ function RepositoriesContent() {
   repoDetailRef.current = repoDetail;
   const loadedDetailKeyRef = useRef<string | null>(null);
   const detailRequestKeyRef = useRef<string | null>(null);
-  const loadRepoDetailRef = useRef<(fullName: string, offset: number, requestGen: number) => void>(
-    () => {}
-  );
+  const loadRepoDetailRef = useRef<
+    (fullName: string, offset: number, prOffset: number, requestGen: number) => void
+  >(() => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -147,13 +161,23 @@ function RepositoriesContent() {
   }, [selectedSpace, hideEmptyPrs, loadRepos, selectedRepo]);
 
   const loadRepoDetail = useCallback(
-    (fullName: string, offset: number, requestGen: number) => {
+    (fullName: string, offset: number, prOffset: number, requestGen: number) => {
       if (!selectedSpace) return;
-      detailRequestKeyRef.current = detailRequestKey(selectedSpace.id, fullName, offset);
+      detailRequestKeyRef.current = detailRequestKey(selectedSpace.id, fullName, offset, prOffset);
       setDetailState("loading");
       setDetailError(null);
       const [owner, repo] = fullName.split("/");
-      getRepoDetail(owner, repo, selectedSpace.id, FINDINGS_LIMIT, offset)
+      getRepoDetail(
+        owner,
+        repo,
+        selectedSpace.id,
+        FINDINGS_LIMIT,
+        offset,
+        null,
+        undefined,
+        PRS_LIMIT,
+        prOffset
+      )
         .then((res) => {
           if (requestGen !== detailRequestGen.current) return;
           loadedDetailKeyRef.current = `${selectedSpace.id}:${fullName}`;
@@ -178,17 +202,18 @@ function RepositoriesContent() {
     if (
       repoDetail &&
       repoDetail.full_name === selectedRepo &&
-      repoDetail.offset === findingsOffset
+      repoDetail.offset === findingsOffset &&
+      repoDetail.pr_offset === prsOffset
     ) {
       return;
     }
-    const wantedKey = detailRequestKey(selectedSpace.id, selectedRepo, findingsOffset);
+    const wantedKey = detailRequestKey(selectedSpace.id, selectedRepo, findingsOffset, prsOffset);
     if (detailRequestKeyRef.current === wantedKey) return;
     detailRequestKeyRef.current = wantedKey;
     detailRequestGen.current += 1;
     const currentGen = detailRequestGen.current;
-    loadRepoDetail(selectedRepo, findingsOffset, currentGen);
-  }, [me, selectedSpace, selectedRepo, findingsOffset, loadRepoDetail, findingSearchState, highlightFindingId, repoDetail]);
+    loadRepoDetail(selectedRepo, findingsOffset, prsOffset, currentGen);
+  }, [me, selectedSpace, selectedRepo, findingsOffset, prsOffset, loadRepoDetail, findingSearchState, highlightFindingId, repoDetail]);
 
   const userReady = me !== null;
   const spaceId = selectedSpace?.id;
@@ -248,11 +273,17 @@ function RepositoriesContent() {
 
         const found = res.open_findings.some((finding) => finding.id === findingId);
         detailRequestGen.current += 1;
-        detailRequestKeyRef.current = detailRequestKey(installationId, repoName, res.offset);
+        detailRequestKeyRef.current = detailRequestKey(
+          installationId,
+          repoName,
+          res.offset,
+          res.pr_offset
+        );
         loadedDetailKeyRef.current = `${installationId}:${repoName}`;
         repoDetailRef.current = res;
         lookupResultRef.current = { key: lookupKey, status: found ? "found" : "not_found" };
         setFindingsOffset(res.offset);
+        setPrsOffset(res.pr_offset);
         setRepoDetail(res);
         setDetailState("loaded");
         setFindingSearchState(found ? "found" : "not_found");
@@ -265,7 +296,7 @@ function RepositoriesContent() {
         setFindingsOffset(0);
         detailRequestGen.current += 1;
         const gen = detailRequestGen.current;
-        loadRepoDetailRef.current(repoName, 0, gen);
+        loadRepoDetailRef.current(repoName, 0, 0, gen);
       }
     }
 
@@ -298,6 +329,7 @@ function RepositoriesContent() {
       setDetailState("idle");
       setDetailError(null);
       setFindingsOffset(0);
+      setPrsOffset(0);
       setFindingSearchState("idle");
       setFindingSearchError(null);
       lookupResultRef.current = null;
@@ -375,6 +407,16 @@ function RepositoriesContent() {
     }
   }
 
+  function handlePrevPrPage() {
+    setPrsOffset((prev) => Math.max(0, prev - PRS_LIMIT));
+  }
+
+  function handleNextPrPage() {
+    if (repoDetail?.open_prs_has_next) {
+      setPrsOffset((prev) => prev + PRS_LIMIT);
+    }
+  }
+
   if (!me) {
     return (
       <div className="login-container">
@@ -440,51 +482,82 @@ function RepositoriesContent() {
 
             <section className="section">
               <h2 className="section-title">
-                Open Pull Requests ({repoDetail.open_prs.length})
+                Open Pull Requests
+                {repoDetail.open_prs_count !== null ? ` (${repoDetail.open_prs_count})` : ""}
               </h2>
-              {repoDetail.open_prs.length === 0 ? (
+              {repoDetail.open_prs.length === 0 && prsOffset === 0 ? (
                 <div className="card">
                   <p className="muted">No open pull requests in this repository.</p>
                 </div>
               ) : (
-                <div className="table-container">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>Title</th>
-                        <th>Head</th>
-                        <th>Last Run</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {repoDetail.open_prs.map((pr: RepoPRItem) => (
-                        <tr key={pr.number}>
-                          <td className="mono">
-                            <a
-                              href={`https://github.com/${selectedRepo}/pull/${pr.number}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              #{pr.number}
-                            </a>
-                          </td>
-                          <td>{pr.title}</td>
-                          <td className="mono muted">{pr.head_sha_short || "—"}</td>
-                          <td>
-                            {pr.last_run_status ? (
-                              <span className={runStatusClass(pr.last_run_status)}>
-                                {pr.last_run_status}
-                              </span>
-                            ) : (
-                              <span className="muted">—</span>
-                            )}
-                          </td>
+                <>
+                  <div className="table-container">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Title</th>
+                          <th>Head</th>
+                          <th>Last Run</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {repoDetail.open_prs.map((pr: RepoPRItem) => (
+                          <tr key={pr.number}>
+                            <td className="mono">
+                              <a
+                                href={`https://github.com/${selectedRepo}/pull/${pr.number}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                #{pr.number}
+                              </a>
+                            </td>
+                            <td>{pr.title}</td>
+                            <td className="mono muted">{pr.head_sha_short || "—"}</td>
+                            <td>
+                              {pr.last_run_status ? (
+                                <span className={runStatusClass(pr.last_run_status)}>
+                                  {pr.last_run_status}
+                                </span>
+                              ) : (
+                                <span className="muted">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {(prsOffset > 0 || repoDetail.open_prs_has_next) && (
+                    <div className="pagination">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handlePrevPrPage}
+                        disabled={prsOffset === 0}
+                      >
+                        Previous
+                      </button>
+                      <span className="pagination-info">
+                        {repoDetail.open_prs_count !== null
+                          ? `${prsOffset + 1}–${Math.min(
+                              prsOffset + PRS_LIMIT,
+                              repoDetail.open_prs_count
+                            )} of ${repoDetail.open_prs_count}`
+                          : `page ${prsOffset / PRS_LIMIT + 1}`}
+                      </span>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleNextPrPage}
+                        disabled={!repoDetail.open_prs_has_next}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </section>
 
@@ -703,11 +776,19 @@ function RepositoriesContent() {
                         </button>
                       </td>
                       <td className="col-center">
-                        {repo.open_pr_count !== null ? (
-                          repo.open_pr_count
-                        ) : (
+                        {repo.open_pr_count === null && repo.has_open_prs === null ? (
                           <span className="text-warn" title="GitHub API error">
                             —
+                          </span>
+                        ) : (
+                          <span
+                            title={
+                              repo.open_pr_count === null && repo.has_open_prs
+                                ? "Open pull requests exist; the exact count is unavailable"
+                                : undefined
+                            }
+                          >
+                            {openPrLabel(repo)}
                           </span>
                         )}
                       </td>

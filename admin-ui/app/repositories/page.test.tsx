@@ -65,6 +65,10 @@ function detail(overrides: Partial<RepoDetailResponse> = {}): RepoDetailResponse
   return {
     full_name: "acme/repo",
     open_prs: [],
+    open_prs_count: 0,
+    open_prs_has_next: false,
+    pr_limit: 50,
+    pr_offset: 0,
     open_findings: openFindings,
     open_findings_count: openFindings.length,
     limit: 50,

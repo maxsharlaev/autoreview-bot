@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
-from app.adapters.github import GitHubAppClient, GitHubError
+from app.adapters.github import GitHubAppClient, GitHubError, OpenPullSummary
 from app.api.admin_auth import ADMIN_SESSION_COOKIE, AdminPrincipal, AdminPrincipalDep, require_admin_role
 from app.api.deps import SessionDep
 from app.api.v1.admin_schemas import (
@@ -989,43 +989,41 @@ async def list_space_repos(
         logger.warning("Failed to list repos for installation %s: %s", installation_id, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
 
-    items: list[AdminRepoItem] = []
+    candidates: list[tuple[str, str]] = []
     for repo_data in repos:
         full_name = repo_data.get("full_name") or ""
-        if not full_name:
+        if not full_name or "/" not in full_name:
             continue
 
         route = registry.resolve(full_name, installation_id=installation_id)
         if route.rejected():
             continue
+        candidates.append((full_name, route.owner_id))
 
-        owner_name, repo_name = full_name.split("/", 1)
+    # One GraphQL totalCount batch per 40 repos. Presence probes run only for
+    # repositories the summary missed, and never walk later PR pages.
+    summaries = await gh_client.open_pull_summaries([full_name for full_name, _owner_id in candidates])
 
-        open_pr_count: int | None
-        try:
-            open_prs = await gh_client.list_open_pulls(owner_name, repo_name)
-            open_pr_count = len(open_prs)
-        except GitHubError as exc:
-            logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
-            open_pr_count = None
-
-        if hide_empty_prs and open_pr_count == 0:
+    items: list[AdminRepoItem] = []
+    for full_name, owner_id in candidates:
+        summary = summaries.get(full_name, OpenPullSummary())
+        if hide_empty_prs and summary.is_empty:
             continue
 
-        open_findings = await _get_open_findings_by_severity(session, full_name, route.owner_id)
-        last_run_at = await _get_last_run_at(session, full_name, route.owner_id)
+        open_findings = await _get_open_findings_by_severity(session, full_name, owner_id)
+        last_run_at = await _get_last_run_at(session, full_name, owner_id)
 
         items.append(
             AdminRepoItem(
                 full_name=full_name,
-                open_pr_count=open_pr_count,
+                open_pr_count=summary.count,
+                has_open_prs=summary.has_open,
                 open_findings=open_findings,
                 last_run_at=last_run_at,
             )
         )
 
     return AdminRepoListResponse(items=items)
-
 
 
 async def _open_finding_page_offset(
@@ -1069,8 +1067,10 @@ async def get_repo_detail(
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
     finding_id: Annotated[uuid.UUID | None, Query(description="Open finding to locate; overrides offset")] = None,
+    pr_limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
+    pr_offset: Annotated[int, Query(ge=0)] = 0,
 ) -> AdminRepoDetailResponse:
-    """Get detailed repository info: open PRs and open findings with pagination.
+    """Get detailed repository info: one page of open PRs and open findings.
 
     Args:
         installation_id: Optional GitHub installation ID for routing repos via installation claims.
@@ -1112,13 +1112,21 @@ async def get_repo_detail(
     else:
         gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
 
+    if pr_offset % pr_limit != 0:
+        raise HTTPException(status_code=422, detail="pr_offset must be a multiple of pr_limit")
+
     try:
-        open_prs_data = await gh_client.list_open_pulls(owner, repo)
+        open_prs_data, open_prs_has_next = await gh_client.list_open_pulls_page(
+            owner, repo, page=(pr_offset // pr_limit) + 1, per_page=pr_limit
+        )
     except GitHubError as exc:
         logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
 
-    open_pr_numbers = {pr.get("number") for pr in open_prs_data}
+    summaries = await gh_client.open_pull_summaries([full_name])
+    open_prs_count = summaries.get(full_name, OpenPullSummary()).count
+
+    open_pr_numbers = {pr.get("number") for pr in open_prs_data if pr.get("number") is not None}
 
     owner_ids = _owner_id_filter_set(route.owner_id)
 
@@ -1145,18 +1153,20 @@ async def get_repo_detail(
         select(ReviewRun.pull_request_id, ReviewRun.status, row_num).where(ReviewRun.owner_id.in_(owner_ids)).subquery()
     )
 
-    last_run_status_q = (
-        select(PullRequest.number, ranked_runs.c.status)
-        .join(Repository, PullRequest.repository_id == Repository.id)
-        .join(ranked_runs, ranked_runs.c.pull_request_id == PullRequest.id)
-        .where(
-            Repository.full_name == full_name,
-            PullRequest.number.in_(open_pr_numbers),
-            ranked_runs.c.rn == 1,
+    pr_statuses: dict[Any, Any] = {}
+    if open_pr_numbers:
+        last_run_status_q = (
+            select(PullRequest.number, ranked_runs.c.status)
+            .join(Repository, PullRequest.repository_id == Repository.id)
+            .join(ranked_runs, ranked_runs.c.pull_request_id == PullRequest.id)
+            .where(
+                Repository.full_name == full_name,
+                PullRequest.number.in_(open_pr_numbers),
+                ranked_runs.c.rn == 1,
+            )
         )
-    )
-    result = await session.execute(last_run_status_q)
-    pr_statuses = {row[0]: row[1] for row in result.all()}
+        result = await session.execute(last_run_status_q)
+        pr_statuses = {row[0]: row[1] for row in result.all()}
 
     open_prs: list[AdminRepoPRItem] = []
     for pr_data in open_prs_data:
@@ -1226,6 +1236,10 @@ async def get_repo_detail(
     return AdminRepoDetailResponse(
         full_name=full_name,
         open_prs=open_prs,
+        open_prs_count=open_prs_count,
+        open_prs_has_next=open_prs_has_next,
+        pr_limit=pr_limit,
+        pr_offset=pr_offset,
         open_findings=open_findings,
         open_findings_count=total_findings,
         limit=limit,
