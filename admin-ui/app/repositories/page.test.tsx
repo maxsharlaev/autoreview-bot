@@ -300,3 +300,66 @@ describe("finding deep link", () => {
     expect(calls.filter((call) => call.offset === 50 && !call.findingId)).toHaveLength(0);
   });
 });
+
+describe("repository deep link without spaces", () => {
+  it("shows the spaces error instead of a blank repository page", async () => {
+    api.getSpaces.mockRejectedValue(new Error("github down"));
+    render(<RepositoriesPage />);
+
+    expect(await screen.findByText("Error loading spaces")).toBeTruthy();
+    expect(screen.getByText("github down")).toBeTruthy();
+    expect(screen.queryByText("Searching for finding…")).toBeNull();
+  });
+
+  it("shows the empty-spaces message instead of a blank repository page", async () => {
+    api.getSpaces.mockResolvedValue({ items: [] });
+    render(<RepositoriesPage />);
+
+    expect(await screen.findByText("No spaces found")).toBeTruthy();
+    expect(screen.queryByText("Searching for finding…")).toBeNull();
+  });
+});
+
+describe("repository list loads", () => {
+  it("requests the repository page once when leaving a repository", async () => {
+    nav.params = new URLSearchParams("space=1&repo=acme/repo");
+    const view = render(<RepositoriesPage />);
+    await waitFor(() => expect(api.getSpaces).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(api.getSpaceRepos).not.toHaveBeenCalled();
+
+    nav.params = new URLSearchParams("space=1");
+    view.rerender(<RepositoriesPage />);
+
+    await waitFor(() => expect(api.getSpaceRepos).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(api.getSpaces).toHaveBeenCalledTimes(1);
+    expect(api.getSpaceRepos).toHaveBeenCalledTimes(1);
+    const first = api.getSpaceRepos.mock.calls[0] as unknown[];
+    expect(first[4]).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts the in-flight repository page when the space changes", async () => {
+    nav.params = new URLSearchParams("space=1");
+    let firstSignal: AbortSignal | undefined;
+    api.getSpaceRepos.mockImplementation(
+      (_id: number, _hide?: boolean, _limit?: number, _offset?: number, signal?: AbortSignal) => {
+        firstSignal ??= signal;
+        return new Promise(() => {});
+      }
+    );
+    const view = render(<RepositoriesPage />);
+    await waitFor(() => expect(api.getSpaceRepos).toHaveBeenCalledTimes(1));
+    expect(firstSignal?.aborted).toBe(false);
+
+    nav.params = new URLSearchParams("space=2");
+    view.rerender(<RepositoriesPage />);
+
+    await waitFor(() => expect(api.getSpaceRepos).toHaveBeenCalledTimes(2));
+    expect(firstSignal?.aborted).toBe(true);
+  });
+});

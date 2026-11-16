@@ -40,6 +40,56 @@ function openPrLabel(repo: RepoItem): string {
   return "—";
 }
 
+function pickSpace(items: SpaceItem[], spaceIdParam: string | null): SpaceItem | null {
+  if (items.length === 0) return null;
+  if (spaceIdParam) {
+    return items.find((space) => String(space.id) === spaceIdParam) ?? items[0];
+  }
+  return items[0];
+}
+
+function SpacesNotice({
+  state,
+  error,
+  count,
+}: {
+  state: LoadState;
+  error: string | null;
+  count: number;
+}) {
+  if (state === "loading") {
+    return (
+      <div className="card">
+        <p className="muted">Loading spaces…</p>
+      </div>
+    );
+  }
+  if (state === "error") {
+    return (
+      <div className="card card-error">
+        <h2>Error loading spaces</h2>
+        <p className="error">{error}</p>
+        <p className="muted">
+          The GitHub App installation enumeration failed. Check that the bot has valid App
+          credentials and network access to GitHub.
+        </p>
+      </div>
+    );
+  }
+  if (state === "loaded" && count === 0) {
+    return (
+      <div className="card">
+        <h2>No spaces found</h2>
+        <p className="muted">
+          No GitHub App installations are accessible to this bot. Install the GitHub App on at
+          least one organization or user account.
+        </p>
+      </div>
+    );
+  }
+  return null;
+}
+
 function isAbortError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -106,6 +156,8 @@ function RepositoriesContent() {
     };
   }, [router]);
 
+  const spaceParam = searchParams.get("space");
+
   useEffect(() => {
     if (!me) return;
     let cancelled = false;
@@ -116,17 +168,6 @@ function RepositoriesContent() {
         if (cancelled) return;
         setSpaces(res.items);
         setSpacesState("loaded");
-        const spaceIdParam = searchParams.get("space");
-        if (spaceIdParam) {
-          const found = res.items.find((s) => String(s.id) === spaceIdParam);
-          if (found) {
-            setSelectedSpace(found);
-          } else if (res.items.length > 0) {
-            setSelectedSpace(res.items[0]);
-          }
-        } else if (res.items.length > 0) {
-          setSelectedSpace(res.items[0]);
-        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -136,35 +177,41 @@ function RepositoriesContent() {
     return () => {
       cancelled = true;
     };
-  }, [me, searchParams]);
+  }, [me]);
 
-  const loadRepos = useCallback(
-    (space: SpaceItem, hideEmpty: boolean, offset: number, requestGen: number) => {
-      setReposState("loading");
-      setReposError(null);
-      getSpaceRepos(space.id, hideEmpty, REPOS_LIMIT, offset)
-        .then((res) => {
-          if (requestGen !== reposRequestGen.current) return;
-          setRepos(res.items);
-          setReposHasNext(res.has_next);
-          setReposTotal(res.total_count);
-          setReposState("loaded");
-        })
-        .catch((err) => {
-          if (requestGen !== reposRequestGen.current) return;
-          setReposError(err instanceof Error ? err.message : "Failed to load repositories");
-          setReposState("error");
-        });
-    },
-    []
-  );
+  useEffect(() => {
+    if (spacesState !== "loaded") return;
+    const next = pickSpace(spaces, spaceParam);
+    setSelectedSpace((prev) => (prev?.id === next?.id ? prev : next));
+  }, [spaces, spacesState, spaceParam]);
 
   useEffect(() => {
     if (!selectedSpace || selectedRepo) return;
+    const controller = new AbortController();
     reposRequestGen.current += 1;
     const currentGen = reposRequestGen.current;
-    loadRepos(selectedSpace, hideEmptyPrs, reposOffset, currentGen);
-  }, [selectedSpace, hideEmptyPrs, reposOffset, loadRepos, selectedRepo]);
+    const spaceId = selectedSpace.id;
+    setReposState("loading");
+    setReposError(null);
+    getSpaceRepos(spaceId, hideEmptyPrs, REPOS_LIMIT, reposOffset, controller.signal)
+      .then((res) => {
+        if (currentGen !== reposRequestGen.current || controller.signal.aborted) return;
+        setRepos(res.items);
+        setReposHasNext(res.has_next);
+        setReposTotal(res.total_count);
+        setReposState("loaded");
+      })
+      .catch((err) => {
+        if (controller.signal.aborted || isAbortError(err)) return;
+        if (currentGen !== reposRequestGen.current) return;
+        setReposError(err instanceof Error ? err.message : "Failed to load repositories");
+        setReposState("error");
+      });
+    return () => {
+      controller.abort();
+      reposRequestGen.current += 1;
+    };
+  }, [selectedSpace, hideEmptyPrs, reposOffset, selectedRepo]);
 
   const loadRepoDetail = useCallback(
     (fullName: string, offset: number, prOffset: number, requestGen: number) => {
@@ -454,26 +501,32 @@ function RepositoriesContent() {
           </button>
         </div>
 
-        {isSearchingFinding && (
+        <SpacesNotice state={spacesState} error={spacesError} count={spaces.length} />
+
+        {spacesState === "loaded" && selectedSpace && isSearchingFinding && (
           <div className="card">
             <p className="muted">Searching for finding…</p>
           </div>
         )}
 
-        {detailState === "loading" && !repoDetail && !isSearchingFinding && (
+        {spacesState === "loaded" &&
+          selectedSpace &&
+          detailState === "loading" &&
+          !repoDetail &&
+          !isSearchingFinding && (
           <div className="card">
             <p className="muted">Loading repository details…</p>
           </div>
         )}
 
-        {detailState === "error" && (
+        {spacesState === "loaded" && selectedSpace && detailState === "error" && (
           <div className="card card-error">
             <h2>Error loading repository</h2>
             <p className="error">{detailError}</p>
           </div>
         )}
 
-        {detailState === "loaded" && repoDetail && (
+        {spacesState === "loaded" && selectedSpace && detailState === "loaded" && repoDetail && (
           <>
             {findingSearchFailed && (
               <div className="card card-error">
@@ -680,32 +733,7 @@ function RepositoriesContent() {
 
   return (
     <Shell user={me} pageTitle="Repositories">
-      {spacesState === "loading" && (
-        <div className="card">
-          <p className="muted">Loading spaces…</p>
-        </div>
-      )}
-
-      {spacesState === "error" && (
-        <div className="card card-error">
-          <h2>Error loading spaces</h2>
-          <p className="error">{spacesError}</p>
-          <p className="muted">
-            The GitHub App installation enumeration failed. Check that the bot has valid App
-            credentials and network access to GitHub.
-          </p>
-        </div>
-      )}
-
-      {spacesState === "loaded" && spaces.length === 0 && (
-        <div className="card">
-          <h2>No spaces found</h2>
-          <p className="muted">
-            No GitHub App installations are accessible to this bot. Install the GitHub App on at
-            least one organization or user account.
-          </p>
-        </div>
-      )}
+      <SpacesNotice state={spacesState} error={spacesError} count={spaces.length} />
 
       {spacesState === "loaded" && spaces.length > 0 && (
         <>

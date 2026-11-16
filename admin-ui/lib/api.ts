@@ -134,13 +134,14 @@ export function getSpaceRepos(
   installationId: number,
   hideEmptyPrs = true,
   limit = 50,
-  offset = 0
+  offset = 0,
+  signal?: AbortSignal
 ): Promise<RepoListResponse> {
   const params = new URLSearchParams();
   params.set("hide_empty_prs", String(hideEmptyPrs));
   params.set("limit", String(limit));
   params.set("offset", String(offset));
-  return apiGet<RepoListResponse>(`/spaces/${installationId}/repos?${params}`);
+  return apiGet<RepoListResponse>(`/spaces/${installationId}/repos?${params}`, signal);
 }
 
 export function getRepoDetail(
