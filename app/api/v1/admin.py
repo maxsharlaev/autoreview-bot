@@ -965,17 +965,19 @@ async def list_space_repos(
     session: SessionDep,
     _: AdminPrincipalDep,
     hide_empty_prs: Annotated[bool, Query()] = True,
-    limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int | None, Query(ge=1, le=_MAX_LIMIT)] = None,
+    offset: Annotated[int | None, Query(ge=0)] = None,
 ) -> AdminRepoListResponse:
-    """List one page of repositories in a space.
+    """List repositories in a space.
 
+    Omitting limit returns the whole installation, matching the original contract.
+    Passing limit returns that one page and probes only the repositories on it.
     Each row records whether the repository has an open pull request, not the count.
-    The full pull-request list is loaded, one page at a time, from the repository detail.
+    The pull-request list is loaded, one page at a time, from the repository detail.
 
     Args:
         installation_id: The GitHub App installation ID (unique per space)
-        hide_empty_prs: If True (default), drop repos on this page that have no open PRs
+        hide_empty_prs: If True (default), drop repos in this response that have no open PRs
         limit: Installation repositories per page. Also the maximum number of presence probes.
         offset: Must be a multiple of limit. Selects that page of the installation list.
     """
@@ -1010,13 +1012,27 @@ async def list_space_repos(
     gh_client = GitHubAppClient.from_credentials(
         space_owner_ctx.github, owner_id=space_owner_id, installation_id=installation_id
     )
-    if offset % limit != 0:
-        raise HTTPException(status_code=422, detail="offset must be a multiple of limit")
+    if limit is None:
+        if offset not in (None, 0):
+            raise HTTPException(status_code=422, detail="limit is required when offset is set")
+    else:
+        offset = 0 if offset is None else offset
+        if offset % limit != 0:
+            raise HTTPException(status_code=422, detail="offset must be a multiple of limit")
 
     try:
-        repos, has_next, total_count = await gh_client.list_installation_repos_page(
-            installation_id, page=(offset // limit) + 1, per_page=limit
-        )
+        if limit is None:
+            repos = await gh_client.list_installation_repos(installation_id)
+            has_next = False
+            total_count: int | None = len(repos)
+            response_limit = len(repos)
+            response_offset = 0
+        else:
+            repos, has_next, total_count = await gh_client.list_installation_repos_page(
+                installation_id, page=(offset // limit) + 1, per_page=limit
+            )
+            response_limit = limit
+            response_offset = offset
     except GitHubError as exc:
         logger.warning("Failed to list repos for installation %s: %s", installation_id, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
@@ -1046,14 +1062,19 @@ async def list_space_repos(
         items.append(
             AdminRepoItem(
                 full_name=full_name,
-                open_pr_count=None,
                 has_open_prs=has_open,
                 open_findings=open_findings,
                 last_run_at=last_run_at,
             )
         )
 
-    return AdminRepoListResponse(items=items, limit=limit, offset=offset, has_next=has_next, total_count=total_count)
+    return AdminRepoListResponse(
+        items=items,
+        limit=response_limit,
+        offset=response_offset,
+        has_next=has_next,
+        total_count=total_count,
+    )
 
 
 async def _open_finding_page_offset(

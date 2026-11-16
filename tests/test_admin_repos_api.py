@@ -404,7 +404,7 @@ def test_space_repos_uses_correct_owner_client() -> None:
     @classmethod
     def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         captured_installation_ids.append(installation_id)
-        return AsyncMock(list_installation_repos_page=AsyncMock(return_value=([], False, 0)))
+        return AsyncMock(list_installation_repos=AsyncMock(return_value=[]))
 
     with (
         patch("app.api.admin_auth.get_settings", return_value=settings),
@@ -581,9 +581,7 @@ def test_space_repos_uses_space_client_for_pr_listing() -> None:
     def tracking_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         created_clients.append((owner_id, installation_id))
         mock_client = AsyncMock()
-        mock_client.list_installation_repos_page = AsyncMock(
-            return_value=([{"full_name": "beta-inc/repo1", "name": "repo1"}], False, 1)
-        )
+        mock_client.list_installation_repos = AsyncMock(return_value=[{"full_name": "beta-inc/repo1", "name": "repo1"}])
         mock_client.has_open_pull = AsyncMock(return_value=True)
         return mock_client
 
@@ -724,9 +722,7 @@ def test_space_repos_scopes_findings_to_owner() -> None:
     @classmethod
     def mock_from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
         mock_client = AsyncMock()
-        mock_client.list_installation_repos_page = AsyncMock(
-            return_value=([{"full_name": "beta-inc/repo1", "name": "repo1"}], False, 1)
-        )
+        mock_client.list_installation_repos = AsyncMock(return_value=[{"full_name": "beta-inc/repo1", "name": "repo1"}])
         mock_client.has_open_pull = AsyncMock(return_value=True)
         return mock_client
 
@@ -903,7 +899,7 @@ def test_space_repos_probes_only_the_requested_page() -> None:
         body = resp.json()
         by_name = {item["full_name"]: item for item in body["items"]}
         assert set(by_name) == {"acme/with-prs", "acme/unknown"}
-        assert by_name["acme/with-prs"]["open_pr_count"] is None
+        assert "open_pr_count" not in by_name["acme/with-prs"]
         assert by_name["acme/with-prs"]["has_open_prs"] is True
         assert by_name["acme/unknown"]["has_open_prs"] is None
         assert body["has_next"] is True
@@ -911,6 +907,61 @@ def test_space_repos_probes_only_the_requested_page() -> None:
         assert body["offset"] == 50
         listed.assert_awaited_once_with(1001, page=2, per_page=50)
         assert probed.await_count == 3
+
+
+def test_space_repos_without_limit_returns_the_whole_installation() -> None:
+    """Omitting pagination returns every repository, including those past the first 50."""
+    session = FakeSession()
+    redis = FakeRedis()
+    settings = _settings()
+    installations, inst_map = _make_installations([(1001, "acme-corp", "Organization", "default")])
+    registry = FakeOwnerRegistry()
+
+    from app.adapters.github import GitHubAppClient
+    from app.api.v1 import admin as admin_module
+    from app.api.v1.admin_schemas import AdminOpenFindings
+
+    repos = [{"full_name": f"acme/repo-{index}"} for index in range(51)]
+    listed = AsyncMock(return_value=repos)
+
+    @classmethod
+    def from_credentials(cls, credentials, owner_id="default", installation_id=None, **kwargs):
+        mock_client = AsyncMock()
+        mock_client.list_installation_repos = listed
+        mock_client.has_open_pull = AsyncMock(return_value=True)
+        mock_client.list_installation_repos_page = AsyncMock(
+            side_effect=AssertionError("unpaged request fetched one page")
+        )
+        mock_client.list_open_pulls = AsyncMock(side_effect=AssertionError("overview listed pulls"))
+        return mock_client
+
+    async def findings(sess: Any, full_name: str, owner_id: str | None = None) -> AdminOpenFindings:
+        return AdminOpenFindings()
+
+    async def last_run(sess: Any, full_name: str, owner_id: str | None = None) -> Any:
+        return None
+
+    with (
+        patch("app.api.admin_auth.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_settings", return_value=settings),
+        patch("app.api.v1.admin.get_owner_registry", return_value=registry),
+        patch("app.api.v1.admin._enumerate_all_installations", AsyncMock(return_value=(installations, inst_map))),
+        patch.object(GitHubAppClient, "from_credentials", from_credentials),
+        patch.object(admin_module, "_get_open_findings_by_severity", findings),
+        patch.object(admin_module, "_get_last_run_at", last_run),
+    ):
+        client = _client(session, redis, settings)
+        _login_as_root(client)
+        resp = client.get("/api/v1/admin/spaces/1001/repos")
+        assert resp.status_code == 200
+        body = resp.json()
+        names = [item["full_name"] for item in body["items"]]
+        assert names == [f"acme/repo-{index}" for index in range(51)]
+        assert body["has_next"] is False
+        assert body["total_count"] == 51
+        assert "open_pr_count" not in body["items"][0]
+        assert body["items"][0]["has_open_prs"] is True
+        listed.assert_awaited_once_with(1001)
 
 
 def test_repo_detail_lists_one_pull_page() -> None:

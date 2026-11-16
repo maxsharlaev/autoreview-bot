@@ -192,14 +192,15 @@ class AdminOpenFindings(BaseModel):
 
 
 class AdminRepoItem(BaseModel):
-    """A repository within a space with aggregated counts."""
+    """A repository within a space.
+
+    Open pull requests are a presence flag. REST cannot count them without listing
+    every pull, and the repository page lists one page of pulls instead.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     full_name: str
-    # Always null on the overview: REST does not report a count without listing pulls.
-    # The repository page lists one page of pulls instead.
-    open_pr_count: int | None
     # True/False when a one-item probe answered. None when GitHub could not be asked.
     has_open_prs: bool | None = None
     open_findings: AdminOpenFindings

@@ -34,9 +34,8 @@ function detailRequestKey(
 }
 
 function openPrLabel(repo: RepoItem): string {
-  if (repo.open_pr_count !== null) return String(repo.open_pr_count);
-  if (repo.has_open_prs === true) return "1+";
-  if (repo.has_open_prs === false) return "0";
+  if (repo.has_open_prs === true) return "Yes";
+  if (repo.has_open_prs === false) return "No";
   return "—";
 }
 
@@ -798,7 +797,7 @@ function RepositoriesContent() {
                 <thead>
                   <tr>
                     <th>Repository</th>
-                    <th className="col-center">Open PRs</th>
+                    <th className="col-center">Has open PRs</th>
                     <th className="col-center">P0</th>
                     <th className="col-center">P1</th>
                     <th className="col-center">P2</th>
@@ -820,21 +819,12 @@ function RepositoriesContent() {
                         </button>
                       </td>
                       <td className="col-center">
-                        {repo.open_pr_count === null && repo.has_open_prs === null ? (
-                          <span className="text-warn" title="GitHub API error">
-                            —
-                          </span>
-                        ) : (
-                          <span
-                            title={
-                              repo.open_pr_count === null && repo.has_open_prs
-                                ? "Open pull requests exist; the exact count is unavailable"
-                                : undefined
-                            }
-                          >
-                            {openPrLabel(repo)}
-                          </span>
-                        )}
+                        <span
+                          className={repo.has_open_prs === null ? "text-warn" : undefined}
+                          title={repo.has_open_prs === null ? "GitHub API error" : undefined}
+                        >
+                          {openPrLabel(repo)}
+                        </span>
                       </td>
                       <td className="col-center">
                         <span className={repo.open_findings.P0 > 0 ? "sev-p0" : ""}>

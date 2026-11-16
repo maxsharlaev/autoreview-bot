@@ -31,7 +31,6 @@ export type OpenFindings = {
 
 export type RepoItem = {
   full_name: string;
-  open_pr_count: number | null;
   has_open_prs: boolean | null;
   open_findings: OpenFindings;
   last_run_at: string | null;
