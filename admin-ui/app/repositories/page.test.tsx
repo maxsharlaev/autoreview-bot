@@ -300,6 +300,80 @@ describe("finding deep link", () => {
     expect(findingCalls("find-9")).toHaveLength(1);
     expect(calls.filter((call) => call.offset === 50 && !call.findingId)).toHaveLength(0);
   });
+
+  it("looks the finding up again when the same link is reopened after paging away", async () => {
+    const view = await renderPage();
+    await act(async () => {
+      calls[0]?.resolve(
+        detail({
+          offset: 50,
+          open_findings: [finding("find-9", "Target")],
+          open_findings_count: 120,
+        })
+      );
+    });
+    expect(await screen.findByText("Target")).toBeTruthy();
+
+    nav.params = new URLSearchParams("space=1&repo=acme/repo");
+    view.rerender(<RepositoriesPage />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(calls.some((call) => call.offset === 100 && !call.findingId)).toBe(true));
+    await act(async () => {
+      calls.find((call) => call.offset === 100 && !call.findingId)?.resolve(
+        detail({
+          offset: 100,
+          open_findings: [finding("other", "Elsewhere")],
+          open_findings_count: 120,
+        })
+      );
+    });
+    expect(await screen.findByText("Elsewhere")).toBeTruthy();
+
+    nav.params = new URLSearchParams("space=1&repo=acme/repo&finding=find-9");
+    view.rerender(<RepositoriesPage />);
+
+    await waitFor(() => expect(findingCalls("find-9")).toHaveLength(2));
+    await act(async () => {
+      findingCalls("find-9")[1]?.resolve(
+        detail({
+          offset: 50,
+          open_findings: [finding("find-9", "Target")],
+          open_findings_count: 120,
+        })
+      );
+    });
+    expect(await screen.findByText("Target")).toBeTruthy();
+    expect(document.getElementById("finding-find-9")?.className).toContain("row-highlight");
+  });
+
+  it("does not look the finding up again when the same link returns to its current page", async () => {
+    const view = await renderPage();
+    await act(async () => {
+      calls[0]?.resolve(
+        detail({
+          offset: 50,
+          open_findings: [finding("find-9", "Target")],
+          open_findings_count: 120,
+        })
+      );
+    });
+    expect(await screen.findByText("Target")).toBeTruthy();
+
+    nav.params = new URLSearchParams("space=1&repo=acme/repo");
+    view.rerender(<RepositoriesPage />);
+    nav.params = new URLSearchParams("space=1&repo=acme/repo&finding=find-9");
+    view.rerender(<RepositoriesPage />);
+
+    await waitFor(() => {
+      expect(document.getElementById("finding-find-9")?.className).toContain("row-highlight");
+    });
+    expect(findingCalls("find-9")).toHaveLength(1);
+    expect(screen.queryByText("Searching for finding…")).toBeNull();
+  });
 });
 
 describe("repository deep link without spaces", () => {

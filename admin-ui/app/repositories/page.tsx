@@ -288,7 +288,13 @@ function RepositoriesContent() {
   // Keyed by user / space / repo / finding. Own output (search state, loaded
   // detail) must not retrigger the request (AR-49-008).
   useEffect(() => {
-    if (!userReady || spaceId == null || !selectedRepo || !highlightFindingId) {
+    // A settled lookup is only valid while this deep link stays open. Leaving
+    // it and coming back must search again if the finding is no longer on screen.
+    if (!highlightFindingId) {
+      lookupResultRef.current = null;
+      return;
+    }
+    if (!userReady || spaceId == null || !selectedRepo) {
       return;
     }
 
