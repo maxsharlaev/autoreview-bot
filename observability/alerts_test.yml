@@ -127,3 +127,32 @@ tests:
       - eval_time: 6m
         alertname: OpenPrReviewModelProxyFailureRatio
         exp_alerts: []
+
+  # Four connectivity failures plus one client error is five real attempts and an 80% failure ratio.
+  - interval: 1m
+    input_series:
+      - series: 'model_proxy_model_attempts_total{job="open-pr-review-model-proxy",outcome="timeout"}'
+        values: '0 4 4 4 4 4 4 4 4 4'
+      - series: 'model_proxy_model_attempts_total{job="open-pr-review-model-proxy",outcome="client_error"}'
+        values: '0 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OpenPrReviewModelProxyFailureRatio
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: More than half of recent model attempts failed
+              description: Over the last 10 minutes, more than half of at least 5 real model attempts failed on timeout, transport, upstream 5xx, or a broken stream. Idle (no attempts) does not fire. increase() survives a counter reset. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
+
+  # Client errors keep a minority of connectivity failures from paging.
+  - interval: 1m
+    input_series:
+      - series: 'model_proxy_model_attempts_total{job="open-pr-review-model-proxy",outcome="timeout"}'
+        values: '0 6 12 18 24 30 36 42 48 54'
+      - series: 'model_proxy_model_attempts_total{job="open-pr-review-model-proxy",outcome="client_error"}'
+        values: '0 20 40 60 80 100 120 140 160 180'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OpenPrReviewModelProxyFailureRatio
+        exp_alerts: []

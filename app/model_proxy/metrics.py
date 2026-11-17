@@ -81,6 +81,7 @@ _ATTEMPT_OUTCOME = {
     "upstream_rate_limit": "rate_limit",
     "upstream_quota": "quota",
     "upstream_auth": "upstream_auth",
+    "upstream_status": "client_error",
 }
 _consecutive = 0
 

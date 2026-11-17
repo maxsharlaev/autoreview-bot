@@ -136,6 +136,8 @@ def test_classify_status_keeps_auth_quota_and_rate_limit_apart() -> None:
     assert classify_upstream_status(200, b"{}") == ("ok", "ok")
     assert classify_upstream_status(401, b"nope") == ("upstream_auth", "upstream_auth")
     assert classify_upstream_status(500, b"nope") == ("upstream_5xx", "upstream_5xx")
+    assert classify_upstream_status(400, b"bad request") == ("upstream_status", "client_error")
+    assert classify_upstream_status(404, b"missing") == ("upstream_status", "client_error")
     assert classify_upstream_status(429, b"slow down") == ("upstream_rate_limit", "rate_limit")
     quota = b'{"error":{"code":"insufficient_quota","message":"exceeded your current quota"}}'
     assert classify_upstream_status(429, quota) == ("upstream_quota", "quota")
@@ -236,6 +238,21 @@ def test_proxy_401_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatc
     assert _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_auth") == before + 1
     assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
     assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+
+
+def test_proxy_4xx_counts_as_an_attempt_but_not_a_connectivity_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before = _sample(metrics.MODEL_ATTEMPTS, outcome="client_error")
+    upstream = b'{"error":"invalid_request"}'
+    status, body = _post(monkeypatch, _Status(400, upstream), jid="6" * 32)
+    assert status == 400
+    assert body == upstream
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="client_error") == before + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
 
 
 def test_proxy_5xx_is_a_connectivity_failure_with_a_stable_token(monkeypatch: pytest.MonkeyPatch) -> None:

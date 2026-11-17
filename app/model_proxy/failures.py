@@ -114,8 +114,10 @@ def classify_upstream_status(status: int, body: bytes = b"") -> tuple[str, str]:
     """Return ``(result_label, attempt_outcome)`` for a completed upstream HTTP status.
 
     ``attempt_outcome`` is empty when this response is not a real model attempt
-    (unused today for 1xx). A completed 2xx/3xx/4xx other than 429 is ``ok`` only
-    for statuses below 400. 401 is connectivity, not model success.
+    (unused today for 1xx). Statuses below 400 are ``ok``. 401 and 403 are
+    connectivity evidence, not model success. Other completed 4xx responses are
+    ``client_error`` so they stay in the attempt denominator without counting as
+    a connectivity failure.
     """
     if status < 400:
         return "ok", "ok"
@@ -128,4 +130,4 @@ def classify_upstream_status(status: int, body: bytes = b"") -> tuple[str, str]:
         return "upstream_rate_limit", "rate_limit"
     if status >= 500:
         return "upstream_5xx", "upstream_5xx"
-    return "upstream_status", ""
+    return "upstream_status", "client_error"
