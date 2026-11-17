@@ -217,6 +217,29 @@ def test_run_review_job_classifies_upstream_from_session_log(staged) -> None:
     assert excinfo.value.code == "CODEX_UPSTREAM_UNAVAILABLE"
 
 
+@pytest.mark.parametrize(
+    "log_text",
+    [
+        '{"error":"upstream_5xx","kind":"upstream_5xx"}',
+        '{"error":"idle_timeout","kind":"idle_timeout"}',
+        "stream disconnected before completion",
+    ],
+)
+def test_run_review_job_classifies_upstream_markers_from_session_log(staged, log_text: str) -> None:
+    """5xx, post-header timeout, and Codex's stream-disconnect wording stay upstream failures."""
+    base, job_id, ref = staged
+    fake = FakeDocker()
+    fake.wait_code = 1
+    fake.logs = lambda container_id, tail=200: "opr-review: codex exit 1"  # type: ignore[method-assign]
+    work = base / job_id / ".opr-work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "codex-session.log").write_text(log_text + "\n", encoding="utf-8")
+
+    with pytest.raises(LauncherJobError, match="codex exit 1") as excinfo:
+        run_review_job(job_id=job_id, checkout_ref=ref, proxy_token="opr_job_test_token_ok", client=fake)  # type: ignore[arg-type]
+    assert excinfo.value.code == "CODEX_UPSTREAM_UNAVAILABLE"
+
+
 def test_run_review_job_classifies_quota_from_docker_logs(staged) -> None:
     """Launcher classifies CODEX_QUOTA from docker logs when session log is absent."""
     _, job_id, ref = staged

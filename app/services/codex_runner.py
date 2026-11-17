@@ -76,6 +76,7 @@ def classify_codex_error(message: str) -> str:
             "upstream_5xx",
             "stream_disconnect",
             "idle_timeout",
+            "stream disconnected before completion",
         )
     ):
         if "idle_timeout" in text and "upload_idle" in text and "upstream_" not in text:

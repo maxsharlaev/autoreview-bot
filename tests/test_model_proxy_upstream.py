@@ -238,13 +238,15 @@ def test_proxy_401_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatc
     assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
 
 
-def test_proxy_5xx_is_a_connectivity_failure_and_keeps_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_5xx_is_a_connectivity_failure_with_a_stable_token(monkeypatch: pytest.MonkeyPatch) -> None:
     metrics.reset_model_health_for_tests()
     before = _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_5xx")
-    upstream = b'{"error":"overloaded"}'
-    status, body = _post(monkeypatch, _Status(503, upstream), jid="1" * 32)
+    status, body = _post(monkeypatch, _Status(503, b'{"error":"overloaded"}'), jid="1" * 32)
     assert status == 503
-    assert body == upstream
+    payload = json.loads(body)
+    assert payload["error"] == "upstream_5xx"
+    assert payload["kind"] == "upstream_5xx"
+    assert b"overloaded" not in body
     assert _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_5xx") == before + 1
     assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
 
@@ -259,6 +261,64 @@ def test_stream_break_after_headers_is_not_ok(monkeypatch: pytest.MonkeyPatch) -
     assert _sample(metrics.REQUESTS, result="ok") == before_ok
     assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_fail + 1
     assert _sample(metrics.MODEL_ATTEMPTS, outcome="stream_failed") == before_attempts + 1
+
+
+def test_stream_cancel_after_headers_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    calls = {"n": 0}
+    from app.model_proxy import proxy as proxy_mod
+
+    real = proxy_mod._anext_or_invalidated
+
+    async def cancel_on_next_chunk(aiter, rec, wait):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise asyncio.CancelledError()
+        return await real(aiter, rec, wait)
+
+    monkeypatch.setattr(proxy_mod, "_anext_or_invalidated", cancel_on_next_chunk)
+
+    class _QuietStream(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b"data: hi\n\ndata: more\n\n",
+            )
+
+    with _open_proxy(monkeypatch) as client:
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_QuietStream(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, "4" * 32)
+        try:
+            with pytest.raises((asyncio.CancelledError, concurrent.futures.CancelledError)):
+                with client.stream(
+                    "POST",
+                    "/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    content=b'{"model":"x","stream":true}',
+                ) as response:
+                    assert response.status_code == 200
+                    b"".join(response.iter_bytes())
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+    assert calls["n"] >= 2
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
 
 
 def test_cancelled_request_is_not_classified(monkeypatch: pytest.MonkeyPatch) -> None:

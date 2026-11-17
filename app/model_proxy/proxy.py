@@ -466,6 +466,7 @@ async def forward_responses(
     async def stream_body() -> AsyncIterator[bytes]:
         aiter = response.aiter_bytes()
         result_label, _outcome = classify_upstream_status(response.status_code)
+        cancelled = False
         try:
             while True:
                 try:
@@ -510,10 +511,16 @@ async def forward_responses(
                     return
                 metrics.BYTES.labels(direction="out").inc(accepted)
                 yield chunk
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client gone after headers. Do not record the in-flight status as a success.
+            cancelled = True
+            raise
         finally:
             await _close_upstream()
             store.end_request(rec)
-            if result_label in ("expired", "byte_limit"):
+            if cancelled:
+                result_label = "cancelled"
+            elif result_label in ("expired", "byte_limit"):
                 metrics.REQUESTS.labels(result=result_label).inc()
             else:
                 metrics.note_model_attempt(result_label, time.monotonic() - started)
@@ -526,6 +533,17 @@ async def forward_responses(
                 extra={"job_id": rec.job_id, "kind": result_label},
             )
             metrics.ACTIVE_JOBS.set(store.active_job_count())
+
+    if response.status_code >= 500:
+        # Codex only classifies the body it can log. Keep the status, replace the body
+        # with the stable token so the review becomes CODEX_UPSTREAM_UNAVAILABLE.
+        await _close_upstream()
+        _finish("upstream_5xx")
+        return Response(
+            status_code=response.status_code,
+            content=error_body("upstream_5xx", "upstream_5xx"),
+            media_type="application/json",
+        )
 
     if is_stream:
         # Ownership transfers to stream_body.finally on successful return.
