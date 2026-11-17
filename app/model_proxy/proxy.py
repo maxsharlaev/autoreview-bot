@@ -39,14 +39,36 @@ _STRIP_RESPONSE_HEADERS = _HOP_BY_HOP | {
     "transfer-encoding",
 }
 
-# Responses API terminal success. A clean EOF before this is an incomplete stream.
-_SSE_COMPLETED = (
-    b"event: response.completed",
-    b"event:response.completed",
-    b'"type":"response.completed"',
-    b'"type": "response.completed"',
+# Responses API terminal events. EOF before any of them is a broken stream.
+# completed is a real success; incomplete and failed finished normally and are not connectivity failures.
+_SSE_TERMINALS = ("response.completed", "response.failed", "response.incomplete")
+_SSE_MARKERS = tuple(
+    marker
+    for name in _SSE_TERMINALS
+    for marker in (
+        f"event: {name}".encode(),
+        f"event:{name}".encode(),
+        f'"type":"{name}"'.encode(),
+        f'"type": "{name}"'.encode(),
+    )
 )
-_SSE_HOLD = max(len(marker) for marker in _SSE_COMPLETED) - 1
+_SSE_HOLD = max(len(marker) for marker in _SSE_MARKERS) - 1
+_SSE_TERMINAL_RANK = {"response.completed": 3, "response.failed": 2, "response.incomplete": 1}
+
+
+def _sse_terminal(blob: bytes) -> str:
+    found = ""
+    for name in _SSE_TERMINALS:
+        markers = (
+            f"event: {name}".encode(),
+            f"event:{name}".encode(),
+            f'"type":"{name}"'.encode(),
+            f'"type": "{name}"'.encode(),
+        )
+        rank = _SSE_TERMINAL_RANK[name]
+        if any(marker in blob for marker in markers) and rank > _SSE_TERMINAL_RANK.get(found, 0):
+            found = name
+    return found
 
 
 def allowlist_check(request: Request) -> str | None:
@@ -476,14 +498,15 @@ async def forward_responses(
         aiter = response.aiter_bytes()
         result_label, _outcome = classify_upstream_status(response.status_code)
         cancelled = False
-        completed = False
+        terminal = ""
         tail = b""
 
         def _see(piece: bytes) -> None:
-            nonlocal completed, tail
+            nonlocal terminal, tail
             blob = tail + piece
-            if any(marker in blob for marker in _SSE_COMPLETED):
-                completed = True
+            found = _sse_terminal(blob)
+            if _SSE_TERMINAL_RANK.get(found, 0) > _SSE_TERMINAL_RANK.get(terminal, 0):
+                terminal = found
             tail = blob[-_SSE_HOLD:]
 
         try:
@@ -516,7 +539,11 @@ async def forward_responses(
                 if chunk is None:
                     if not store.still_valid(rec):
                         result_label = "expired"
-                    elif result_label == "ok" and not completed:
+                    elif result_label == "ok" and terminal == "response.incomplete":
+                        result_label = "response_incomplete"
+                    elif result_label == "ok" and terminal == "response.failed":
+                        result_label = "response_failed"
+                    elif result_label == "ok" and terminal != "response.completed":
                         metrics.UPSTREAM_ERRORS.labels(kind="stream_disconnect").inc()
                         result_label = "stream_disconnect"
                     return

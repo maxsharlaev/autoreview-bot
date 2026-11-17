@@ -82,6 +82,8 @@ _ATTEMPT_OUTCOME = {
     "upstream_quota": "quota",
     "upstream_auth": "upstream_auth",
     "upstream_status": "client_error",
+    "response_incomplete": "incomplete",
+    "response_failed": "response_failed",
 }
 _consecutive = 0
 

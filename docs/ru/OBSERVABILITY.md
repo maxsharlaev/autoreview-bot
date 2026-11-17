@@ -118,13 +118,13 @@ model-proxy отдаёт эти метрики на своём `/metrics` (job �
 | Метрика | Значение |
 | --- | --- |
 | `model_proxy_requests_total{result}` | Любой завершённый результат прокси, включая отказ allowlist и токена |
-| `model_proxy_model_attempts_total{outcome}` | Один сэмпл на реальную попытку к провайдеру: `ok`, `timeout`, `transport`, `upstream_5xx`, `stream_failed`, `rate_limit`, `quota`, `upstream_auth`, `client_error` |
+| `model_proxy_model_attempts_total{outcome}` | Один сэмпл на реальную попытку к провайдеру: `ok`, `timeout`, `transport`, `upstream_5xx`, `stream_failed`, `rate_limit`, `quota`, `upstream_auth`, `client_error`, `incomplete`, `response_failed` |
 | `model_proxy_upstream_errors_total{kind}` | Подтип таймаута и транспорта (`connect_timeout`, `pool_timeout`, `read_timeout`, `write_timeout`, `dns`, `tls`, `connect`, `connection_reset`, `stream_disconnect`, …) |
 | `model_proxy_request_duration_seconds` | Длительность той же завершённой попытки |
 | `model_proxy_consecutive_upstream_failures` | Серия timeout / transport / 5xx / оборванного потока внутри процесса. Сбрасывается в 0 при рестарте процесса и при следующем завершённом ответе провайдера со статусом ниже 400 |
 | `model_proxy_last_upstream_success_timestamp_seconds` | Unix-время этого последнего успеха. Остаётся 0, пока такого ответа не было |
 
-`ok` — только завершённый ответ провайдера со статусом ниже 400. `401` провайдера — это `upstream_auth`: сеть до него есть, и это не успешный вызов модели. Квота, rate limit и прочие завершённые 4xx (`client_error`) входят в общее число попыток и не двигают счётчик подряд идущих обрывов. Алерт доли ошибок держит `client_error` только в знаменателе. Если попыток не было, gauge последнего успеха остаётся 0: это неизвестно, а не «здорово» и не авария.
+`ok` — только завершённый ответ провайдера со статусом ниже 400. `401` провайдера — это `upstream_auth`: сеть до него есть, и это не успешный вызов модели. Квота, rate limit, прочие завершённые 4xx (`client_error`) и терминальные SSE-события `response.incomplete` / `response.failed` входят в общее число попыток и не двигают счётчик подряд идущих обрывов. Алерт доли ошибок держит эти исходы только в знаменателе. `stream_failed` — это только SSE, закрытый до любого терминального события. Если попыток не было, gauge последнего успеха остаётся 0: это неизвестно, а не «здорово» и не авария.
 
 Строка старта `model_proxy starting … build=` берёт `OPEN_PR_REVIEW_BUILD`, затем `GIT_COMMIT`, иначе `unknown`. Слитый коммит не доказывает, какой образ сейчас запущен.
 

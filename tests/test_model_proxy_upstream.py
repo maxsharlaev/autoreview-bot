@@ -362,6 +362,42 @@ def test_completed_sse_is_a_successful_model_call(monkeypatch: pytest.MonkeyPatc
     assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
 
 
+@pytest.mark.parametrize(
+    ("event", "result", "outcome"),
+    [
+        ("response.incomplete", "response_incomplete", "incomplete"),
+        ("response.failed", "response_failed", "response_failed"),
+    ],
+)
+def test_terminal_sse_failure_is_not_a_connectivity_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    result: str,
+    outcome: str,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before_result = _sample(metrics.REQUESTS, result=result)
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    before_outcome = _sample(metrics.MODEL_ATTEMPTS, outcome=outcome)
+    payload = _PARTIAL_SSE + f'event: {event}\ndata: {{"type":"{event}"}}\n\n'.encode()
+    status, body = _post(
+        monkeypatch,
+        _Status(200, payload, content_type="text/event-stream"),
+        jid=("c" if event.endswith("incomplete") else "d") * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert event.encode() in body
+    assert _sample(metrics.REQUESTS, result=result) == before_result + 1
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) == before_outcome + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+
+
 def test_stream_cancel_after_headers_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
     metrics.reset_model_health_for_tests()
     metrics.note_model_attempt("upstream_connect_timeout", 0.01)
