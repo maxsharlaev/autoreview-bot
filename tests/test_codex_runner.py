@@ -13,7 +13,7 @@ from app.services.codex_runner import (
     classify_codex_error,
     probe_linux_sandbox,
 )
-from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_UNAVAILABLE
+from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_UNAVAILABLE, CODEX_UPSTREAM_UNAVAILABLE
 
 
 def test_codex_command_auto_runs_safe_and_rejects_dangerous() -> None:
@@ -62,6 +62,26 @@ def test_classify_codex_auth() -> None:
 
 def test_classify_codex_other() -> None:
     assert classify_codex_error("codex CLI is not installed") == CODEX_UNAVAILABLE
+    assert classify_codex_error("upstream_rate_limit") == CODEX_UNAVAILABLE
+    assert classify_codex_error("upload_idle_timeout") == CODEX_UNAVAILABLE
+
+
+def test_classify_codex_upstream_unavailable() -> None:
+    assert classify_codex_error('{"error":"upstream_connect_timeout"}') == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_pool_timeout") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_read_timeout") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_write_timeout") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_timeout") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("idle_timeout") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_dns") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_tls") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_connect") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_reset") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_protocol") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_error") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upstream_5xx") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("stream_disconnect") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("insufficient_quota upstream_timeout") == CODEX_QUOTA
 
 
 def test_emit_codex_line_truncates_json(caplog) -> None:

@@ -82,6 +82,8 @@ services:
     # overrides `env_file`, which would empty them when host env is unset (ARB34-006).
     # Put those (and any PROXY_OWNER_KEY_ENVS-named vars) only in model-proxy.env.
     environment:
+      OPEN_PR_REVIEW_SERVICE: model-proxy
+      OPEN_PR_REVIEW_BUILD: "${OPEN_PR_REVIEW_BUILD:-unknown}"
       PROXY_ISSUER_TOKEN: "${PROXY_ISSUER_TOKEN:-}"
       PROXY_PROVIDER: "${PROXY_PROVIDER:-openai}"
       PROXY_UPSTREAM_HOST: "${PROXY_UPSTREAM_HOST:-api.openai.com}"

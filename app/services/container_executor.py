@@ -32,6 +32,7 @@ from app.services.constants import (
     CODEX_TIMEOUT,
     CODEX_UNAVAILABLE,
     CODEX_UPGRADE_REQUIRED,
+    CODEX_UPSTREAM_UNAVAILABLE,
 )
 from app.services.model_proxy_client import ModelProxyIssuerError, issue_job_token
 
@@ -89,6 +90,7 @@ class ContainerReviewExecutor:
         sandbox: str = "read-only",
         approval_policy: str = "never",
         allow_unsandboxed: bool = False,
+        review_run_id: str = "",
     ) -> str:
         from app.launcher.token import launcher_token_is_configured
 
@@ -98,6 +100,12 @@ class ContainerReviewExecutor:
         _ = openai_api_key  # protocol compat; unused for container (M3)
 
         job_id = uuid.uuid4().hex
+        logger.info(
+            "container review start review_run_id=%s job_id=%s model=%s",
+            review_run_id or "-",
+            job_id,
+            model,
+        )
         base = self._checkout_base
         base.mkdir(parents=True, exist_ok=True)
         job_dir = base / job_id
@@ -139,6 +147,7 @@ class ContainerReviewExecutor:
                     checkout_ref=checkout_ref,
                     proxy_token=proxy_token,
                     timeout_seconds=timeout_seconds,
+                    review_run_id=review_run_id,
                 )
             except asyncio.CancelledError:
                 # ARQ/job cancellation: ask launcher to kill the container, then drop
@@ -256,6 +265,7 @@ class ContainerReviewExecutor:
         checkout_ref: str,
         proxy_token: str,
         timeout_seconds: int,
+        review_run_id: str = "",
     ) -> str:
         headers = {
             "Authorization": f"Bearer {self._launcher_token}",
@@ -265,6 +275,7 @@ class ContainerReviewExecutor:
             "job_id": job_id,
             "checkout_ref": checkout_ref,
             "proxy_token": proxy_token,
+            "review_run_id": review_run_id,
         }
         owns = self._http_client is None
         read_timeout = launcher_http_timeout_seconds(timeout_seconds)
@@ -305,8 +316,15 @@ class ContainerReviewExecutor:
                 CODEX_SANDBOX,
                 CODEX_TIMEOUT,
                 CODEX_UNAVAILABLE,
+                CODEX_UPSTREAM_UNAVAILABLE,
                 CODEX_UPGRADE_REQUIRED,
             }
+            logger.info(
+                "container review failed review_run_id=%s job_id=%s code=%s",
+                review_run_id or "-",
+                job_id,
+                code if code in allowed else CODEX_SANDBOX,
+            )
             raise CodexRunnerError(
                 code if code in allowed else CODEX_SANDBOX,
                 message or f"launcher error HTTP {response.status_code}",

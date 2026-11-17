@@ -333,13 +333,129 @@
       ]
     },
     {
+      "title": "Model attempts / min",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(model_proxy_model_attempts_total[5m])) * 60",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Model proxy upstream errors / min",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(model_proxy_upstream_errors_total[5m])) * 60",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Model proxy duration p95",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 35
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, result) (rate(model_proxy_request_duration_seconds_bucket[10m])))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Consecutive upstream failures",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 35
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max(model_proxy_consecutive_upstream_failures)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Last real model success",
+      "type": "stat",
+      "description": "0 means this process has not observed a completed upstream response below HTTP 400. That is unknown, not healthy.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 35
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "max(model_proxy_last_upstream_success_timestamp_seconds)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow"
+        },
+        "overrides": []
+      }
+    },
+    {
       "title": "Worker / API logs (quota, fail, hang)",
       "type": "logs",
       "gridPos": {
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 43
       },
       "datasource": {
         "type": "loki",
@@ -347,7 +463,7 @@
       },
       "targets": [
         {
-          "expr": "{service=~\"worker|api\"} |~ \"CODEX_QUOTA|CODEX_AUTH|failed:|stale|job done|job start|review_finished|worker ready\"",
+          "expr": "{service=~\"worker|api|model-proxy\"} |~ \"CODEX_QUOTA|CODEX_AUTH|CODEX_UPSTREAM|failed:|stale|job done|job start|review_finished|worker ready|model_proxy outcome|container review\"",
           "refId": "A"
         }
       ]
@@ -369,5 +485,5 @@
   "timezone": "browser",
   "title": "Open PR Review \u2014 workers",
   "uid": "open-pr-review-workers",
-  "version": 1
+  "version": 2
 }

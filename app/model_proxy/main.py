@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import httpx
@@ -42,11 +43,13 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.provider = provider
     app.state.http = client
+    build = os.environ.get("OPEN_PR_REVIEW_BUILD") or os.environ.get("GIT_COMMIT") or "unknown"
     logger.info(
-        "model_proxy starting provider=%s upstream_host=%s max_review=%s",
+        "model_proxy starting provider=%s upstream_host=%s max_review=%s build=%s",
         settings.provider,
         settings.upstream_host,
         settings.max_review_timeout_seconds,
+        build,
     )
     try:
         yield

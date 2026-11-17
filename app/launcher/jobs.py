@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -25,7 +26,15 @@ from app.launcher.timeouts import (
     validate_checkout_orphan_ttl,
 )
 from app.services.codex_runner import classify_codex_error
-from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_UNAVAILABLE
+from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_UNAVAILABLE, CODEX_UPSTREAM_UNAVAILABLE
+
+_RUN_ID_RE = re.compile(r"\A[0-9a-fA-F-]{1,36}\Z")
+
+
+def safe_review_run_id(value: str | None) -> str:
+    """Keep a UUID-shaped id for logs. Anything else is dropped, not rejected."""
+    text = (value or "").strip()
+    return text if _RUN_ID_RE.fullmatch(text) else ""
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +107,7 @@ def run_review_job(
     job_id: str,
     checkout_ref: str,
     proxy_token: str,
+    review_run_id: str = "",
     client: DockerClient | None = None,
 ) -> dict:
     """Create, start, wait, remove a review container. Returns result metadata."""
@@ -105,6 +115,7 @@ def run_review_job(
         raise LauncherJobError("CODEX_SANDBOX", "proxy token missing")
     if not str(proxy_token).strip().startswith("opr_job_"):
         raise LauncherJobError("CODEX_SANDBOX", "proxy token must be an opr_job_ bearer")
+    review_run_id = safe_review_run_id(review_run_id)
     try:
         lifecycle.accept(job_id)
     except RuntimeError as exc:
@@ -139,6 +150,12 @@ def run_review_job(
         sandbox = str(meta.get("sandbox") or "read-only")
         approval_policy = str(meta.get("approval_policy") or "never")
         allow_unsandboxed = bool(meta.get("allow_unsandboxed") or False)
+        logger.info(
+            "container review start review_run_id=%s job_id=%s model=%s",
+            review_run_id or "-",
+            job_id,
+            model,
+        )
 
         base = checkout_base()
         host_config = build_host_config(
@@ -227,8 +244,14 @@ def run_review_job(
             if not full_text:
                 full_text = logs[-16000:] if logs else ""
             code = classify_codex_error(full_text) if full_text.strip() else "CODEX_SANDBOX"
-            if code not in (CODEX_QUOTA, CODEX_AUTH, CODEX_UNAVAILABLE):
+            if code not in (CODEX_QUOTA, CODEX_AUTH, CODEX_UNAVAILABLE, CODEX_UPSTREAM_UNAVAILABLE):
                 code = "CODEX_SANDBOX"
+            logger.info(
+                "container review failed review_run_id=%s job_id=%s code=%s",
+                review_run_id or "-",
+                job_id,
+                code,
+            )
             raise LauncherJobError(
                 code,
                 f"review container exit {status_code}: {snippet[:240]}",

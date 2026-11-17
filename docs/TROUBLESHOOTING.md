@@ -151,7 +151,8 @@ The service only writes to stdout; your log agent ships it. Locally: `./scripts/
 | `CODEX_QUOTA` | error | Model quota or billing. Not retried. |
 | `CODEX_AUTH` | error | Missing or rejected model key. Not retried. |
 | `CODEX_TIMEOUT` | error | One Codex call exceeded `codex.timeout_seconds`. |
-| `CODEX_UNAVAILABLE` | error | Codex failed to start or returned an unclassified error. |
+| `CODEX_UNAVAILABLE` | error | Codex failed to start or returned an unclassified error. Rate limit stays here. |
+| `CODEX_UPSTREAM_UNAVAILABLE` | error | The model connection failed before a completed response: connect, pool, read, or write timeout, overall deadline, idle timeout, DNS, TLS, reset, protocol error, generic transport error, upstream 5xx, or a stream that broke after headers. Not retried. |
 | `GIT_FORBIDDEN` | error | Clone denied. |
 | `GIT_REF_NOT_FOUND` | error | Commit or ref no longer exists. |
 | `GITHUB_UNAVAILABLE` | error | GitHub API or clone failure during the run. |
@@ -159,6 +160,41 @@ The service only writes to stdout; your log agent ships it. Locally: `./scripts/
 | `QUEUE_UNAVAILABLE` | error | Enqueueing to Redis failed. |
 | `REVIEW_TIMEOUT` | error | The job exceeded `WORKER_JOB_TIMEOUT`. |
 | `INTERNAL_ERROR` | error | Unexpected error, or a run whose job was lost. |
+
+<!-- section: model-proxy-connectivity -->
+## Model proxy connectivity
+
+Three different questions, and a `401` from the provider answers only the second:
+
+| Question | What to look at | What it does not mean |
+| --- | --- | --- |
+| Is the process up? | `up{job="open-pr-review-model-proxy"}`, alert `OpenPrReviewModelProxyDown` | Not that a model call works |
+| Can we reach the provider? | A fast `401`/`403` on a real request (`upstream_auth`) | Not a successful generation. Do not treat it as a green health check |
+| Did a real call succeed? | `model_proxy_last_upstream_success_timestamp_seconds` greater than 0, and `model_proxy outcome` with `kind=ok` | A gauge stuck at 0 means no success has been observed in this process. That is unknown, including when the proxy is idle |
+
+A cancelled caller is propagated and is not recorded as a timeout or a successful review. The proxy JSON `error` token is what shows up in the Codex session log and becomes `CODEX_UPSTREAM_UNAVAILABLE`. `kind` is the precise cause. HTTP status stays 504 for a deadline and 502 for transport. After response headers are already on the wire, a broken stream cannot change that status: the log and the metric say `stream_disconnect`, and the review must not be treated as successful.
+
+| `error` token | Cause |
+| --- | --- |
+| `upstream_connect_timeout` | TCP connect deadline |
+| `upstream_pool_timeout` | No free connection from the pool |
+| `upstream_read_timeout` | Read deadline |
+| `upstream_write_timeout` | Write deadline |
+| `upstream_timeout` | Overall deadline, or a timeout whose subtype is not known |
+| `idle_timeout` | Stream went quiet longer than the idle limit |
+| `upstream_dns` | Name resolution failed |
+| `upstream_tls` | TLS handshake failed |
+| `upstream_connect` | Connect failed and the cause was not DNS or TLS |
+| `upstream_reset` | Connection reset or read/write error |
+| `upstream_protocol` | Protocol error |
+| `upstream_error` | Transport error whose cause could not be classified |
+| `stream_disconnect` | Stream broke after headers were sent |
+
+Logs contain the exception type and these tokens, not the URL, the token, the prompt, or the body. Join worker `container review start review_run_id=… job_id=…` to proxy `model_proxy outcome job_id=…`.
+
+Check the running build from the `model_proxy starting … build=` line (`OPEN_PR_REVIEW_BUILD` or `GIT_COMMIT`). The image that is running can be older than the commit that was just merged.
+
+These alerts do not restart anything. Consecutive failures live in process memory and go back to 0 on restart. `increase()` on the attempt counter still works across that restart. Quota stays `CODEX_QUOTA` and is a separate alert.
 
 <!-- section: restarts-and-data -->
 ## Restarts and data

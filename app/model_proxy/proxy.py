@@ -12,6 +12,7 @@ from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.model_proxy import metrics
+from app.model_proxy.failures import classify_transport, classify_upstream_status, error_body
 from app.model_proxy.providers.base import Provider
 from app.model_proxy.settings import ProxySettings
 from app.model_proxy.tokens import JobTokenRecord, TokenStore
@@ -247,6 +248,10 @@ async def _race_primary_or_invalidated[T](
         if invalidated:
             raise TimeoutError("expired")
 
+        if primary_task in done and primary_task.cancelled():
+            # A cancelled upstream task is the caller's cancellation, not a timeout.
+            raise asyncio.CancelledError()
+
         if primary_task in done and not primary_task.cancelled():
             keep_result = True
             return primary_task.result()
@@ -340,7 +345,8 @@ async def forward_responses(
         if value:
             headers[name] = value
 
-    overall_deadline = time.monotonic() + float(settings.upstream_timeout_seconds)
+    started = time.monotonic()
+    overall_deadline = started + float(settings.upstream_timeout_seconds)
     idle = float(settings.stream_idle_timeout_seconds)
     httpx_timeout = httpx.Timeout(
         connect=min(10.0, float(settings.upstream_timeout_seconds)),
@@ -348,6 +354,19 @@ async def forward_responses(
         write=60.0,
         pool=10.0,
     )
+
+    def _finish(result: str, *, error_kind: str | None = None) -> None:
+        if error_kind:
+            metrics.UPSTREAM_ERRORS.labels(kind=error_kind).inc()
+        elapsed = time.monotonic() - started
+        metrics.note_model_attempt(result, elapsed)
+        logger.info(
+            "model_proxy outcome job_id=%s kind=%s duration_ms=%s",
+            rec.job_id,
+            result,
+            int(elapsed * 1000),
+            extra={"job_id": rec.job_id, "kind": result},
+        )
 
     response: httpx.Response | None = None
     try:
@@ -364,11 +383,10 @@ async def forward_responses(
         )
         budget = min(_remaining(overall_deadline), _token_remaining(rec))
         if budget <= 0:
-            metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-            metrics.REQUESTS.labels(result="upstream_timeout").inc()
+            _finish("upstream_timeout", error_kind="timeout")
             return Response(
                 status_code=504,
-                content='{"error":"upstream_timeout"}',
+                content=error_body("upstream_timeout", "overall_timeout"),
                 media_type="application/json",
             )
         try:
@@ -388,22 +406,17 @@ async def forward_responses(
                     content='{"error":"expired"}',
                     media_type="application/json",
                 )
-            metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-            metrics.REQUESTS.labels(result="upstream_timeout").inc()
+            _finish("upstream_timeout", error_kind="timeout")
             return Response(
                 status_code=504,
-                content='{"error":"upstream_timeout"}',
+                content=error_body("upstream_timeout", "overall_timeout"),
                 media_type="application/json",
             )
-    except httpx.TimeoutException:
-        metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-        metrics.REQUESTS.labels(result="upstream_timeout").inc()
-        return Response(status_code=504, content='{"error":"upstream_timeout"}', media_type="application/json")
-    except httpx.HTTPError as exc:
-        metrics.UPSTREAM_ERRORS.labels(kind="http_error").inc()
-        metrics.REQUESTS.labels(result="upstream_error").inc()
-        logger.warning("model_proxy upstream error job_id=%s: %s", rec.job_id, type(exc).__name__)
-        return Response(status_code=502, content='{"error":"upstream_error"}', media_type="application/json")
+    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.info("model_proxy upstream error kind=%s job_id=%s", type(exc).__name__, rec.job_id)
+        error, kind, status_code, metric_kind = classify_transport(exc)
+        _finish(error, error_kind=metric_kind)
+        return Response(status_code=status_code, content=error_body(error, kind), media_type="application/json")
 
     assert response is not None
     metrics.BYTES.labels(direction="in").inc(len(body))
@@ -452,7 +465,7 @@ async def forward_responses(
 
     async def stream_body() -> AsyncIterator[bytes]:
         aiter = response.aiter_bytes()
-        result_label = "ok" if response.status_code < 400 else "upstream_status"
+        result_label, _outcome = classify_upstream_status(response.status_code)
         try:
             while True:
                 try:
@@ -467,6 +480,16 @@ async def forward_responses(
                     else:
                         metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
                         result_label = "upstream_timeout"
+                    return
+                except httpx.HTTPError:
+                    # Headers were already sent. Record the broken stream; the HTTP status cannot change.
+                    metrics.UPSTREAM_ERRORS.labels(kind="stream_disconnect").inc()
+                    result_label = "stream_disconnect"
+                    logger.info(
+                        "model_proxy upstream error kind=%s job_id=%s",
+                        "stream_disconnect",
+                        rec.job_id,
+                    )
                     return
                 if chunk is None:
                     if not store.still_valid(rec):
@@ -490,7 +513,18 @@ async def forward_responses(
         finally:
             await _close_upstream()
             store.end_request(rec)
-            metrics.REQUESTS.labels(result=result_label).inc()
+            if result_label in ("expired", "byte_limit"):
+                metrics.REQUESTS.labels(result=result_label).inc()
+            else:
+                metrics.note_model_attempt(result_label, time.monotonic() - started)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "model_proxy outcome job_id=%s kind=%s duration_ms=%s",
+                rec.job_id,
+                result_label,
+                elapsed_ms,
+                extra={"job_id": rec.job_id, "kind": result_label},
+            )
             metrics.ACTIVE_JOBS.set(store.active_job_count())
 
     if is_stream:
@@ -512,11 +546,10 @@ async def forward_responses(
             except TimeoutError as exc:
                 kind = str(exc) or "timeout"
                 if kind == "idle":
-                    metrics.UPSTREAM_ERRORS.labels(kind="idle_timeout").inc()
-                    metrics.REQUESTS.labels(result="idle_timeout").inc()
+                    _finish("idle_timeout", error_kind="idle_timeout")
                     return Response(
                         status_code=504,
-                        content='{"error":"idle_timeout"}',
+                        content=error_body("idle_timeout", "idle_timeout"),
                         media_type="application/json",
                     )
                 if kind == "expired":
@@ -526,11 +559,19 @@ async def forward_responses(
                         content='{"error":"expired"}',
                         media_type="application/json",
                     )
-                metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-                metrics.REQUESTS.labels(result="upstream_timeout").inc()
+                _finish("upstream_timeout", error_kind="timeout")
                 return Response(
                     status_code=504,
-                    content='{"error":"upstream_timeout"}',
+                    content=error_body("upstream_timeout", "overall_timeout"),
+                    media_type="application/json",
+                )
+            except httpx.HTTPError as exc:
+                error, fail_kind, status_code, metric_kind = classify_transport(exc)
+                _finish(error, error_kind=metric_kind)
+                logger.info("model_proxy upstream error kind=%s job_id=%s", type(exc).__name__, rec.job_id)
+                return Response(
+                    status_code=status_code,
+                    content=error_body(error, fail_kind),
                     media_type="application/json",
                 )
             if chunk is None:
@@ -559,7 +600,15 @@ async def forward_responses(
             metrics.BYTES.labels(direction="out").inc(accepted)
 
         data = b"".join(chunks)
-        metrics.REQUESTS.labels(result="ok" if response.status_code < 400 else "upstream_status").inc()
+        result, _outcome = classify_upstream_status(response.status_code, data)
+        metrics.note_model_attempt(result, time.monotonic() - started)
+        logger.info(
+            "model_proxy outcome job_id=%s kind=%s duration_ms=%s",
+            rec.job_id,
+            result,
+            int((time.monotonic() - started) * 1000),
+            extra={"job_id": rec.job_id, "kind": result},
+        )
         metrics.ACTIVE_JOBS.set(store.active_job_count())
         return Response(
             content=data,

@@ -19,6 +19,7 @@ from app.services.constants import (
     CODEX_SANDBOX,
     CODEX_TIMEOUT,
     CODEX_UNAVAILABLE,
+    CODEX_UPSTREAM_UNAVAILABLE,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,28 @@ def classify_codex_error(message: str) -> str:
         )
     ):
         return CODEX_AUTH
+    if any(
+        needle in text
+        for needle in (
+            "upstream_connect_timeout",
+            "upstream_pool_timeout",
+            "upstream_read_timeout",
+            "upstream_write_timeout",
+            "upstream_timeout",
+            "upstream_dns",
+            "upstream_tls",
+            "upstream_connect",
+            "upstream_reset",
+            "upstream_protocol",
+            "upstream_error",
+            "upstream_5xx",
+            "stream_disconnect",
+            "idle_timeout",
+        )
+    ):
+        if "idle_timeout" in text and "upload_idle" in text and "upstream_" not in text:
+            return CODEX_UNAVAILABLE
+        return CODEX_UPSTREAM_UNAVAILABLE
     return CODEX_UNAVAILABLE
 
 

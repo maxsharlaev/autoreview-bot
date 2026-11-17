@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -12,6 +13,8 @@ from app.services.codex_runner import run_codex
 IN_PROCESS_BACKEND = "in_process"
 CONTAINER_BACKEND = "container"
 SUPPORTED_RUNNER_BACKENDS = frozenset({IN_PROCESS_BACKEND, CONTAINER_BACKEND})
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -33,6 +36,7 @@ class ReviewExecutor(Protocol):
         sandbox: str = "read-only",
         approval_policy: str = "never",
         allow_unsandboxed: bool = False,
+        review_run_id: str = "",
     ) -> str: ...
 
 
@@ -54,8 +58,10 @@ class InProcessReviewExecutor:
         sandbox: str = "read-only",
         approval_policy: str = "never",
         allow_unsandboxed: bool = False,
+        review_run_id: str = "",
     ) -> str:
         _ = owner_id  # container-only; in_process uses openai_api_key directly
+        logger.info("codex start review_run_id=%s model=%s", review_run_id or "-", model)
         # Defense in depth: drop escaping symlinks before in-process Codex sees the tree.
         # Off the event loop so lease heartbeats / other async work are not starved.
         await asyncio.to_thread(neutralize_escaping_symlinks, checkout)

@@ -110,4 +110,26 @@ Ship container stdout with **your** agent. Compose sets `OPEN_PR_REVIEW_SERVICE=
 
 `CODEX_QUOTA` while you retry PRs is empty OpenAI credits: API still returns 202, the worker fails fast. That is not a hang.
 
+<!-- section: model-proxy -->
+## Model proxy
+
+model-proxy exports these on its own `/metrics` (scrape job `open-pr-review-model-proxy`). Labels are bounded (`result`, `outcome`, `kind`). They never include a job id, repository, URL, or error text.
+
+| Metric | Meaning |
+| --- | --- |
+| `model_proxy_requests_total{result}` | Every terminal proxy result, including allowlist and token rejects |
+| `model_proxy_model_attempts_total{outcome}` | One sample per real upstream attempt: `ok`, `timeout`, `transport`, `upstream_5xx`, `stream_failed`, `rate_limit`, `quota`, `upstream_auth` |
+| `model_proxy_upstream_errors_total{kind}` | Timeout and transport subtype (`connect_timeout`, `pool_timeout`, `read_timeout`, `write_timeout`, `dns`, `tls`, `connect`, `connection_reset`, `stream_disconnect`, …) |
+| `model_proxy_request_duration_seconds` | Duration of that same terminal attempt |
+| `model_proxy_consecutive_upstream_failures` | In-process streak of timeout / transport / 5xx / broken stream. Resets to 0 on process restart and on the next completed upstream status below 400 |
+| `model_proxy_last_upstream_success_timestamp_seconds` | Unix time of that last completed success. Stays 0 until one is observed |
+
+`ok` is only a completed upstream response with status below 400. A provider `401` is `upstream_auth`: the path works, and it is not a successful model call. Quota and rate limit are counted, and they do not move the consecutive-failure gauge. No attempts at all leaves the last-success gauge at 0, which means unknown, not healthy and not an outage.
+
+The startup log line `model_proxy starting … build=` reads `OPEN_PR_REVIEW_BUILD`, then `GIT_COMMIT`, otherwise `unknown`. A merged commit is not evidence of what the running container is.
+
+Correlate a failed run by `review_run_id` in the worker log (`container review start review_run_id=… job_id=…`) and the same `job_id` in `model_proxy outcome`. The proxy does not receive the review run id.
+
+Alerts: `OpenPrReviewModelProxyDown` (scrape / process), `OpenPrReviewModelProxyConsecutiveFailures` (3 in a row for 2m), `OpenPrReviewModelProxyFailureRatio` (more than half of at least 5 attempts over 10m, for 2m). Idle traffic does not fire the ratio. Nothing here restarts the proxy.
+
 On-call steps: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
