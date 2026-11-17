@@ -57,13 +57,15 @@ groups:
           description: One or more review_runs have not updated for 15+ minutes. Worker crash, Codex hang, or dead ARQ job.
 
       - alert: OpenPrReviewModelProxyDown
-        expr: absent(up{job="open-pr-review-model-proxy"}) or max(up{job="open-pr-review-model-proxy"}) == 0
+        # in_process sets open_pr_review_model_proxy_expected to 0. Absence or a dead
+        # scrape target is then normal: that deployment has no model-proxy.
+        expr: (absent(up{job="open-pr-review-model-proxy"}) or max(up{job="open-pr-review-model-proxy"}) == 0) and max(open_pr_review_model_proxy_expected) == 1
         for: 2m
         labels:
           severity: page
         annotations:
           summary: model-proxy is not being scraped
-          description: Prometheus has no model-proxy target, or every known target is down. This is process liveness, not model health. An HTTP 401 from the provider only shows that the network path works. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
+          description: This deployment expects model-proxy, and Prometheus has no target or every known target is down. An in-process deployment sets open_pr_review_model_proxy_expected to 0 and does not page. This is process liveness, not model health. An HTTP 401 from the provider only shows that the network path works. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
 
       - alert: OpenPrReviewModelProxyConsecutiveFailures
         expr: max(model_proxy_consecutive_upstream_failures) >= 3

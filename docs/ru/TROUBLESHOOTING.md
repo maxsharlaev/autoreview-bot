@@ -168,7 +168,7 @@ Prometheus должен достучаться до `:8000/metrics` и `:9100/me
 
 | Вопрос | На что смотреть | Чего это не значит |
 | --- | --- | --- |
-| Процесс жив? | `up{job="open-pr-review-model-proxy"}`, алерт `OpenPrReviewModelProxyDown` | Не то, что вызов модели проходит |
+| Процесс жив? | `up{job="open-pr-review-model-proxy"}` при `open_pr_review_model_proxy_expected` равном 1. Алерт `OpenPrReviewModelProxyDown` | Не то, что вызов модели проходит. `in_process` ставит gauge в 0, и отсутствие прокси не поднимает страницу |
 | До провайдера есть сеть? | Быстрый `401`/`403` на реальном запросе (`upstream_auth`) | Не успешная генерация. Это не зелёная проверка здоровья модели |
 | Реальный вызов удался? | `model_proxy_last_upstream_success_timestamp_seconds` больше 0 и `model_proxy outcome` с `kind=ok` | Gauge, застывший на 0, значит, что в этом процессе успеха ещё не было. Это неизвестно, в том числе когда прокси простаивает |
 

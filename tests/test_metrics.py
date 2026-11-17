@@ -2,7 +2,14 @@ import json
 
 from app.api.v1 import api_router
 from app.logging_setup import JsonLogFormatter
-from app.metrics import _hints, record_codex_attempt, record_enqueue, record_review_finished
+from app.metrics import (
+    MODEL_PROXY_EXPECTED,
+    _hints,
+    note_model_proxy_expected,
+    record_codex_attempt,
+    record_enqueue,
+    record_review_finished,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -23,6 +30,15 @@ def test_ops_status_requires_key() -> None:
     client = TestClient(application)
     response = client.get("/api/v1/ops/status")
     assert response.status_code == 401
+
+
+def test_model_proxy_expected_is_only_the_container_backend() -> None:
+    note_model_proxy_expected("container")
+    assert MODEL_PROXY_EXPECTED._value.get() == 1
+    note_model_proxy_expected("in_process")
+    assert MODEL_PROXY_EXPECTED._value.get() == 0
+    note_model_proxy_expected("  container  ")
+    assert MODEL_PROXY_EXPECTED._value.get() == 1
 
 
 def test_record_review_finished_emits_counter() -> None:

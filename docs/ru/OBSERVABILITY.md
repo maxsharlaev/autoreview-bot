@@ -130,6 +130,6 @@ model-proxy отдаёт эти метрики на своём `/metrics` (job �
 
 Связать упавший прогон: `review_run_id` в логе worker (`container review start review_run_id=… job_id=…`) и тот же `job_id` в `model_proxy outcome`. Прокси не получает id прогона.
 
-Алерты: `OpenPrReviewModelProxyDown` (скрейп / процесс), `OpenPrReviewModelProxyConsecutiveFailures` (3 подряд в течение 2 мин), `OpenPrReviewModelProxyFailureRatio` (больше половины из не менее 5 попыток за 10 мин, в течение 2 мин). При отсутствии трафика ratio не срабатывает. Автоматического перезапуска нет.
+Алерты: `OpenPrReviewModelProxyDown` (скрейп / процесс, только когда gauge worker'а `open_pr_review_model_proxy_expected` равен 1), `OpenPrReviewModelProxyConsecutiveFailures` (3 подряд в течение 2 мин), `OpenPrReviewModelProxyFailureRatio` (больше половины из не менее 5 попыток за 10 мин, в течение 2 мин). Контейнерный backend ставит этот gauge в 1. `in_process` ставит 0, поэтому общая цель скрейпа model-proxy не поднимает страницу, когда этого сервиса нет. При отсутствии трафика ratio не срабатывает. Автоматического перезапуска нет.
 
 Шаги дежурного: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

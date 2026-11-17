@@ -10,7 +10,13 @@ from app.adapters.slack import SlackClient
 from app.config import get_app_config, get_settings
 from app.db import create_engine, create_session_factory
 from app.logging_setup import configure_logging
-from app.metrics import WORKER_JOBS_IN_PROGRESS, WORKER_UP, record_review_finished, start_worker_metrics_server
+from app.metrics import (
+    WORKER_JOBS_IN_PROGRESS,
+    WORKER_UP,
+    note_model_proxy_expected,
+    record_review_finished,
+    start_worker_metrics_server,
+)
 from app.models import ReviewRun
 from app.queue import redis_settings
 from app.services.constants import INTERNAL_ERROR, REVIEW_TIMEOUT
@@ -50,6 +56,7 @@ async def startup(ctx: dict) -> None:
     except RuntimeError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
+    note_model_proxy_expected(cfg.codex.runner_backend)
     _load_owner_config()
     start_worker_metrics_server(settings.metrics_port)
     engine = create_engine()

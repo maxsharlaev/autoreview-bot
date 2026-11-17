@@ -168,7 +168,7 @@ Three different questions, and a `401` from the provider answers only the second
 
 | Question | What to look at | What it does not mean |
 | --- | --- | --- |
-| Is the process up? | `up{job="open-pr-review-model-proxy"}`, alert `OpenPrReviewModelProxyDown` | Not that a model call works |
+| Is the process up? | `up{job="open-pr-review-model-proxy"}` while `open_pr_review_model_proxy_expected` is 1. Alert `OpenPrReviewModelProxyDown` | Not that a model call works. `in_process` sets the gauge to 0, and a missing proxy does not page |
 | Can we reach the provider? | A fast `401`/`403` on a real request (`upstream_auth`) | Not a successful generation. Do not treat it as a green health check |
 | Did a real call succeed? | `model_proxy_last_upstream_success_timestamp_seconds` greater than 0, and `model_proxy outcome` with `kind=ok` | A gauge stuck at 0 means no success has been observed in this process. That is unknown, including when the proxy is idle |
 

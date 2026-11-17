@@ -43,6 +43,8 @@ tests:
     input_series:
       - series: 'up{job="open-pr-review-model-proxy",instance="model-proxy:8081"}'
         values: '0x10'
+      - series: 'open_pr_review_model_proxy_expected{job="open-pr-review-worker"}'
+        values: '1x10'
     alert_rule_test:
       - eval_time: 6m
         alertname: OpenPrReviewModelProxyDown
@@ -51,12 +53,38 @@ tests:
               severity: page
             exp_annotations:
               summary: model-proxy is not being scraped
-              description: Prometheus has no model-proxy target, or every known target is down. This is process liveness, not model health. An HTTP 401 from the provider only shows that the network path works. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
+              description: This deployment expects model-proxy, and Prometheus has no target or every known target is down. An in-process deployment sets open_pr_review_model_proxy_expected to 0 and does not page. This is process liveness, not model health. An HTTP 401 from the provider only shows that the network path works. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
 
   - interval: 1m
     input_series:
       - series: 'up{job="open-pr-review-model-proxy",instance="model-proxy:8081"}'
         values: '1x10'
+      - series: 'open_pr_review_model_proxy_expected{job="open-pr-review-worker"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OpenPrReviewModelProxyDown
+        exp_alerts: []
+
+  # in_process: model-proxy is not part of the deployment. No scrape series, no page.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="open-pr-review-worker",instance="worker:9100"}'
+        values: '1x10'
+      - series: 'open_pr_review_model_proxy_expected{job="open-pr-review-worker"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OpenPrReviewModelProxyDown
+        exp_alerts: []
+
+  # in_process with the shared scrape file: the static target is down, and that is expected.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="open-pr-review-model-proxy",instance="model-proxy:8081"}'
+        values: '0x10'
+      - series: 'open_pr_review_model_proxy_expected{job="open-pr-review-worker"}'
+        values: '0x10'
     alert_rule_test:
       - eval_time: 6m
         alertname: OpenPrReviewModelProxyDown

@@ -57,6 +57,10 @@ WORKER_JOBS_IN_PROGRESS = Gauge(
     "Review jobs executing in this worker process",
 )
 WORKER_UP = Gauge("open_pr_review_worker_up", "1 while this worker process is running")
+MODEL_PROXY_EXPECTED = Gauge(
+    "open_pr_review_model_proxy_expected",
+    "1 when reviews use the container backend and model-proxy must be up. 0 for in_process.",
+)
 IN_FLIGHT = Gauge(
     "open_pr_review_review_in_flight",
     "review_runs in pending or running",
@@ -80,6 +84,11 @@ RECENT_FAILURES = Gauge(
 _STALE_MINUTES = 15
 _metrics_server_started = False
 _recent_fail_codes: set[str] = set()
+
+
+def note_model_proxy_expected(runner_backend: str) -> None:
+    """Record whether this deployment runs model-proxy. Only the container backend does."""
+    MODEL_PROXY_EXPECTED.set(1 if (runner_backend or "").strip() == "container" else 0)
 
 
 def start_worker_metrics_server(port: int) -> None:

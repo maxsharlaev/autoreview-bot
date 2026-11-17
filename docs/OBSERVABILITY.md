@@ -130,6 +130,6 @@ The startup log line `model_proxy starting … build=` reads `OPEN_PR_REVIEW_BUI
 
 Correlate a failed run by `review_run_id` in the worker log (`container review start review_run_id=… job_id=…`) and the same `job_id` in `model_proxy outcome`. The proxy does not receive the review run id.
 
-Alerts: `OpenPrReviewModelProxyDown` (scrape / process), `OpenPrReviewModelProxyConsecutiveFailures` (3 in a row for 2m), `OpenPrReviewModelProxyFailureRatio` (more than half of at least 5 attempts over 10m, for 2m). Idle traffic does not fire the ratio. Nothing here restarts the proxy.
+Alerts: `OpenPrReviewModelProxyDown` (scrape / process, only when the worker gauge `open_pr_review_model_proxy_expected` is 1), `OpenPrReviewModelProxyConsecutiveFailures` (3 in a row for 2m), `OpenPrReviewModelProxyFailureRatio` (more than half of at least 5 attempts over 10m, for 2m). The container backend sets that gauge to 1. `in_process` sets it to 0, so the shared model-proxy scrape target does not page when that service is not running. Idle traffic does not fire the ratio. Nothing here restarts the proxy.
 
 On-call steps: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
