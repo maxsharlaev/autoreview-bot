@@ -113,14 +113,16 @@ def classify_transport(exc: BaseException) -> tuple[str, str, int, str]:
 def classify_upstream_status(status: int, body: bytes = b"") -> tuple[str, str]:
     """Return ``(result_label, attempt_outcome)`` for a completed upstream HTTP status.
 
-    ``attempt_outcome`` is empty when this response is not a real model attempt
-    (unused today for 1xx). Statuses below 400 are ``ok``. 401 and 403 are
-    connectivity evidence, not model success. Other completed 4xx responses are
-    ``client_error`` so they stay in the attempt denominator without counting as
-    a connectivity failure.
+    Only a completed 2xx is ``ok``. 3xx is not followed (the client disables
+    redirects) and is ``client_error``, not a model success. 401 and 403 are
+    connectivity evidence. Other completed 4xx responses are ``client_error``
+    so they stay in the attempt denominator without counting as a connectivity
+    failure.
     """
-    if status < 400:
+    if 200 <= status < 300:
         return "ok", "ok"
+    if 300 <= status < 400:
+        return "upstream_redirect", "client_error"
     if status in (401, 403):
         return "upstream_auth", "upstream_auth"
     if status == 429:

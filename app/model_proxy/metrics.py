@@ -57,7 +57,7 @@ CONSECUTIVE_UPSTREAM_FAILURES = Gauge(
 )
 LAST_UPSTREAM_SUCCESS = Gauge(
     "model_proxy_last_upstream_success_timestamp_seconds",
-    "Unix time of the last upstream status below 400. Stays 0 until one is observed.",
+    "Unix time of the last completed 2xx. Stays 0 until one is observed.",
 )
 
 # outcome label -> counts toward the connectivity-failure streak
@@ -82,6 +82,7 @@ _ATTEMPT_OUTCOME = {
     "upstream_quota": "quota",
     "upstream_auth": "upstream_auth",
     "upstream_status": "client_error",
+    "upstream_redirect": "client_error",
     "response_incomplete": "incomplete",
     "response_failed": "response_failed",
 }

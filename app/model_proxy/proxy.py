@@ -509,11 +509,23 @@ async def forward_responses(
                 terminal = found
             tail = blob[-_SSE_HOLD:]
 
+        def _keep_terminal() -> bool:
+            nonlocal result_label
+            if result_label != "ok" or not terminal:
+                return False
+            if terminal == "response.incomplete":
+                result_label = "response_incomplete"
+            elif terminal == "response.failed":
+                result_label = "response_failed"
+            return True
+
         try:
             while True:
                 try:
                     chunk = await _next_chunk(aiter)
                 except TimeoutError as exc:
+                    if _keep_terminal():
+                        return
                     kind = str(exc) or "timeout"
                     if kind == "idle":
                         metrics.UPSTREAM_ERRORS.labels(kind="idle_timeout").inc()
@@ -525,6 +537,8 @@ async def forward_responses(
                         result_label = "upstream_timeout"
                     return
                 except httpx.HTTPError as exc:
+                    if _keep_terminal():
+                        return
                     # Headers were already sent, so the HTTP status cannot change.
                     # The metric still keeps the transport cause (read timeout versus reset).
                     error, _kind, _status_code, metric_kind = classify_transport(exc)
@@ -539,11 +553,7 @@ async def forward_responses(
                 if chunk is None:
                     if not store.still_valid(rec):
                         result_label = "expired"
-                    elif result_label == "ok" and terminal == "response.incomplete":
-                        result_label = "response_incomplete"
-                    elif result_label == "ok" and terminal == "response.failed":
-                        result_label = "response_failed"
-                    elif result_label == "ok" and terminal != "response.completed":
+                    elif not _keep_terminal() and result_label == "ok":
                         metrics.UPSTREAM_ERRORS.labels(kind="stream_disconnect").inc()
                         result_label = "stream_disconnect"
                     return
@@ -561,6 +571,11 @@ async def forward_responses(
                 if accepted < len(chunk):
                     await _close_upstream()
                     result_label = "byte_limit"
+                    return
+                if _keep_terminal():
+                    # The model response is finished. Do not wait for EOF: a late idle
+                    # or reset must not replace this outcome.
+                    await _close_upstream()
                     return
         except (asyncio.CancelledError, GeneratorExit):
             # Client gone after headers. Do not record the in-flight status as a success.
