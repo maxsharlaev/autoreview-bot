@@ -12,6 +12,69 @@ export type LoginResponse = {
   kind: string;
 };
 
+export type SpaceItem = {
+  id: number;
+  login: string;
+  type: "User" | "Organization";
+};
+
+export type SpaceListResponse = {
+  items: SpaceItem[];
+};
+
+export type OpenFindings = {
+  P0: number;
+  P1: number;
+  P2: number;
+  P3: number;
+};
+
+export type RepoItem = {
+  full_name: string;
+  open_pr_count: number | null;
+  has_open_prs: boolean | null;
+  open_findings: OpenFindings;
+  last_run_at: string | null;
+};
+
+export type RepoListResponse = {
+  items: RepoItem[];
+  limit: number;
+  offset: number;
+  has_next: boolean;
+  total_count: number | null;
+};
+
+export type RepoPRItem = {
+  number: number;
+  title: string;
+  head_sha_short: string;
+  last_run_status: string | null;
+};
+
+export type RepoFindingItem = {
+  id: string;
+  stable_id: string;
+  severity: string;
+  title: string;
+  path: string;
+  line: number | null;
+  pull_request_number: number;
+};
+
+export type RepoDetailResponse = {
+  full_name: string;
+  open_prs: RepoPRItem[];
+  open_prs_count: number | null;
+  open_prs_has_next: boolean;
+  pr_limit: number;
+  pr_offset: number;
+  open_findings: RepoFindingItem[];
+  open_findings_count: number;
+  limit: number;
+  offset: number;
+};
+
 async function parseError(res: Response): Promise<string> {
   try {
     const data = await res.json();
@@ -22,12 +85,13 @@ async function parseError(res: Response): Promise<string> {
   }
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "GET",
     credentials: "include",
     headers: { Accept: "application/json" },
     cache: "no-store",
+    signal,
   });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json() as Promise<T>;
@@ -60,4 +124,47 @@ export function login(loginName: string, password: string): Promise<LoginRespons
 
 export function logout(): Promise<void> {
   return apiPost<void>("/logout", {});
+}
+
+export function getSpaces(): Promise<SpaceListResponse> {
+  return apiGet<SpaceListResponse>("/spaces");
+}
+
+export function getSpaceRepos(
+  installationId: number,
+  hideEmptyPrs = true,
+  limit = 50,
+  offset = 0,
+  signal?: AbortSignal
+): Promise<RepoListResponse> {
+  const params = new URLSearchParams();
+  params.set("hide_empty_prs", String(hideEmptyPrs));
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  return apiGet<RepoListResponse>(`/spaces/${installationId}/repos?${params}`, signal);
+}
+
+export function getRepoDetail(
+  owner: string,
+  repo: string,
+  installationId?: number,
+  limit = 50,
+  offset = 0,
+  findingId?: string | null,
+  signal?: AbortSignal,
+  prLimit = 50,
+  prOffset = 0
+): Promise<RepoDetailResponse> {
+  const params = new URLSearchParams();
+  if (installationId !== undefined) {
+    params.set("installation_id", String(installationId));
+  }
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  params.set("pr_limit", String(prLimit));
+  params.set("pr_offset", String(prOffset));
+  if (findingId) {
+    params.set("finding_id", findingId);
+  }
+  return apiGet<RepoDetailResponse>(`/repos/${owner}/${repo}?${params}`, signal);
 }

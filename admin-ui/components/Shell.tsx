@@ -9,6 +9,7 @@ import { logout, type AdminMe } from "@/lib/api";
 const ENV_BADGE = (process.env.NEXT_PUBLIC_ADMIN_ENV ?? "").trim();
 
 const NAV_ITEMS = [
+  { href: "/repositories/", label: "Repositories" },
   { href: "/findings/", label: "Findings" },
   { href: "/runs/", label: "Runs" },
   { href: "/queue/", label: "Queue" },

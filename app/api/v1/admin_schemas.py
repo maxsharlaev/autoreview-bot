@@ -192,12 +192,19 @@ class AdminOpenFindings(BaseModel):
 
 
 class AdminRepoItem(BaseModel):
-    """A repository within a space with aggregated counts."""
+    """A repository within a space.
+
+    open_pr_count is exact when the request lists every pull (limit omitted).
+    A paged request only checks presence: 0 when there are none, null when the
+    count was not computed. has_open_prs is that presence flag.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     full_name: str
     open_pr_count: int | None
+    # True/False when presence is known. None when GitHub could not be asked.
+    has_open_prs: bool | None = None
     open_findings: AdminOpenFindings
     last_run_at: datetime | None = None
 
@@ -206,6 +213,10 @@ class AdminRepoListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[AdminRepoItem]
+    limit: int
+    offset: int
+    has_next: bool
+    total_count: int | None = None
 
 
 class AdminRepoPRItem(BaseModel):
@@ -240,6 +251,10 @@ class AdminRepoDetailResponse(BaseModel):
 
     full_name: str
     open_prs: list[AdminRepoPRItem]
+    open_prs_count: int | None = None
+    open_prs_has_next: bool = False
+    pr_limit: int
+    pr_offset: int
     open_findings: list[AdminRepoFindingItem]
     open_findings_count: int
     limit: int

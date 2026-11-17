@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import secrets
@@ -91,6 +92,7 @@ def mount_admin_api(app: FastAPI) -> None:
 
 _MAX_LIMIT = 100
 _DEFAULT_LIMIT = 50
+_PRESENCE_CONCURRENCY = 8
 _GENERIC_AUTH_ERROR = "invalid credentials"
 _DUMMY_HASH = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 _RATE_LIMIT_ERROR = "too many attempts"
@@ -939,18 +941,62 @@ async def _get_last_run_at(session: Any, full_name: str, owner_id: str | None = 
     return result.scalar_one_or_none()
 
 
+async def _open_pull_presence(client: GitHubAppClient, full_names: list[str]) -> dict[str, bool | None]:
+    """Whether each repository has an open pull request. One REST call per name, no later pages."""
+    semaphore = asyncio.Semaphore(_PRESENCE_CONCURRENCY)
+    presence: dict[str, bool | None] = {}
+
+    async def probe(full_name: str) -> None:
+        owner, repo = full_name.split("/", 1)
+        async with semaphore:
+            try:
+                presence[full_name] = await client.has_open_pull(owner, repo)
+            except GitHubError:
+                logger.warning("open PR presence probe failed for %s", full_name)
+                presence[full_name] = None
+
+    await asyncio.gather(*(probe(full_name) for full_name in full_names))
+    return presence
+
+
+async def _open_pull_counts(client: GitHubAppClient, full_names: list[str]) -> dict[str, int | None]:
+    """Exact open-pull counts. One full listing per repository, for the unpaged contract."""
+    semaphore = asyncio.Semaphore(_PRESENCE_CONCURRENCY)
+    counts: dict[str, int | None] = {}
+
+    async def fetch(full_name: str) -> None:
+        owner, repo = full_name.split("/", 1)
+        async with semaphore:
+            try:
+                counts[full_name] = len(await client.list_open_pulls(owner, repo))
+            except GitHubError:
+                logger.warning("open PR count failed for %s", full_name)
+                counts[full_name] = None
+
+    await asyncio.gather(*(fetch(full_name) for full_name in full_names))
+    return counts
+
+
 @router.get("/spaces/{installation_id}/repos", response_model=AdminRepoListResponse)
 async def list_space_repos(
     installation_id: int,
     session: SessionDep,
     _: AdminPrincipalDep,
     hide_empty_prs: Annotated[bool, Query()] = True,
+    limit: Annotated[int | None, Query(ge=1, le=_MAX_LIMIT)] = None,
+    offset: Annotated[int | None, Query(ge=0)] = None,
 ) -> AdminRepoListResponse:
-    """List repositories in a space with open PR counts and open findings by severity.
+    """List repositories in a space.
+
+    Omitting limit returns the whole installation and the exact open-PR count, matching
+    the original contract. Passing limit returns that one page and only checks presence.
+    The pull-request list is loaded, one page at a time, from the repository detail.
 
     Args:
         installation_id: The GitHub App installation ID (unique per space)
-        hide_empty_prs: If True (default), exclude repos with 0 open PRs
+        hide_empty_prs: If True (default), drop repos in this response that have no open PRs
+        limit: Installation repositories per page. Also the maximum number of presence probes.
+        offset: Must be a multiple of limit. Selects that page of the installation list.
     """
     registry = get_owner_registry()
     if not registry.owners:
@@ -983,48 +1029,108 @@ async def list_space_repos(
     gh_client = GitHubAppClient.from_credentials(
         space_owner_ctx.github, owner_id=space_owner_id, installation_id=installation_id
     )
+    if limit is None:
+        if offset not in (None, 0):
+            raise HTTPException(status_code=422, detail="limit is required when offset is set")
+    else:
+        offset = 0 if offset is None else offset
+        if offset % limit != 0:
+            raise HTTPException(status_code=422, detail="offset must be a multiple of limit")
+
     try:
-        repos = await gh_client.list_installation_repos(installation_id)
+        if limit is None:
+            repos = await gh_client.list_installation_repos(installation_id)
+            has_next = False
+            total_count: int | None = len(repos)
+            response_limit = len(repos)
+            response_offset = 0
+        else:
+            repos, has_next, total_count = await gh_client.list_installation_repos_page(
+                installation_id, page=(offset // limit) + 1, per_page=limit
+            )
+            response_limit = limit
+            response_offset = offset
     except GitHubError as exc:
         logger.warning("Failed to list repos for installation %s: %s", installation_id, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
 
-    items: list[AdminRepoItem] = []
+    candidates: list[tuple[str, str]] = []
     for repo_data in repos:
         full_name = repo_data.get("full_name") or ""
-        if not full_name:
+        if not full_name or "/" not in full_name:
             continue
 
         route = registry.resolve(full_name, installation_id=installation_id)
         if route.rejected():
             continue
+        candidates.append((full_name, route.owner_id))
 
-        owner_name, repo_name = full_name.split("/", 1)
+    names = [full_name for full_name, _owner_id in candidates]
+    if limit is None:
+        counts = await _open_pull_counts(gh_client, names)
+        presence = {name: (None if counts.get(name) is None else counts[name] > 0) for name in names}
+    else:
+        counts = {}
+        presence = await _open_pull_presence(gh_client, names)
 
-        open_pr_count: int | None
-        try:
-            open_prs = await gh_client.list_open_pulls(owner_name, repo_name)
-            open_pr_count = len(open_prs)
-        except GitHubError as exc:
-            logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
-            open_pr_count = None
-
-        if hide_empty_prs and open_pr_count == 0:
+    items: list[AdminRepoItem] = []
+    for full_name, owner_id in candidates:
+        has_open = presence.get(full_name)
+        open_pr_count = counts.get(full_name) if limit is None else (0 if has_open is False else None)
+        if hide_empty_prs and has_open is False:
             continue
 
-        open_findings = await _get_open_findings_by_severity(session, full_name, route.owner_id)
-        last_run_at = await _get_last_run_at(session, full_name, route.owner_id)
+        open_findings = await _get_open_findings_by_severity(session, full_name, owner_id)
+        last_run_at = await _get_last_run_at(session, full_name, owner_id)
 
         items.append(
             AdminRepoItem(
                 full_name=full_name,
                 open_pr_count=open_pr_count,
+                has_open_prs=has_open,
                 open_findings=open_findings,
                 last_run_at=last_run_at,
             )
         )
 
-    return AdminRepoListResponse(items=items)
+    return AdminRepoListResponse(
+        items=items,
+        limit=response_limit,
+        offset=response_offset,
+        has_next=has_next,
+        total_count=total_count,
+    )
+
+
+async def _open_finding_page_offset(
+    session: Any,
+    *,
+    full_name: str,
+    owner_ids: set[str],
+    finding_id: uuid.UUID,
+    limit: int,
+) -> int | None:
+    """Return the findings-page offset for an open finding, or None if it is absent."""
+    ranked = (
+        select(
+            Finding.id,
+            func.row_number()
+            .over(order_by=[Finding.severity.asc(), Finding.created_at.desc(), Finding.id.asc()])
+            .label("rn"),
+        )
+        .join(PullRequest, Finding.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(
+            Repository.full_name == full_name,
+            Finding.owner_id.in_(owner_ids),
+            Finding.current_status == FINDING_STATUS_OPEN,
+        )
+        .subquery()
+    )
+    rank = (await session.execute(select(ranked.c.rn).where(ranked.c.id == finding_id))).scalar_one_or_none()
+    if rank is None:
+        return None
+    return ((int(rank) - 1) // limit) * limit
 
 
 @router.get("/repos/{owner}/{repo}", response_model=AdminRepoDetailResponse)
@@ -1036,11 +1142,17 @@ async def get_repo_detail(
     installation_id: Annotated[int | None, Query(description="GitHub installation ID for routing")] = None,
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
+    finding_id: Annotated[uuid.UUID | None, Query(description="Open finding to locate; overrides offset")] = None,
+    pr_limit: Annotated[int | None, Query(ge=1, le=_MAX_LIMIT)] = None,
+    pr_offset: Annotated[int | None, Query(ge=0)] = None,
 ) -> AdminRepoDetailResponse:
-    """Get detailed repository info: open PRs and open findings with pagination.
+    """Get detailed repository info: open PRs and open findings.
+
+    Omitting pr_limit returns every open pull request. Passing pr_limit returns that one page.
 
     Args:
         installation_id: Optional GitHub installation ID for routing repos via installation claims.
+        finding_id: If set, return the page that contains this open finding (or offset 0 if absent).
     """
     full_name = f"{owner}/{repo}"
     registry = get_owner_registry()
@@ -1078,15 +1190,45 @@ async def get_repo_detail(
     else:
         gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
 
+    if pr_limit is None:
+        if pr_offset not in (None, 0):
+            raise HTTPException(status_code=422, detail="pr_limit is required when pr_offset is set")
+    else:
+        pr_offset = 0 if pr_offset is None else pr_offset
+        if pr_offset % pr_limit != 0:
+            raise HTTPException(status_code=422, detail="pr_offset must be a multiple of pr_limit")
+
     try:
-        open_prs_data = await gh_client.list_open_pulls(owner, repo)
+        if pr_limit is None:
+            open_prs_data = await gh_client.list_open_pulls(owner, repo)
+            open_prs_has_next = False
+            open_prs_count: int | None = len(open_prs_data)
+            response_pr_limit = len(open_prs_data)
+            response_pr_offset = 0
+        else:
+            open_prs_data, open_prs_has_next = await gh_client.list_open_pulls_page(
+                owner, repo, page=(pr_offset // pr_limit) + 1, per_page=pr_limit
+            )
+            open_prs_count = None
+            response_pr_limit = pr_limit
+            response_pr_offset = pr_offset
     except GitHubError as exc:
         logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
 
-    open_pr_numbers = {pr.get("number") for pr in open_prs_data}
+    open_pr_numbers = {pr.get("number") for pr in open_prs_data if pr.get("number") is not None}
 
     owner_ids = _owner_id_filter_set(route.owner_id)
+
+    if finding_id is not None:
+        located = await _open_finding_page_offset(
+            session,
+            full_name=full_name,
+            owner_ids=owner_ids,
+            finding_id=finding_id,
+            limit=limit,
+        )
+        offset = located if located is not None else 0
 
     row_num = (
         func.row_number()
@@ -1101,18 +1243,20 @@ async def get_repo_detail(
         select(ReviewRun.pull_request_id, ReviewRun.status, row_num).where(ReviewRun.owner_id.in_(owner_ids)).subquery()
     )
 
-    last_run_status_q = (
-        select(PullRequest.number, ranked_runs.c.status)
-        .join(Repository, PullRequest.repository_id == Repository.id)
-        .join(ranked_runs, ranked_runs.c.pull_request_id == PullRequest.id)
-        .where(
-            Repository.full_name == full_name,
-            PullRequest.number.in_(open_pr_numbers),
-            ranked_runs.c.rn == 1,
+    pr_statuses: dict[Any, Any] = {}
+    if open_pr_numbers:
+        last_run_status_q = (
+            select(PullRequest.number, ranked_runs.c.status)
+            .join(Repository, PullRequest.repository_id == Repository.id)
+            .join(ranked_runs, ranked_runs.c.pull_request_id == PullRequest.id)
+            .where(
+                Repository.full_name == full_name,
+                PullRequest.number.in_(open_pr_numbers),
+                ranked_runs.c.rn == 1,
+            )
         )
-    )
-    result = await session.execute(last_run_status_q)
-    pr_statuses = {row[0]: row[1] for row in result.all()}
+        result = await session.execute(last_run_status_q)
+        pr_statuses = {row[0]: row[1] for row in result.all()}
 
     open_prs: list[AdminRepoPRItem] = []
     for pr_data in open_prs_data:
@@ -1182,6 +1326,10 @@ async def get_repo_detail(
     return AdminRepoDetailResponse(
         full_name=full_name,
         open_prs=open_prs,
+        open_prs_count=open_prs_count,
+        open_prs_has_next=open_prs_has_next,
+        pr_limit=response_pr_limit,
+        pr_offset=response_pr_offset,
         open_findings=open_findings,
         open_findings_count=total_findings,
         limit=limit,

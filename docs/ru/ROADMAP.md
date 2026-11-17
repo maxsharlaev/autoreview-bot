@@ -32,7 +32,7 @@
 
 | Пункт | Статус | Заметки |
 | --- | --- | --- |
-| **Панель администратора (прогоны, очередь, управление findings)** | **in progress** | Admin JSON API уже влит (sessions, findings suppress, runs + sensitive cleanup, users, queue). Каркас control UI на `/control` (`ADMIN_UI_ENABLED=false` по умолчанию; включать вместе с `ADMIN_API_ENABLED`). Страницы findings/runs/queue/users, safe retry и richer audit UI ещё впереди. Authz отдельно от public API |
+| **Панель администратора (прогоны, очередь, управление findings)** | **in progress** | Admin JSON API влит (sessions, findings suppress, runs + sensitive cleanup, users, queue, spaces/repos). Control UI на `/control` (`ADMIN_UI_ENABLED=false` по умолчанию; включать вместе с `ADMIN_API_ENABLED`). Страница Repositories готова (выбор пространства, таблица репозиториев с findings по severity, детальный просмотр с PR и findings). Страницы findings/runs/queue/users, safe retry и richer audit UI ещё впереди. Authz отдельно от public API |
 
 <!-- section: container-strict-review-path -->
 ### Контейнер / строгий путь ревью

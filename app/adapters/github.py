@@ -631,6 +631,39 @@ class GitHubAppClient:
             page += 1
         return pulls
 
+    async def list_open_pulls_page(
+        self, owner: str, repo: str, *, page: int, per_page: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """One page of open pull requests and whether GitHub linked a next page."""
+        token = await self.installation_token(owner, repo)
+        response = await self._request(
+            "GET",
+            f"{API}/repos/{owner}/{repo}/pulls",
+            token=token,
+            params={"state": "open", "per_page": per_page, "page": page},
+            _evict_on_401=True,
+        )
+        batch = response.json()
+        if not isinstance(batch, list):
+            raise GitHubError(f"GET pulls page -> unexpected body for {owner}/{repo}")
+        link = response.headers.get("link") or ""
+        return batch, 'rel="next"' in link
+
+    async def has_open_pull(self, owner: str, repo: str) -> bool:
+        """True when the repository has at least one open pull request. One REST call."""
+        token = await self.installation_token(owner, repo)
+        response = await self._request(
+            "GET",
+            f"{API}/repos/{owner}/{repo}/pulls",
+            token=token,
+            params={"state": "open", "per_page": 1, "page": 1},
+            _evict_on_401=True,
+        )
+        batch = response.json()
+        if not isinstance(batch, list):
+            raise GitHubError(f"GET pulls -> unexpected body for {owner}/{repo}")
+        return bool(batch)
+
     async def list_app_installations(self) -> list[dict[str, Any]]:
         """List all installations accessible to the authenticated GitHub App.
 
@@ -657,11 +690,7 @@ class GitHubAppClient:
             page += 1
         return installations
 
-    async def list_installation_repos(self, installation_id: int) -> list[dict[str, Any]]:
-        """List repositories accessible to a specific installation.
-
-        Returns repository objects with full_name, visibility, etc.
-        """
+    async def _installation_access_token(self, installation_id: int) -> str:
         app_id = self._app_id()
         private_key = self._private_key_pem()
         if not app_id or not private_key.strip():
@@ -670,41 +699,63 @@ class GitHubAppClient:
         cache_key = (app_id, installation_id)
         if cache_key in _INSTALLATION_TOKEN_CACHE:
             token, expires_at = _INSTALLATION_TOKEN_CACHE[cache_key]
-            if time.time() >= expires_at - 60:
-                token = None
-        else:
-            token = None
+            if time.time() < expires_at - 60:
+                return token
 
-        if token is None:
+        response = await self._request(
+            "POST",
+            f"{API}/app/installations/{installation_id}/access_tokens",
+            token=self._jwt(),
+        )
+        data = response.json()
+        token = data["token"]
+        _INSTALLATION_TOKEN_CACHE[cache_key] = (token, time.time() + 3500)
+        return token
+
+    async def list_installation_repos_page(
+        self, installation_id: int, *, page: int, per_page: int
+    ) -> tuple[list[dict[str, Any]], bool, int | None]:
+        """One page of installation repositories, whether another page exists, and total_count."""
+        token = await self._installation_access_token(installation_id)
+        try:
             response = await self._request(
-                "POST",
-                f"{API}/app/installations/{installation_id}/access_tokens",
-                token=self._jwt(),
+                "GET",
+                f"{API}/installation/repositories",
+                token=token,
+                params={"per_page": per_page, "page": page},
             )
-            data = response.json()
-            token = data["token"]
-            _INSTALLATION_TOKEN_CACHE[cache_key] = (token, time.time() + 3500)
+        except GitHubError as exc:
+            if exc.status_code == 401:
+                _INSTALLATION_TOKEN_CACHE.pop((self._app_id(), installation_id), None)
+            raise
+        data = response.json()
+        batch = data.get("repositories", [])
+        if not isinstance(batch, list):
+            raise GitHubError(f"GET installation/repositories -> unexpected body for {installation_id}")
+        total = data.get("total_count")
+        total_count = total if isinstance(total, int) and not isinstance(total, bool) else None
+        link = response.headers.get("link") or ""
+        # A full page without a Link header is not another page when total_count
+        # already ends on this one (exactly 50 repos, per_page 50).
+        if total_count is not None:
+            has_next = page * per_page < total_count
+        else:
+            has_next = 'rel="next"' in link or (not link and len(batch) == per_page)
+        return batch, has_next, total_count
 
+    async def list_installation_repos(self, installation_id: int) -> list[dict[str, Any]]:
+        """List repositories accessible to a specific installation.
+
+        Returns repository objects with full_name, visibility, etc.
+        """
         repos: list[dict[str, Any]] = []
         page = 1
         while True:
-            try:
-                response = await self._request(
-                    "GET",
-                    f"{API}/installation/repositories",
-                    token=token,
-                    params={"per_page": 100, "page": page},
-                )
-            except GitHubError as exc:
-                if exc.status_code == 401:
-                    _INSTALLATION_TOKEN_CACHE.pop(cache_key, None)
-                raise
-            data = response.json()
-            batch = data.get("repositories", [])
+            batch, has_next, _total = await self.list_installation_repos_page(installation_id, page=page, per_page=100)
             if not batch:
                 break
             repos.extend(batch)
-            if len(batch) < 100:
+            if not has_next:
                 break
             page += 1
         return repos
