@@ -119,6 +119,7 @@ function RepositoriesContent() {
   const selectedRepo = searchParams.get("repo");
   const highlightFindingId = searchParams.get("finding");
   const [repoDetail, setRepoDetail] = useState<RepoDetailResponse | null>(null);
+  const [loadedDetailKey, setLoadedDetailKey] = useState<string | null>(null);
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [detailError, setDetailError] = useState<string | null>(null);
   const [findingsOffset, setFindingsOffset] = useState(0);
@@ -232,8 +233,10 @@ function RepositoriesContent() {
       )
         .then((res) => {
           if (requestGen !== detailRequestGen.current) return;
-          loadedDetailKeyRef.current = `${selectedSpace.id}:${fullName}`;
+          const key = `${selectedSpace.id}:${fullName}`;
+          loadedDetailKeyRef.current = key;
           repoDetailRef.current = res;
+          setLoadedDetailKey(key);
           setRepoDetail(res);
           setDetailState("loaded");
         })
@@ -253,6 +256,7 @@ function RepositoriesContent() {
     if (highlightFindingId && findingSearchState === "idle") return;
     if (
       repoDetail &&
+      loadedDetailKey === `${selectedSpace.id}:${selectedRepo}` &&
       repoDetail.full_name === selectedRepo &&
       repoDetail.offset === findingsOffset &&
       repoDetail.pr_offset === prsOffset
@@ -265,7 +269,18 @@ function RepositoriesContent() {
     detailRequestGen.current += 1;
     const currentGen = detailRequestGen.current;
     loadRepoDetail(selectedRepo, findingsOffset, prsOffset, currentGen);
-  }, [me, selectedSpace, selectedRepo, findingsOffset, prsOffset, loadRepoDetail, findingSearchState, highlightFindingId, repoDetail]);
+  }, [
+    me,
+    selectedSpace,
+    selectedRepo,
+    findingsOffset,
+    prsOffset,
+    loadRepoDetail,
+    findingSearchState,
+    highlightFindingId,
+    repoDetail,
+    loadedDetailKey,
+  ]);
 
   const userReady = me !== null;
   const spaceId = selectedSpace?.id;
@@ -331,9 +346,11 @@ function RepositoriesContent() {
           res.offset,
           res.pr_offset
         );
-        loadedDetailKeyRef.current = `${installationId}:${repoName}`;
+        const key = `${installationId}:${repoName}`;
+        loadedDetailKeyRef.current = key;
         repoDetailRef.current = res;
         lookupResultRef.current = { key: lookupKey, status: found ? "found" : "not_found" };
+        setLoadedDetailKey(key);
         setFindingsOffset(res.offset);
         setPrsOffset(res.pr_offset);
         setRepoDetail(res);
@@ -386,6 +403,7 @@ function RepositoriesContent() {
       setFindingSearchError(null);
       lookupResultRef.current = null;
       loadedDetailKeyRef.current = null;
+      setLoadedDetailKey(null);
       detailRequestKeyRef.current = null;
       repoDetailRef.current = null;
     }
@@ -491,6 +509,8 @@ function RepositoriesContent() {
     const isSearchingFinding = findingSearchState === "searching";
     const findingNotFound = findingSearchState === "not_found" && highlightFindingId;
     const findingSearchFailed = findingSearchState === "error" && highlightFindingId;
+    const detailIsCurrent =
+      selectedSpace != null && loadedDetailKey === `${selectedSpace.id}:${selectedRepo}`;
 
     return (
       <Shell user={me} pageTitle={selectedRepo}>
@@ -510,9 +530,9 @@ function RepositoriesContent() {
 
         {spacesState === "loaded" &&
           selectedSpace &&
-          detailState === "loading" &&
-          !repoDetail &&
-          !isSearchingFinding && (
+          !isSearchingFinding &&
+          detailState !== "error" &&
+          !(detailState === "loaded" && detailIsCurrent && repoDetail) && (
           <div className="card">
             <p className="muted">Loading repository details…</p>
           </div>
@@ -525,7 +545,11 @@ function RepositoriesContent() {
           </div>
         )}
 
-        {spacesState === "loaded" && selectedSpace && detailState === "loaded" && repoDetail && (
+        {spacesState === "loaded" &&
+          selectedSpace &&
+          detailState === "loaded" &&
+          detailIsCurrent &&
+          repoDetail && (
           <>
             {findingSearchFailed && (
               <div className="card card-error">

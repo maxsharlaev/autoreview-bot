@@ -194,14 +194,16 @@ class AdminOpenFindings(BaseModel):
 class AdminRepoItem(BaseModel):
     """A repository within a space.
 
-    Open pull requests are a presence flag. REST cannot count them without listing
-    every pull, and the repository page lists one page of pulls instead.
+    open_pr_count is exact when the request lists every pull (limit omitted).
+    A paged request only checks presence: 0 when there are none, null when the
+    count was not computed. has_open_prs is that presence flag.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     full_name: str
-    # True/False when a one-item probe answered. None when GitHub could not be asked.
+    open_pr_count: int | None
+    # True/False when presence is known. None when GitHub could not be asked.
     has_open_prs: bool | None = None
     open_findings: AdminOpenFindings
     last_run_at: datetime | None = None

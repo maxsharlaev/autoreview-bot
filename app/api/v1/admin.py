@@ -959,6 +959,24 @@ async def _open_pull_presence(client: GitHubAppClient, full_names: list[str]) ->
     return presence
 
 
+async def _open_pull_counts(client: GitHubAppClient, full_names: list[str]) -> dict[str, int | None]:
+    """Exact open-pull counts. One full listing per repository, for the unpaged contract."""
+    semaphore = asyncio.Semaphore(_PRESENCE_CONCURRENCY)
+    counts: dict[str, int | None] = {}
+
+    async def fetch(full_name: str) -> None:
+        owner, repo = full_name.split("/", 1)
+        async with semaphore:
+            try:
+                counts[full_name] = len(await client.list_open_pulls(owner, repo))
+            except GitHubError:
+                logger.warning("open PR count failed for %s", full_name)
+                counts[full_name] = None
+
+    await asyncio.gather(*(fetch(full_name) for full_name in full_names))
+    return counts
+
+
 @router.get("/spaces/{installation_id}/repos", response_model=AdminRepoListResponse)
 async def list_space_repos(
     installation_id: int,
@@ -970,9 +988,8 @@ async def list_space_repos(
 ) -> AdminRepoListResponse:
     """List repositories in a space.
 
-    Omitting limit returns the whole installation, matching the original contract.
-    Passing limit returns that one page and probes only the repositories on it.
-    Each row records whether the repository has an open pull request, not the count.
+    Omitting limit returns the whole installation and the exact open-PR count, matching
+    the original contract. Passing limit returns that one page and only checks presence.
     The pull-request list is loaded, one page at a time, from the repository detail.
 
     Args:
@@ -1048,11 +1065,18 @@ async def list_space_repos(
             continue
         candidates.append((full_name, route.owner_id))
 
-    presence = await _open_pull_presence(gh_client, [full_name for full_name, _owner_id in candidates])
+    names = [full_name for full_name, _owner_id in candidates]
+    if limit is None:
+        counts = await _open_pull_counts(gh_client, names)
+        presence = {name: (None if counts.get(name) is None else counts[name] > 0) for name in names}
+    else:
+        counts = {}
+        presence = await _open_pull_presence(gh_client, names)
 
     items: list[AdminRepoItem] = []
     for full_name, owner_id in candidates:
         has_open = presence.get(full_name)
+        open_pr_count = counts.get(full_name) if limit is None else (0 if has_open is False else None)
         if hide_empty_prs and has_open is False:
             continue
 
@@ -1062,6 +1086,7 @@ async def list_space_repos(
         items.append(
             AdminRepoItem(
                 full_name=full_name,
+                open_pr_count=open_pr_count,
                 has_open_prs=has_open,
                 open_findings=open_findings,
                 last_run_at=last_run_at,
@@ -1118,10 +1143,12 @@ async def get_repo_detail(
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
     finding_id: Annotated[uuid.UUID | None, Query(description="Open finding to locate; overrides offset")] = None,
-    pr_limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
-    pr_offset: Annotated[int, Query(ge=0)] = 0,
+    pr_limit: Annotated[int | None, Query(ge=1, le=_MAX_LIMIT)] = None,
+    pr_offset: Annotated[int | None, Query(ge=0)] = None,
 ) -> AdminRepoDetailResponse:
-    """Get detailed repository info: one page of open PRs and open findings.
+    """Get detailed repository info: open PRs and open findings.
+
+    Omitting pr_limit returns every open pull request. Passing pr_limit returns that one page.
 
     Args:
         installation_id: Optional GitHub installation ID for routing repos via installation claims.
@@ -1163,13 +1190,28 @@ async def get_repo_detail(
     else:
         gh_client = GitHubAppClient.from_credentials(owner_ctx.github, owner_id=route.owner_id)
 
-    if pr_offset % pr_limit != 0:
-        raise HTTPException(status_code=422, detail="pr_offset must be a multiple of pr_limit")
+    if pr_limit is None:
+        if pr_offset not in (None, 0):
+            raise HTTPException(status_code=422, detail="pr_limit is required when pr_offset is set")
+    else:
+        pr_offset = 0 if pr_offset is None else pr_offset
+        if pr_offset % pr_limit != 0:
+            raise HTTPException(status_code=422, detail="pr_offset must be a multiple of pr_limit")
 
     try:
-        open_prs_data, open_prs_has_next = await gh_client.list_open_pulls_page(
-            owner, repo, page=(pr_offset // pr_limit) + 1, per_page=pr_limit
-        )
+        if pr_limit is None:
+            open_prs_data = await gh_client.list_open_pulls(owner, repo)
+            open_prs_has_next = False
+            open_prs_count: int | None = len(open_prs_data)
+            response_pr_limit = len(open_prs_data)
+            response_pr_offset = 0
+        else:
+            open_prs_data, open_prs_has_next = await gh_client.list_open_pulls_page(
+                owner, repo, page=(pr_offset // pr_limit) + 1, per_page=pr_limit
+            )
+            open_prs_count = None
+            response_pr_limit = pr_limit
+            response_pr_offset = pr_offset
     except GitHubError as exc:
         logger.warning("Failed to list open PRs for %s: %s", full_name, exc)
         raise HTTPException(status_code=502, detail="github api error") from None
@@ -1284,10 +1326,10 @@ async def get_repo_detail(
     return AdminRepoDetailResponse(
         full_name=full_name,
         open_prs=open_prs,
-        open_prs_count=None,
+        open_prs_count=open_prs_count,
         open_prs_has_next=open_prs_has_next,
-        pr_limit=pr_limit,
-        pr_offset=pr_offset,
+        pr_limit=response_pr_limit,
+        pr_offset=response_pr_offset,
         open_findings=open_findings,
         open_findings_count=total_findings,
         limit=limit,

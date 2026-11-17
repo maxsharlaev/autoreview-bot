@@ -102,6 +102,7 @@ function installDetailMock() {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   nav.params = new URLSearchParams("space=1&repo=acme/repo&finding=find-9");
   Element.prototype.scrollIntoView = () => {};
   api.getMe.mockResolvedValue({ login: "root", role: "admin", kind: "root" });
@@ -361,5 +362,43 @@ describe("repository list loads", () => {
 
     await waitFor(() => expect(api.getSpaceRepos).toHaveBeenCalledTimes(2));
     expect(firstSignal?.aborted).toBe(true);
+  });
+});
+
+describe("repository detail follows the space", () => {
+  it("reloads the same repository when the space changes", async () => {
+    nav.params = new URLSearchParams("space=1&repo=acme/repo");
+    const view = render(<RepositoriesPage />);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]?.installationId).toBe(1);
+
+    await act(async () => {
+      calls[0]?.resolve(
+        detail({
+          open_prs: [
+            { number: 1, title: "Space one pull", head_sha_short: "abc1234", last_run_status: null },
+          ],
+        })
+      );
+    });
+    expect(await screen.findByText("Space one pull")).toBeTruthy();
+
+    nav.params = new URLSearchParams("space=2&repo=acme/repo");
+    view.rerender(<RepositoriesPage />);
+
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]?.installationId).toBe(2);
+    expect(screen.queryByText("Space one pull")).toBeNull();
+
+    await act(async () => {
+      calls[1]?.resolve(
+        detail({
+          open_prs: [
+            { number: 2, title: "Space two pull", head_sha_short: "def5678", last_run_status: null },
+          ],
+        })
+      );
+    });
+    expect(await screen.findByText("Space two pull")).toBeTruthy();
   });
 });
