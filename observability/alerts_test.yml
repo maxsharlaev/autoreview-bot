@@ -74,12 +74,22 @@ tests:
               severity: page
             exp_annotations:
               summary: Model provider connection is failing
-              description: Three or more real model attempts in a row failed on timeout, transport, upstream 5xx, or a broken stream. Quota, rate limit, and provider auth do not count. The gauge resets to 0 when model-proxy restarts, so a restart clears this alert until new failures arrive. No traffic does not fire it. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
+              description: Three or more real model attempts in a row failed on timeout, transport, upstream 5xx, or a broken stream. A completed provider response that is not one of those resets the streak, including auth, quota, rate limit, other 4xx, and a finished incomplete or failed response. That reset is not a successful model call. The gauge also resets to 0 when model-proxy restarts. No traffic does not fire it. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
 
   - interval: 1m
     input_series:
       - series: 'model_proxy_consecutive_upstream_failures{job="open-pr-review-model-proxy"}'
         values: '5 5 5 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OpenPrReviewModelProxyConsecutiveFailures
+        exp_alerts: []
+
+  # Two timeouts, a provider 401 resets the gauge, then one more timeout. Not three in a row.
+  - interval: 1m
+    input_series:
+      - series: 'model_proxy_consecutive_upstream_failures{job="open-pr-review-model-proxy"}'
+        values: '1 2 0 1 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 6m
         alertname: OpenPrReviewModelProxyConsecutiveFailures

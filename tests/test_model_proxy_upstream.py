@@ -12,6 +12,7 @@ import httpx
 import pytest
 from app.model_proxy import metrics
 from app.model_proxy.failures import classify_transport, classify_upstream_status
+from app.model_proxy.proxy import _SseTerminals
 from fastapi.testclient import TestClient
 from tests.test_model_proxy_p1 import _issue, _open_proxy, _rebind_upstream
 
@@ -154,10 +155,21 @@ def test_health_gauges_count_only_connectivity_failures() -> None:
     metrics.note_model_attempt("upstream_5xx", 0.1)
     assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 2
     metrics.note_model_attempt("upstream_auth", 0.1)
-    metrics.note_model_attempt("upstream_quota", 0.1)
-    metrics.note_model_attempt("upstream_rate_limit", 0.1)
-    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 2
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
     assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == before_success
+    metrics.note_model_attempt("upstream_timeout", 0.1)
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
+    for result in (
+        "upstream_quota",
+        "upstream_rate_limit",
+        "upstream_status",
+        "upstream_redirect",
+        "response_incomplete",
+        "response_failed",
+    ):
+        metrics.note_model_attempt(result, 0.1)
+        assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == before_success
     metrics.note_model_attempt("ok", 0.2)
     assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
     assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
@@ -247,7 +259,6 @@ def test_proxy_401_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatc
 def test_proxy_4xx_counts_as_an_attempt_but_not_a_connectivity_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     metrics.reset_model_health_for_tests()
     metrics.note_model_attempt("upstream_connect_timeout", 0.01)
-    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
     last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
     before = _sample(metrics.MODEL_ATTEMPTS, outcome="client_error")
     upstream = b'{"error":"invalid_request"}'
@@ -255,7 +266,7 @@ def test_proxy_4xx_counts_as_an_attempt_but_not_a_connectivity_failure(monkeypat
     assert status == 400
     assert body == upstream
     assert _sample(metrics.MODEL_ATTEMPTS, outcome="client_error") == before + 1
-    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
     assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
 
 
@@ -381,7 +392,6 @@ def test_terminal_sse_failure_is_not_a_connectivity_failure(
 ) -> None:
     metrics.reset_model_health_for_tests()
     metrics.note_model_attempt("upstream_connect_timeout", 0.01)
-    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
     last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
     before_result = _sample(metrics.REQUESTS, result=result)
     before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
@@ -398,14 +408,13 @@ def test_terminal_sse_failure_is_not_a_connectivity_failure(
     assert _sample(metrics.REQUESTS, result=result) == before_result + 1
     assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect
     assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) == before_outcome + 1
-    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
     assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
 
 
 def test_redirect_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
     metrics.reset_model_health_for_tests()
     metrics.note_model_attempt("upstream_connect_timeout", 0.01)
-    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
     last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
     before = _sample(metrics.MODEL_ATTEMPTS, outcome="client_error")
     before_redirect = _sample(metrics.REQUESTS, result="upstream_redirect")
@@ -414,7 +423,7 @@ def test_redirect_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch
     assert body == b"go elsewhere"
     assert _sample(metrics.REQUESTS, result="upstream_redirect") == before_redirect + 1
     assert _sample(metrics.MODEL_ATTEMPTS, outcome="client_error") == before + 1
-    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
     assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
 
 
@@ -469,7 +478,6 @@ def test_terminal_sse_survives_a_late_disconnect(
 ) -> None:
     metrics.reset_model_health_for_tests()
     metrics.note_model_attempt("upstream_connect_timeout", 0.01)
-    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
     last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
     before_result = _sample(metrics.REQUESTS, result=result)
     before_idle = _sample(metrics.REQUESTS, result="idle_timeout")
@@ -492,9 +500,158 @@ def test_terminal_sse_survives_a_late_disconnect(
         assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
         assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
     else:
-        assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+        assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
         assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
         assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) >= 1
+
+
+class _ChunksThenIdle(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self._release = asyncio.Event()
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+        try:
+            await asyncio.wait_for(self._release.wait(), timeout=2)
+        except TimeoutError:
+            return
+
+    async def aclose(self) -> None:
+        self._release.set()
+
+
+class _ChunksThenIdleTransport(httpx.AsyncBaseTransport):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ChunksThenIdle(self._chunks),
+        )
+
+
+def _terminal_frame(event: str) -> bytes:
+    return f'event: {event}\ndata: {{"type":"{event}"}}\n\n'.encode()
+
+
+def _split_terminal(event: str, split: str) -> list[bytes]:
+    frame = _terminal_frame(event)
+    if split == "after_event":
+        at = len(f"event: {event}\n".encode())
+    else:
+        needle = f'"type":"{event}"'.encode()
+        at = frame.index(needle) + len(needle) - 4
+    return [frame[:at], frame[at:]]
+
+
+def _decoy_frame() -> bytes:
+    payload = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "delta": 'event: response.completed "type":"response.completed"',
+        }
+    ).encode()
+    return b"event: response.output_text.delta\ndata: " + payload + b"\n\n"
+
+
+def test_sse_terminal_waits_for_a_complete_frame() -> None:
+    seen = _SseTerminals()
+    seen.feed(b"event: response.completed\n")
+    assert seen.terminal == ""
+    seen.feed(b'data: {"type":"response.com')
+    assert seen.terminal == ""
+    seen.feed(b'pleted"}\n\n')
+    assert seen.terminal == "response.completed"
+
+    decoy = _SseTerminals()
+    decoy.feed(_decoy_frame())
+    assert decoy.terminal == ""
+
+    ranked = _SseTerminals()
+    ranked.feed(_terminal_frame("response.incomplete") + _terminal_frame("response.completed"))
+    assert ranked.terminal == "response.completed"
+
+
+@pytest.mark.parametrize(
+    ("event", "result", "outcome", "success"),
+    [
+        ("response.completed", "ok", "ok", True),
+        ("response.incomplete", "response_incomplete", "incomplete", False),
+        ("response.failed", "response_failed", "response_failed", False),
+    ],
+)
+@pytest.mark.parametrize("split", ["after_event", "inside_json"])
+def test_terminal_sse_split_across_chunks_is_forwarded_whole(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    result: str,
+    outcome: str,
+    success: bool,
+    split: str,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    before_result = _sample(metrics.REQUESTS, result=result)
+    before_idle = _sample(metrics.REQUESTS, result="idle_timeout")
+    chunks = _split_terminal(event, split)
+    tag = {"response.completed": "1", "response.incomplete": "2", "response.failed": "3"}[event]
+    mark = "a" if split == "after_event" else "j"
+    status, body = _post(
+        monkeypatch,
+        _ChunksThenIdleTransport(chunks),
+        jid=(tag + mark) * 16,
+        stream=True,
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="0.4",
+    )
+    assert status == 200
+    assert body == b"".join(chunks)
+    assert _sample(metrics.REQUESTS, result=result) == before_result + 1
+    assert _sample(metrics.REQUESTS, result="idle_timeout") == before_idle
+    if success:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+    else:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+        assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) >= 1
+
+
+def test_marker_text_inside_a_delta_is_not_a_terminal_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    payload = _decoy_frame()
+    status, body = _post(
+        monkeypatch,
+        _Status(200, payload, content_type="text/event-stream"),
+        jid="m" * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert body == payload
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+
+
+def test_marker_text_does_not_end_the_stream_before_the_real_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    chunks = [_decoy_frame(), _terminal_frame("response.completed")]
+    status, body = _post(
+        monkeypatch,
+        _ChunksThenIdleTransport(chunks),
+        jid="n" * 32,
+        stream=True,
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="0.4",
+    )
+    assert status == 200
+    assert body == b"".join(chunks)
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
 
 
 def test_stream_cancel_after_headers_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:

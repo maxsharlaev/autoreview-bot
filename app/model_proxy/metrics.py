@@ -53,7 +53,8 @@ MODEL_ATTEMPTS = Counter(
 )
 CONSECUTIVE_UPSTREAM_FAILURES = Gauge(
     "model_proxy_consecutive_upstream_failures",
-    "Consecutive timeout, transport, 5xx, or broken-stream attempts. 0 after a real success or process restart.",
+    "Consecutive timeout, transport, 5xx, or broken-stream attempts. "
+    "Resets when a completed attempt is not one of those, and on process restart.",
 )
 LAST_UPSTREAM_SUCCESS = Gauge(
     "model_proxy_last_upstream_success_timestamp_seconds",
@@ -107,9 +108,13 @@ def note_model_attempt(result: str, duration_s: float) -> None:
     MODEL_ATTEMPTS.labels(outcome=outcome).inc()
     if outcome in _FAILURE_OUTCOMES:
         _consecutive += 1
-    elif outcome == "ok":
+    else:
+        # Auth, quota, rate limit, other 4xx, and a finished incomplete or failed
+        # response prove the provider answered. That ends the outage streak.
+        # Only a completed 2xx is a successful model call.
         _consecutive = 0
-        LAST_UPSTREAM_SUCCESS.set(time.time())
+        if outcome == "ok":
+            LAST_UPSTREAM_SUCCESS.set(time.time())
     CONSECUTIVE_UPSTREAM_FAILURES.set(_consecutive)
 
 

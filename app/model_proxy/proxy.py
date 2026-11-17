@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -39,36 +40,84 @@ _STRIP_RESPONSE_HEADERS = _HOP_BY_HOP | {
     "transfer-encoding",
 }
 
-# Responses API terminal events. EOF before any of them is a broken stream.
+# Responses API terminal events. EOF before a complete one of them is a broken stream.
 # completed is a real success; incomplete and failed finished normally and are not connectivity failures.
-_SSE_TERMINALS = ("response.completed", "response.failed", "response.incomplete")
-_SSE_MARKERS = tuple(
-    marker
-    for name in _SSE_TERMINALS
-    for marker in (
-        f"event: {name}".encode(),
-        f"event:{name}".encode(),
-        f'"type":"{name}"'.encode(),
-        f'"type": "{name}"'.encode(),
-    )
-)
-_SSE_HOLD = max(len(marker) for marker in _SSE_MARKERS) - 1
+# A frame counts only after its terminating blank line. Marker text inside another event does not.
 _SSE_TERMINAL_RANK = {"response.completed": 3, "response.failed": 2, "response.incomplete": 1}
 
 
-def _sse_terminal(blob: bytes) -> str:
-    found = ""
-    for name in _SSE_TERMINALS:
-        markers = (
-            f"event: {name}".encode(),
-            f"event:{name}".encode(),
-            f'"type":"{name}"'.encode(),
-            f'"type": "{name}"'.encode(),
-        )
-        rank = _SSE_TERMINAL_RANK[name]
-        if any(marker in blob for marker in markers) and rank > _SSE_TERMINAL_RANK.get(found, 0):
-            found = name
-    return found
+def _split_sse_frame(buf: bytes) -> tuple[bytes | None, bytes]:
+    """Return one complete SSE event and the unparsed remainder."""
+    found: tuple[int, bytes] | None = None
+    for sep in (b"\r\n\r\n", b"\n\n", b"\r\r"):
+        idx = buf.find(sep)
+        if idx == -1:
+            continue
+        if found is None or idx < found[0] or (idx == found[0] and len(sep) > len(found[1])):
+            found = (idx, sep)
+    if found is None:
+        return None, buf
+    idx, sep = found
+    return buf[:idx], buf[idx + len(sep) :]
+
+
+def _sse_field(line: bytes, name: bytes) -> bytes | None:
+    prefix = name + b":"
+    if not line.startswith(prefix):
+        return None
+    value = line[len(prefix) :]
+    if value.startswith(b" "):
+        value = value[1:]
+    return value
+
+
+def _frame_terminal(frame: bytes) -> str:
+    """Terminal Responses event name, or empty. Only the event field or JSON type counts."""
+    event_name = ""
+    data_parts: list[bytes] = []
+    normalized = frame.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    for line in normalized.split(b"\n"):
+        if not line or line.startswith(b":"):
+            continue
+        event_value = _sse_field(line, b"event")
+        if event_value is not None:
+            event_name = event_value.decode("utf-8", "replace")
+            continue
+        data_value = _sse_field(line, b"data")
+        if data_value is not None:
+            data_parts.append(data_value)
+    if event_name in _SSE_TERMINAL_RANK:
+        return event_name
+    if not data_parts:
+        return ""
+    try:
+        payload = json.loads(b"\n".join(data_parts))
+    except (json.JSONDecodeError, UnicodeError):
+        return ""
+    if isinstance(payload, dict):
+        kind = payload.get("type")
+        if isinstance(kind, str) and kind in _SSE_TERMINAL_RANK:
+            return kind
+    return ""
+
+
+class _SseTerminals:
+    """Highest-ranked terminal event whose full SSE frame has arrived."""
+
+    def __init__(self) -> None:
+        self._buf = b""
+        self.terminal = ""
+
+    def feed(self, piece: bytes) -> None:
+        self._buf += piece
+        while True:
+            frame, rest = _split_sse_frame(self._buf)
+            if frame is None:
+                return
+            self._buf = rest
+            found = _frame_terminal(frame)
+            if _SSE_TERMINAL_RANK.get(found, 0) > _SSE_TERMINAL_RANK.get(self.terminal, 0):
+                self.terminal = found
 
 
 def allowlist_check(request: Request) -> str | None:
@@ -498,19 +547,14 @@ async def forward_responses(
         aiter = response.aiter_bytes()
         result_label, _outcome = classify_upstream_status(response.status_code)
         cancelled = False
-        terminal = ""
-        tail = b""
+        seen = _SseTerminals()
 
         def _see(piece: bytes) -> None:
-            nonlocal terminal, tail
-            blob = tail + piece
-            found = _sse_terminal(blob)
-            if _SSE_TERMINAL_RANK.get(found, 0) > _SSE_TERMINAL_RANK.get(terminal, 0):
-                terminal = found
-            tail = blob[-_SSE_HOLD:]
+            seen.feed(piece)
 
         def _keep_terminal() -> bool:
             nonlocal result_label
+            terminal = seen.terminal
             if result_label != "ok" or not terminal:
                 return False
             if terminal == "response.incomplete":
@@ -573,8 +617,8 @@ async def forward_responses(
                     result_label = "byte_limit"
                     return
                 if _keep_terminal():
-                    # The model response is finished. Do not wait for EOF: a late idle
-                    # or reset must not replace this outcome.
+                    # The full terminal event, including its blank line, has been forwarded.
+                    # A later idle or reset must not replace this outcome.
                     await _close_upstream()
                     return
         except (asyncio.CancelledError, GeneratorExit):
