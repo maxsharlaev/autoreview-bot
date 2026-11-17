@@ -270,14 +270,96 @@ def test_proxy_5xx_is_a_connectivity_failure_with_a_stable_token(monkeypatch: py
 
 def test_stream_break_after_headers_is_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     before_ok = _sample(metrics.REQUESTS, result="ok")
-    before_fail = _sample(metrics.REQUESTS, result="stream_disconnect")
-    before_attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="stream_failed")
+    before_reset = _sample(metrics.REQUESTS, result="upstream_reset")
+    before_attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="transport")
     status, body = _post(monkeypatch, _Stream(), jid="2" * 32, stream=True)
     assert status == 200
     assert b"data: hi" in body
     assert _sample(metrics.REQUESTS, result="ok") == before_ok
-    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_fail + 1
+    assert _sample(metrics.REQUESTS, result="upstream_reset") == before_reset + 1
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="transport") == before_attempts + 1
+
+
+class _ReadTimeoutStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data: hi\n\n"
+        raise httpx.ReadTimeout("read timed out")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _ReadTimeoutTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ReadTimeoutStream(),
+        )
+
+
+def test_stream_read_timeout_after_headers_is_not_a_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before_timeout = _sample(metrics.REQUESTS, result="upstream_read_timeout")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    before_attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="timeout")
+    before_errors = _sample(metrics.UPSTREAM_ERRORS, kind="read_timeout")
+    status, body = _post(monkeypatch, _ReadTimeoutTransport(), jid="7" * 32, stream=True)
+    assert status == 200
+    assert b"data: hi" in body
+    assert _sample(metrics.REQUESTS, result="upstream_read_timeout") == before_timeout + 1
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="timeout") == before_attempts + 1
+    assert _sample(metrics.UPSTREAM_ERRORS, kind="read_timeout") == before_errors + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+
+
+_PARTIAL_SSE = (
+    b"event: response.created\n"
+    b'data: {"type":"response.created"}\n\n'
+    b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+)
+_COMPLETE_SSE = _PARTIAL_SSE + b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+
+
+def test_incomplete_sse_eof_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    before_attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="stream_failed")
+    status, body = _post(
+        monkeypatch,
+        _Status(200, _PARTIAL_SSE, content_type="text/event-stream"),
+        jid="8" * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert b"response.output_text.delta" in body
+    assert b"response.completed" not in body
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect + 1
     assert _sample(metrics.MODEL_ATTEMPTS, outcome="stream_failed") == before_attempts + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
+
+
+def test_completed_sse_is_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    status, body = _post(
+        monkeypatch,
+        _Status(200, _COMPLETE_SSE, content_type="text/event-stream"),
+        jid="9" * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert b"response.completed" in body
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok + 1
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
 
 
 def test_stream_cancel_after_headers_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:

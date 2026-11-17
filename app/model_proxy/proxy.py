@@ -39,6 +39,15 @@ _STRIP_RESPONSE_HEADERS = _HOP_BY_HOP | {
     "transfer-encoding",
 }
 
+# Responses API terminal success. A clean EOF before this is an incomplete stream.
+_SSE_COMPLETED = (
+    b"event: response.completed",
+    b"event:response.completed",
+    b'"type":"response.completed"',
+    b'"type": "response.completed"',
+)
+_SSE_HOLD = max(len(marker) for marker in _SSE_COMPLETED) - 1
+
 
 def allowlist_check(request: Request) -> str | None:
     """Return deny reason or None if allowed."""
@@ -467,6 +476,16 @@ async def forward_responses(
         aiter = response.aiter_bytes()
         result_label, _outcome = classify_upstream_status(response.status_code)
         cancelled = False
+        completed = False
+        tail = b""
+
+        def _see(piece: bytes) -> None:
+            nonlocal completed, tail
+            blob = tail + piece
+            if any(marker in blob for marker in _SSE_COMPLETED):
+                completed = True
+            tail = blob[-_SSE_HOLD:]
+
         try:
             while True:
                 try:
@@ -482,19 +501,24 @@ async def forward_responses(
                         metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
                         result_label = "upstream_timeout"
                     return
-                except httpx.HTTPError:
-                    # Headers were already sent. Record the broken stream; the HTTP status cannot change.
-                    metrics.UPSTREAM_ERRORS.labels(kind="stream_disconnect").inc()
-                    result_label = "stream_disconnect"
+                except httpx.HTTPError as exc:
+                    # Headers were already sent, so the HTTP status cannot change.
+                    # The metric still keeps the transport cause (read timeout versus reset).
+                    error, _kind, _status_code, metric_kind = classify_transport(exc)
+                    metrics.UPSTREAM_ERRORS.labels(kind=metric_kind).inc()
+                    result_label = error
                     logger.info(
                         "model_proxy upstream error kind=%s job_id=%s",
-                        "stream_disconnect",
+                        type(exc).__name__,
                         rec.job_id,
                     )
                     return
                 if chunk is None:
                     if not store.still_valid(rec):
                         result_label = "expired"
+                    elif result_label == "ok" and not completed:
+                        metrics.UPSTREAM_ERRORS.labels(kind="stream_disconnect").inc()
+                        result_label = "stream_disconnect"
                     return
                 if not chunk:
                     continue
@@ -503,14 +527,14 @@ async def forward_responses(
                     await _close_upstream()
                     result_label = "byte_limit"
                     return
+                piece = chunk[:accepted]
+                _see(piece)
+                metrics.BYTES.labels(direction="out").inc(accepted)
+                yield piece
                 if accepted < len(chunk):
-                    metrics.BYTES.labels(direction="out").inc(accepted)
-                    yield chunk[:accepted]
                     await _close_upstream()
                     result_label = "byte_limit"
                     return
-                metrics.BYTES.labels(direction="out").inc(accepted)
-                yield chunk
         except (asyncio.CancelledError, GeneratorExit):
             # Client gone after headers. Do not record the in-flight status as a success.
             cancelled = True

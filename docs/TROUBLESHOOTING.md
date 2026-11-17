@@ -172,7 +172,7 @@ Three different questions, and a `401` from the provider answers only the second
 | Can we reach the provider? | A fast `401`/`403` on a real request (`upstream_auth`) | Not a successful generation. Do not treat it as a green health check |
 | Did a real call succeed? | `model_proxy_last_upstream_success_timestamp_seconds` greater than 0, and `model_proxy outcome` with `kind=ok` | A gauge stuck at 0 means no success has been observed in this process. That is unknown, including when the proxy is idle |
 
-A cancelled caller, including one that disconnects after stream headers, is propagated and is not recorded as a timeout or a successful review. A completed provider response of 500 or higher keeps its HTTP status and is replaced with `{"error":"upstream_5xx"}`, so the review is `CODEX_UPSTREAM_UNAVAILABLE`. Codex's own `stream disconnected before completion` (when the text is not quota or auth) is the same code: the HTTP status was already sent and cannot carry the token. The proxy JSON `error` token is what shows up in the Codex session log and becomes `CODEX_UPSTREAM_UNAVAILABLE`. `kind` is the precise cause. HTTP status stays 504 for a deadline and 502 for transport. After response headers are already on the wire, a broken stream cannot change that status: the log and the metric say `stream_disconnect`, and the review must not be treated as successful.
+A cancelled caller, including one that disconnects after stream headers, is propagated and is not recorded as a timeout or a successful review. A completed provider response of 500 or higher keeps its HTTP status and is replaced with `{"error":"upstream_5xx"}`, so the review is `CODEX_UPSTREAM_UNAVAILABLE`. Codex's own `stream disconnected before completion` (when the text is not quota or auth) is the same code: the HTTP status was already sent and cannot carry the token. The proxy JSON `error` token is what shows up in the Codex session log and becomes `CODEX_UPSTREAM_UNAVAILABLE`. `kind` is the precise cause. HTTP status stays 504 for a deadline and 502 for transport. After response headers are already on the wire, the HTTP status cannot change. A later read timeout stays `upstream_read_timeout`, and a connection reset stays `upstream_reset`. A 200 SSE stream that ends before `response.completed` is `stream_disconnect`. None of these is a successful review.
 
 | `error` token | Cause |
 | --- | --- |
@@ -188,7 +188,7 @@ A cancelled caller, including one that disconnects after stream headers, is prop
 | `upstream_reset` | Connection reset or read/write error |
 | `upstream_protocol` | Protocol error |
 | `upstream_error` | Transport error whose cause could not be classified |
-| `stream_disconnect` | Stream broke after headers were sent |
+| `stream_disconnect` | SSE stream closed before `response.completed` |
 
 Logs contain the exception type and these tokens, not the URL, the token, the prompt, or the body. Join worker `container review start review_run_id=… job_id=…` to proxy `model_proxy outcome job_id=…`.
 
