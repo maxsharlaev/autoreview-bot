@@ -17,6 +17,7 @@ from app.model_proxy.failures import classify_transport, classify_upstream_statu
 from app.model_proxy.providers.base import Provider
 from app.model_proxy.settings import ProxySettings
 from app.model_proxy.tokens import JobTokenRecord, TokenStore
+from app.model_proxy.upstream_client import retire_upstream_client
 
 logger = logging.getLogger(__name__)
 
@@ -495,6 +496,10 @@ async def forward_responses(
     except (httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.info("model_proxy upstream error kind=%s job_id=%s", type(exc).__name__, rec.job_id)
         error, kind, status_code, metric_kind = classify_transport(exc)
+        if isinstance(exc, httpx.PoolTimeout):
+            # Every pooled connection is stuck. Drop the client so the next
+            # review can dial without restarting the process.
+            await retire_upstream_client(request.app, client, reason="pool_timeout")
         _finish(error, error_kind=metric_kind)
         return Response(status_code=status_code, content=error_body(error, kind), media_type="application/json")
 

@@ -245,6 +245,34 @@ def test_proxy_429_quota_and_rate_limit_pass_the_body_through(monkeypatch: pytes
     assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
 
 
+class _PoolTimeoutTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise httpx.PoolTimeout("pool")
+
+
+def test_pool_timeout_replaces_the_upstream_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before = _sample(metrics.REQUESTS, result="upstream_pool_timeout")
+    with _open_proxy(monkeypatch) as client:
+        assert isinstance(client, TestClient)
+        wedged = httpx.AsyncClient(transport=_PoolTimeoutTransport(), http2=False, follow_redirects=False)
+        _rebind_upstream(client, http=wedged)
+        token = _issue(client, "a" * 32)
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            content=b'{"model":"x"}',
+        )
+        assert response.status_code == 504
+        assert response.json()["error"] == "upstream_pool_timeout"
+        assert client.app.state.http is not wedged
+        assert wedged.is_closed
+        import anyio
+
+        anyio.run(client.app.state.http.aclose)
+    assert _sample(metrics.REQUESTS, result="upstream_pool_timeout") == before + 1
+
+
 def test_proxy_401_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
     metrics.reset_model_health_for_tests()
     before = _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_auth")

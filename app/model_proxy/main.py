@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -17,6 +17,7 @@ from app.model_proxy.providers import build_provider
 from app.model_proxy.proxy import allowlist_check, forward_responses, read_bounded_body
 from app.model_proxy.settings import ProxySettings, validate_settings
 from app.model_proxy.tokens import TokenStore
+from app.model_proxy.upstream_client import open_upstream_client
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,12 @@ async def lifespan(app: FastAPI):
     settings = validate_settings()
     store = TokenStore(settings)
     provider = build_provider(settings)
-    client = httpx.AsyncClient(http2=False, follow_redirects=False)
+    client = open_upstream_client()
     app.state.settings = settings
     app.state.store = store
     app.state.provider = provider
     app.state.http = client
+    app.state.http_lock = asyncio.Lock()
     build = os.environ.get("OPEN_PR_REVIEW_BUILD") or os.environ.get("GIT_COMMIT") or "unknown"
     logger.info(
         "model_proxy starting provider=%s upstream_host=%s max_review=%s build=%s",
