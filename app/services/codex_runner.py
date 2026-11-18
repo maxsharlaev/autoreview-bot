@@ -75,14 +75,15 @@ def classify_codex_error(message: str) -> str:
             "upstream_error",
             "upstream_5xx",
             "stream_disconnect",
-            "idle_timeout",
             "stream disconnected before completion",
             "504 gateway timeout",
             "gateway timeout",
         )
     ):
-        if "idle_timeout" in text and "upload_idle" in text and "upstream_" not in text:
-            return CODEX_UNAVAILABLE
+        return CODEX_UPSTREAM_UNAVAILABLE
+    # upload_idle_timeout contains "idle_timeout" but is the launcher upload
+    # deadline. A later stream disconnect or gateway timeout is matched above.
+    if "idle_timeout" in text and "upload_idle" not in text:
         return CODEX_UPSTREAM_UNAVAILABLE
     return CODEX_UNAVAILABLE
 

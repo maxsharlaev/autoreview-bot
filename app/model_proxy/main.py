@@ -17,7 +17,7 @@ from app.model_proxy.providers import build_provider
 from app.model_proxy.proxy import allowlist_check, forward_responses, read_bounded_body
 from app.model_proxy.settings import ProxySettings, validate_settings
 from app.model_proxy.tokens import TokenStore
-from app.model_proxy.upstream_client import open_upstream_client
+from app.model_proxy.upstream_client import close_upstream_clients, open_upstream_client, open_upstream_lease
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        await client.aclose()
+        await close_upstream_clients()
 
 
 app = FastAPI(title="autoreview-bot model-proxy", version="0.1.0", lifespan=lifespan)
@@ -205,21 +205,28 @@ async def catch_all(full_path: str, request: Request) -> Response:
         )
         # Committed to upstream: do not refund request count on release.
         refund_request = False
-        resp = await forward_responses(
-            request=request,
-            body=body,
-            settings=settings,
-            provider=request.app.state.provider,
-            store=store,
-            rec=rec,
-            upstream_api_key=upstream_key,
-            client=request.app.state.http,
-        )
-        # Transfer ownership only after a successful return. StreamingResponse
-        # releases in stream_body.finally; non-stream leaves ownership here.
-        if isinstance(resp, StreamingResponse):
-            slot_held = False
-        return resp
+        client = request.app.state.http
+        lease = await open_upstream_lease(client)
+        try:
+            resp = await forward_responses(
+                request=request,
+                body=body,
+                settings=settings,
+                provider=request.app.state.provider,
+                store=store,
+                rec=rec,
+                upstream_api_key=upstream_key,
+                client=client,
+                lease=lease,
+            )
+            # Transfer ownership only after a successful return. StreamingResponse
+            # releases in stream_body.finally; non-stream leaves ownership here.
+            if isinstance(resp, StreamingResponse):
+                slot_held = False
+            return resp
+        finally:
+            if not lease.owned_by_stream:
+                await lease.release()
     finally:
         if slot_held:
             store.end_request(rec, refund_request=refund_request)

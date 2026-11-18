@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import logging
 import ssl
+import threading
 
 import httpx
 import pytest
@@ -271,6 +272,100 @@ def test_pool_timeout_replaces_the_upstream_client(monkeypatch: pytest.MonkeyPat
 
         anyio.run(client.app.state.http.aclose)
     assert _sample(metrics.REQUESTS, result="upstream_pool_timeout") == before + 1
+
+
+class _PausedStream(httpx.AsyncByteStream):
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        self._started = started
+        self._release = release
+        self.closed = False
+
+    async def __aiter__(self):
+        yield b"data: one\n\n"
+        self._started.set()
+        await asyncio.to_thread(self._release.wait, 5)
+        yield b"data: two\n\n"
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_pool_timeout_does_not_abort_an_active_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    started = threading.Event()
+    release = threading.Event()
+    paused = _PausedStream(started, release)
+    calls = {"n": 0}
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=paused,
+                )
+            raise httpx.PoolTimeout("pool")
+
+    with _open_proxy(
+        monkeypatch,
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="30",
+        PROXY_UPSTREAM_TIMEOUT_SECONDS="30",
+    ) as client:
+        assert isinstance(client, TestClient)
+        wedged = httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False)
+        _rebind_upstream(client, http=wedged)
+        stream_token = _issue(client, "b" * 32)
+        pool_token = _issue(client, "c" * 32)
+        received: list[bytes] = []
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                with client.stream(
+                    "POST",
+                    "/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {stream_token}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    content=b'{"model":"x","stream":true}',
+                ) as response:
+                    assert response.status_code == 200
+                    received.append(b"".join(response.iter_bytes()))
+            except BaseException as exc:  # noqa: BLE001 — the assertion below reports it
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            assert started.wait(5)
+            assert not wedged.is_closed
+            assert not paused.closed
+            pool = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {pool_token}", "Content-Type": "application/json"},
+                content=b'{"model":"x"}',
+            )
+            assert pool.status_code == 504
+            assert pool.json()["error"] == "upstream_pool_timeout"
+            assert client.app.state.http is not wedged
+            assert not wedged.is_closed
+            assert not paused.closed
+        finally:
+            release.set()
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not errors
+        body = b"".join(received)
+        assert b"data: one\n\n" in body
+        assert b"data: two\n\n" in body
+        assert wedged.is_closed
+        import anyio
+
+        anyio.run(client.app.state.http.aclose)
 
 
 def test_proxy_401_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:

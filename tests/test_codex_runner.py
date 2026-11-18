@@ -64,6 +64,12 @@ def test_classify_codex_other() -> None:
     assert classify_codex_error("codex CLI is not installed") == CODEX_UNAVAILABLE
     assert classify_codex_error("upstream_rate_limit") == CODEX_UNAVAILABLE
     assert classify_codex_error("upload_idle_timeout") == CODEX_UNAVAILABLE
+    assert classify_codex_error("upload_idle_timeout\nstream_disconnect") == CODEX_UPSTREAM_UNAVAILABLE
+    assert (
+        classify_codex_error("upload_idle_timeout\nstream disconnected before completion") == CODEX_UPSTREAM_UNAVAILABLE
+    )
+    assert classify_codex_error("upload_idle_timeout\nError: 504 Gateway Timeout") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("upload_idle_timeout\ngateway timeout") == CODEX_UPSTREAM_UNAVAILABLE
 
 
 def test_classify_codex_upstream_unavailable() -> None:

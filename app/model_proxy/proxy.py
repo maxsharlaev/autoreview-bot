@@ -17,7 +17,7 @@ from app.model_proxy.failures import classify_transport, classify_upstream_statu
 from app.model_proxy.providers.base import Provider
 from app.model_proxy.settings import ProxySettings
 from app.model_proxy.tokens import JobTokenRecord, TokenStore
-from app.model_proxy.upstream_client import retire_upstream_client
+from app.model_proxy.upstream_client import UpstreamLease, retire_upstream_client
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +394,7 @@ async def forward_responses(
     rec: JobTokenRecord,
     upstream_api_key: str,
     client: httpx.AsyncClient,
+    lease: UpstreamLease | None = None,
 ) -> Response:
     """Forward POST /v1/responses under a slot owned by the caller.
 
@@ -497,8 +498,8 @@ async def forward_responses(
         logger.info("model_proxy upstream error kind=%s job_id=%s", type(exc).__name__, rec.job_id)
         error, kind, status_code, metric_kind = classify_transport(exc)
         if isinstance(exc, httpx.PoolTimeout):
-            # Every pooled connection is stuck. Drop the client so the next
-            # review can dial without restarting the process.
+            # No free slot for this call. Later reviews use a new client.
+            # Calls already streaming on this one keep it until they finish.
             await retire_upstream_client(request.app, client, reason="pool_timeout")
         _finish(error, error_kind=metric_kind)
         return Response(status_code=status_code, content=error_body(error, kind), media_type="application/json")
@@ -648,6 +649,8 @@ async def forward_responses(
                 extra={"job_id": rec.job_id, "kind": result_label},
             )
             metrics.ACTIVE_JOBS.set(store.active_job_count())
+            if lease is not None:
+                await lease.release()
 
     if response.status_code >= 500:
         # Codex only classifies the body it can log. Keep the status, replace the body
@@ -662,12 +665,15 @@ async def forward_responses(
 
     if is_stream:
         # Ownership transfers to stream_body.finally on successful return.
-        return StreamingResponse(
+        streaming = StreamingResponse(
             stream_body(),
             status_code=response.status_code,
             headers=out_headers,
             media_type=content_type,
         )
+        if lease is not None:
+            lease.hand_to_stream()
+        return streaming
 
     # Non-stream: caller retains slot ownership; we never end_request here.
     chunks: list[bytes] = []
