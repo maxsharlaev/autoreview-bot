@@ -59,7 +59,8 @@ groups:
       - alert: OpenPrReviewModelProxyDown
         # in_process sets open_pr_review_model_proxy_expected to 0. Absence or a dead
         # scrape target is then normal: that deployment has no model-proxy.
-        expr: (absent(up{job="open-pr-review-model-proxy"}) or max(up{job="open-pr-review-model-proxy"}) == 0) and max(open_pr_review_model_proxy_expected) == 1
+        # absent() keeps the job label; max() does not. on() matches the two anyway.
+        expr: (absent(up{job="open-pr-review-model-proxy"}) or max(up{job="open-pr-review-model-proxy"}) == 0) and on() max(open_pr_review_model_proxy_expected) == 1
         for: 2m
         labels:
           severity: page

@@ -66,6 +66,22 @@ tests:
         alertname: OpenPrReviewModelProxyDown
         exp_alerts: []
 
+  # Container backend, and the model-proxy series is missing entirely.
+  - interval: 1m
+    input_series:
+      - series: 'open_pr_review_model_proxy_expected{job="open-pr-review-worker"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OpenPrReviewModelProxyDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: open-pr-review-model-proxy
+            exp_annotations:
+              summary: model-proxy is not being scraped
+              description: This deployment expects model-proxy, and Prometheus has no target or every known target is down. An in-process deployment sets open_pr_review_model_proxy_expected to 0 and does not page. This is process liveness, not model health. An HTTP 401 from the provider only shows that the network path works. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
+
   # in_process: model-proxy is not part of the deployment. No scrape series, no page.
   - interval: 1m
     input_series:

@@ -82,6 +82,8 @@ def test_classify_codex_upstream_unavailable() -> None:
     assert classify_codex_error("upstream_5xx") == CODEX_UPSTREAM_UNAVAILABLE
     assert classify_codex_error("stream_disconnect") == CODEX_UPSTREAM_UNAVAILABLE
     assert classify_codex_error("stream disconnected before completion") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("Error: 504 Gateway Timeout") == CODEX_UPSTREAM_UNAVAILABLE
+    assert classify_codex_error("unexpected status 504 Gateway Timeout") == CODEX_UPSTREAM_UNAVAILABLE
     assert classify_codex_error("insufficient_quota upstream_timeout") == CODEX_QUOTA
 
 
