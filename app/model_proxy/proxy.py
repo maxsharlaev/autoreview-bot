@@ -559,15 +559,20 @@ async def forward_responses(
             seen.feed(piece)
 
         def _keep_terminal() -> bool:
+            """Commit a finished terminal frame. Safe to call again after it is committed."""
             nonlocal result_label
             terminal = seen.terminal
-            if result_label != "ok" or not terminal:
-                return False
+            if terminal == "response.completed":
+                return result_label == "ok"
             if terminal == "response.incomplete":
-                result_label = "response_incomplete"
-            elif terminal == "response.failed":
-                result_label = "response_failed"
-            return True
+                if result_label == "ok":
+                    result_label = "response_incomplete"
+                return result_label == "response_incomplete"
+            if terminal == "response.failed":
+                if result_label == "ok":
+                    result_label = "response_failed"
+                return result_label == "response_failed"
+            return False
 
         try:
             while True:
@@ -616,6 +621,11 @@ async def forward_responses(
                     return
                 piece = chunk[:accepted]
                 _see(piece)
+                # Commit before yielding. The client can disconnect while this
+                # generator is suspended at the yield, and the lines below it
+                # then never run.
+                if accepted == len(chunk):
+                    _keep_terminal()
                 metrics.BYTES.labels(direction="out").inc(accepted)
                 yield piece
                 if accepted < len(chunk):
@@ -628,8 +638,10 @@ async def forward_responses(
                     await _close_upstream()
                     return
         except (asyncio.CancelledError, GeneratorExit):
-            # Client gone after headers. Do not record the in-flight status as a success.
-            cancelled = True
+            # Client gone after headers. A frame already recognized as terminal
+            # is a finished attempt; anything else is not a successful model call.
+            if not _keep_terminal():
+                cancelled = True
             raise
         finally:
             await _close_upstream()

@@ -69,15 +69,27 @@ def _track(client: httpx.AsyncClient) -> _Use:
     return use
 
 
-async def open_upstream_lease(client: httpx.AsyncClient) -> UpstreamLease:
-    if client.is_closed:
-        return UpstreamLease(client, counted=False)
-    use = _track(client)
-    async with use.lock:
-        if use.closing or client.is_closed:
-            return UpstreamLease(client, counted=False)
-        use.count += 1
-    return UpstreamLease(client, counted=True)
+async def lease_app_client(app: Any) -> UpstreamLease:
+    """Lease whichever client is current, never one that is closed or retired.
+
+    The pointer read and the lease increment share ``http_lock`` with retirement.
+    A pool timeout can close the previous client only after its leases drain, so
+    a request that has not leased yet retries on the replacement.
+    """
+    lock = getattr(app.state, "http_lock", None)
+    if lock is None:
+        raise RuntimeError("upstream client lock is missing")
+    while True:
+        async with lock:
+            client = app.state.http
+            use = _track(client)
+            async with use.lock:
+                if client.is_closed or use.closing or use.retired:
+                    if app.state.http is client:
+                        app.state.http = open_upstream_client()
+                    continue
+                use.count += 1
+                return UpstreamLease(client, counted=True)
 
 
 async def end_upstream_use(client: httpx.AsyncClient) -> None:
@@ -104,17 +116,18 @@ async def retire_upstream_client(app: Any, failed: httpx.AsyncClient, *, reason:
     lock = getattr(app.state, "http_lock", None)
     if lock is None or getattr(app.state, "http", None) is not failed:
         return
+    should_close = False
     async with lock:
         if getattr(app.state, "http", None) is not failed:
             return
         app.state.http = open_upstream_client()
+        use = _track(failed)
+        async with use.lock:
+            use.retired = True
+            should_close = use.count == 0 and not use.closing
+            if should_close:
+                use.closing = True
     logger.warning("model_proxy upstream client reset reason=%s", reason)
-    use = _track(failed)
-    async with use.lock:
-        use.retired = True
-        should_close = use.count == 0 and not use.closing
-        if should_close:
-            use.closing = True
     if should_close:
         await _aclose(failed)
 

@@ -17,7 +17,7 @@ from app.model_proxy.providers import build_provider
 from app.model_proxy.proxy import allowlist_check, forward_responses, read_bounded_body
 from app.model_proxy.settings import ProxySettings, validate_settings
 from app.model_proxy.tokens import TokenStore
-from app.model_proxy.upstream_client import close_upstream_clients, open_upstream_client, open_upstream_lease
+from app.model_proxy.upstream_client import close_upstream_clients, lease_app_client, open_upstream_client
 
 logger = logging.getLogger(__name__)
 
@@ -205,8 +205,7 @@ async def catch_all(full_path: str, request: Request) -> Response:
         )
         # Committed to upstream: do not refund request count on release.
         refund_request = False
-        client = request.app.state.http
-        lease = await open_upstream_lease(client)
+        lease = await lease_app_client(request.app)
         try:
             resp = await forward_responses(
                 request=request,
@@ -216,7 +215,7 @@ async def catch_all(full_path: str, request: Request) -> Response:
                 store=store,
                 rec=rec,
                 upstream_api_key=upstream_key,
-                client=client,
+                client=lease.client,
                 lease=lease,
             )
             # Transfer ownership only after a successful return. StreamingResponse
