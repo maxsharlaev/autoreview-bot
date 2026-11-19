@@ -161,7 +161,8 @@ async def catch_all(full_path: str, request: Request) -> Response:
         )
 
     # ARB32-008: single ownership via finally. Slot stays held until either
-    # (a) we transfer to StreamingResponse (stream_body.finally releases), or
+    # (a) we transfer to the streaming response, which releases even if its body
+    # generator never starts, or
     # (b) this finally runs after a non-stream return / error / cancellation.
     slot_held = True
     refund_request = True
@@ -218,8 +219,8 @@ async def catch_all(full_path: str, request: Request) -> Response:
                 client=lease.client,
                 lease=lease,
             )
-            # Transfer ownership only after a successful return. StreamingResponse
-            # releases in stream_body.finally; non-stream leaves ownership here.
+            # Transfer ownership only after a successful return. The streaming
+            # response releases the slot; non-stream leaves ownership here.
             if isinstance(resp, StreamingResponse):
                 slot_held = False
             return resp

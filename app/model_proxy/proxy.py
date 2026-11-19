@@ -22,6 +22,28 @@ from app.model_proxy.upstream_client import UpstreamLease, retire_upstream_clien
 logger = logging.getLogger(__name__)
 
 
+class _OwnedStreamingResponse(StreamingResponse):
+    """Streaming response that releases the job slot even if the body never starts."""
+
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        release: Callable[[], Awaitable[None]],
+        status_code: int,
+        headers: dict[str, str] | None,
+        media_type: str,
+    ) -> None:
+        super().__init__(content, status_code=status_code, headers=headers, media_type=media_type)
+        self._release = release
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._release()
+
+
 _HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -45,21 +67,23 @@ _STRIP_RESPONSE_HEADERS = _HOP_BY_HOP | {
 # completed is a real success; incomplete and failed finished normally and are not connectivity failures.
 # A frame counts only after its terminating blank line. Marker text inside another event does not.
 _SSE_TERMINAL_RANK = {"response.completed": 3, "response.failed": 2, "response.incomplete": 1}
+# One event with no blank line must not grow toward the per-job byte cap.
+_MAX_SSE_FRAME_BYTES = 1024 * 1024
 
 
-def _split_sse_frame(buf: bytes) -> tuple[bytes | None, bytes]:
-    """Return one complete SSE event and the unparsed remainder."""
-    found: tuple[int, bytes] | None = None
+def _find_sse_frame(buf: bytearray) -> tuple[int, int] | None:
+    """Return ``(separator index, index after separator)`` for one complete frame."""
+    found: tuple[int, int] | None = None
     for sep in (b"\r\n\r\n", b"\n\n", b"\r\r"):
         idx = buf.find(sep)
         if idx == -1:
             continue
-        if found is None or idx < found[0] or (idx == found[0] and len(sep) > len(found[1])):
-            found = (idx, sep)
+        if found is None or idx < found[0] or (idx == found[0] and len(sep) > found[1]):
+            found = (idx, len(sep))
     if found is None:
-        return None, buf
-    idx, sep = found
-    return buf[:idx], buf[idx + len(sep) :]
+        return None
+    sep_at, sep_len = found
+    return sep_at, sep_at + sep_len
 
 
 def _sse_field(line: bytes, name: bytes) -> bytes | None:
@@ -103,22 +127,39 @@ def _frame_terminal(frame: bytes) -> str:
 
 
 class _SseTerminals:
-    """Highest-ranked terminal event whose full SSE frame has arrived."""
+    """Highest-ranked terminal event whose full SSE frame has arrived.
+
+    The unfinished frame lives in one ``bytearray``. An event that passes
+    ``_MAX_SSE_FRAME_BYTES`` without a blank line is discarded and ``overflow``
+    is set, so a provider that never sends a delimiter cannot pin the process.
+    """
 
     def __init__(self) -> None:
-        self._buf = b""
+        self._buf = bytearray()
         self.terminal = ""
+        self.overflow = False
 
     def feed(self, piece: bytes) -> None:
-        self._buf += piece
+        if self.overflow or not piece:
+            return
+        self._buf.extend(piece)
         while True:
-            frame, rest = _split_sse_frame(self._buf)
-            if frame is None:
+            found = _find_sse_frame(self._buf)
+            if found is None:
+                if len(self._buf) > _MAX_SSE_FRAME_BYTES:
+                    self.overflow = True
+                    self._buf.clear()
                 return
-            self._buf = rest
-            found = _frame_terminal(frame)
-            if _SSE_TERMINAL_RANK.get(found, 0) > _SSE_TERMINAL_RANK.get(self.terminal, 0):
-                self.terminal = found
+            sep_at, after = found
+            if sep_at > _MAX_SSE_FRAME_BYTES:
+                self.overflow = True
+                self._buf.clear()
+                return
+            frame = bytes(self._buf[:sep_at])
+            del self._buf[:after]
+            name = _frame_terminal(frame)
+            if _SSE_TERMINAL_RANK.get(name, 0) > _SSE_TERMINAL_RANK.get(self.terminal, 0):
+                self.terminal = name
 
 
 def allowlist_check(request: Request) -> str | None:
@@ -516,6 +557,24 @@ async def forward_responses(
         except Exception:  # noqa: BLE001
             pass
 
+    ownership_released = False
+
+    async def _release_stream_ownership() -> None:
+        """Release the job slot and upstream lease once.
+
+        The body generator's finally is not run when the generator is closed
+        before its first iteration, which is the window after response headers.
+        The streaming response calls this from its own finally as well.
+        """
+        nonlocal ownership_released
+        if ownership_released:
+            return
+        ownership_released = True
+        await _close_upstream()
+        store.end_request(rec)
+        if lease is not None:
+            await lease.release()
+
     async def _next_chunk(aiter: AsyncIterator[bytes]) -> bytes | None:
         """Wait for next upstream chunk; revoke interrupts even when upstream is silent."""
         if not store.still_valid(rec):
@@ -621,6 +680,11 @@ async def forward_responses(
                     return
                 piece = chunk[:accepted]
                 _see(piece)
+                if seen.overflow:
+                    await _close_upstream()
+                    metrics.UPSTREAM_ERRORS.labels(kind="protocol").inc()
+                    result_label = "upstream_protocol"
+                    return
                 # Commit before yielding. The client can disconnect while this
                 # generator is suspended at the yield, and the lines below it
                 # then never run.
@@ -644,8 +708,7 @@ async def forward_responses(
                 cancelled = True
             raise
         finally:
-            await _close_upstream()
-            store.end_request(rec)
+            await _release_stream_ownership()
             if cancelled:
                 result_label = "cancelled"
             elif result_label in ("expired", "byte_limit"):
@@ -661,8 +724,6 @@ async def forward_responses(
                 extra={"job_id": rec.job_id, "kind": result_label},
             )
             metrics.ACTIVE_JOBS.set(store.active_job_count())
-            if lease is not None:
-                await lease.release()
 
     if response.status_code >= 500:
         # Codex only classifies the body it can log. Keep the status, replace the body
@@ -676,9 +737,11 @@ async def forward_responses(
         )
 
     if is_stream:
-        # Ownership transfers to stream_body.finally on successful return.
-        streaming = StreamingResponse(
+        # The response finally releases the slot even if the body generator never
+        # starts. stream_body.finally remains the path that records the outcome.
+        streaming = _OwnedStreamingResponse(
             stream_body(),
+            release=_release_stream_ownership,
             status_code=response.status_code,
             headers=out_headers,
             media_type=content_type,

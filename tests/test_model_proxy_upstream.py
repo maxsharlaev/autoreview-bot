@@ -895,6 +895,29 @@ def test_sse_terminal_waits_for_a_complete_frame() -> None:
     assert ranked.terminal == "response.completed"
 
 
+def test_unterminated_sse_frame_is_capped() -> None:
+    from app.model_proxy.proxy import _MAX_SSE_FRAME_BYTES
+
+    seen = _SseTerminals()
+    chunk = b"x" * 4096
+    for _ in range((_MAX_SSE_FRAME_BYTES // len(chunk)) + 2):
+        seen.feed(chunk)
+    assert seen.overflow
+    assert seen._buf == bytearray()
+    assert seen.terminal == ""
+    seen.feed(b"\n\n")
+    assert seen.overflow
+
+    ok = _SseTerminals()
+    head = b"data: " + (b"y" * (_MAX_SSE_FRAME_BYTES - 64))
+    ok.feed(head[:100])
+    ok.feed(head[100:] + b"\n\n")
+    assert not ok.overflow
+    assert ok.terminal == ""
+    ok.feed(_terminal_frame("response.completed"))
+    assert ok.terminal == "response.completed"
+
+
 @pytest.mark.parametrize(
     ("event", "result", "outcome", "success"),
     [
@@ -1056,4 +1079,141 @@ def test_cancelled_request_is_not_classified(monkeypatch: pytest.MonkeyPatch) ->
             import anyio
 
             anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+
+
+class _Unterminated(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        chunk = b"x" * 65536
+        for _ in range(20):
+            yield chunk
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_unterminated_sse_stream_is_a_protocol_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before = _sample(metrics.REQUESTS, result="upstream_protocol")
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_Unterminated(),
+            )
+
+    with _open_proxy(
+        monkeypatch,
+        PROXY_MAX_BYTES_PER_JOB="4000000",
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="5",
+    ) as client:
+        assert isinstance(client, TestClient)
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, "h" * 32)
+        try:
+            with client.stream(
+                "POST",
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                content=b'{"model":"x","stream":true}',
+            ) as response:
+                assert response.status_code == 200
+                b"".join(response.iter_bytes())
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+    assert _sample(metrics.REQUESTS, result="upstream_protocol") == before + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_headers_releases_slot_and_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.model_proxy.upstream_client import lease_app_client, retire_upstream_client
+
+    class _Hang(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield b""
+
+        async def aclose(self) -> None:
+            return None
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_Hang(),
+            )
+
+    class _Stopped(Exception):
+        pass
+
+    with _open_proxy(monkeypatch, PROXY_STREAM_IDLE_TIMEOUT_SECONDS="30") as client:
+        assert isinstance(client, TestClient)
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, "i" * 32)
+        store = client.app.state.store
+        rec = store.resolve(token)
+        assert rec is not None
+        assert store.begin_request(rec, body_len=0) is None
+        body = b'{"model":"x","stream":true}'
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [
+                (b"authorization", f"Bearer {token}".encode()),
+                (b"content-type", b"application/json"),
+                (b"accept", b"text/event-stream"),
+                (b"content-length", str(len(body)).encode()),
+                (b"host", b"test"),
+            ],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        incoming = [{"type": "http.request", "body": body, "more_body": False}]
+
+        async def receive():
+            if incoming:
+                return incoming.pop(0)
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                raise _Stopped()
+
+        try:
+            with pytest.raises(_Stopped):
+                await client.app(scope, receive, send)
+            assert store.active_stream_count(rec) == 1
+            lease = await lease_app_client(client.app)
+            await retire_upstream_client(client.app, lease.client, reason="pool_timeout")
+            await lease.release()
+            assert lease.client.is_closed
+        finally:
+            store.end_request(rec)
+            await client.app.state.http.aclose()
             client.app.state.http = old

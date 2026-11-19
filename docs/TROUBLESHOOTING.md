@@ -186,7 +186,7 @@ A cancelled caller, including one that disconnects after stream headers, is prop
 | `upstream_tls` | TLS handshake failed |
 | `upstream_connect` | Connect failed and the cause was not DNS or TLS |
 | `upstream_reset` | Connection reset or read/write error |
-| `upstream_protocol` | Protocol error |
+| `upstream_protocol` | Protocol error, including an SSE event larger than 1 MiB with no blank line |
 | `upstream_error` | Transport error whose cause could not be classified |
 | `stream_disconnect` | SSE stream closed before any terminal response event |
 
