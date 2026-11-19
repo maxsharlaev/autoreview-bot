@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from app.model_proxy.providers import build_provider
 from app.model_proxy.proxy import allowlist_check, forward_responses, read_bounded_body
 from app.model_proxy.settings import ProxySettings, validate_settings
 from app.model_proxy.tokens import TokenStore
+from app.model_proxy.upstream_client import close_upstream_clients, lease_app_client, open_upstream_client
 
 logger = logging.getLogger(__name__)
 
@@ -37,21 +39,24 @@ async def lifespan(app: FastAPI):
     settings = validate_settings()
     store = TokenStore(settings)
     provider = build_provider(settings)
-    client = httpx.AsyncClient(http2=False, follow_redirects=False)
+    client = open_upstream_client()
     app.state.settings = settings
     app.state.store = store
     app.state.provider = provider
     app.state.http = client
+    app.state.http_lock = asyncio.Lock()
+    build = os.environ.get("OPEN_PR_REVIEW_BUILD") or os.environ.get("GIT_COMMIT") or "unknown"
     logger.info(
-        "model_proxy starting provider=%s upstream_host=%s max_review=%s",
+        "model_proxy starting provider=%s upstream_host=%s max_review=%s build=%s",
         settings.provider,
         settings.upstream_host,
         settings.max_review_timeout_seconds,
+        build,
     )
     try:
         yield
     finally:
-        await client.aclose()
+        await close_upstream_clients()
 
 
 app = FastAPI(title="autoreview-bot model-proxy", version="0.1.0", lifespan=lifespan)
@@ -156,7 +161,8 @@ async def catch_all(full_path: str, request: Request) -> Response:
         )
 
     # ARB32-008: single ownership via finally. Slot stays held until either
-    # (a) we transfer to StreamingResponse (stream_body.finally releases), or
+    # (a) we transfer to the streaming response, which releases even if its body
+    # generator never starts, or
     # (b) this finally runs after a non-stream return / error / cancellation.
     slot_held = True
     refund_request = True
@@ -200,21 +206,27 @@ async def catch_all(full_path: str, request: Request) -> Response:
         )
         # Committed to upstream: do not refund request count on release.
         refund_request = False
-        resp = await forward_responses(
-            request=request,
-            body=body,
-            settings=settings,
-            provider=request.app.state.provider,
-            store=store,
-            rec=rec,
-            upstream_api_key=upstream_key,
-            client=request.app.state.http,
-        )
-        # Transfer ownership only after a successful return. StreamingResponse
-        # releases in stream_body.finally; non-stream leaves ownership here.
-        if isinstance(resp, StreamingResponse):
-            slot_held = False
-        return resp
+        lease = await lease_app_client(request.app)
+        try:
+            resp = await forward_responses(
+                request=request,
+                body=body,
+                settings=settings,
+                provider=request.app.state.provider,
+                store=store,
+                rec=rec,
+                upstream_api_key=upstream_key,
+                client=lease.client,
+                lease=lease,
+            )
+            # Transfer ownership only after a successful return. The streaming
+            # response releases the slot; non-stream leaves ownership here.
+            if isinstance(resp, StreamingResponse):
+                slot_held = False
+            return resp
+        finally:
+            if not lease.owned_by_stream:
+                await lease.release()
     finally:
         if slot_held:
             store.end_request(rec, refund_request=refund_request)

@@ -24,6 +24,7 @@ from app.services.constants import (
     CODEX_QUOTA,
     CODEX_SANDBOX,
     CODEX_UNAVAILABLE,
+    CODEX_UPSTREAM_UNAVAILABLE,
     GIT_FORBIDDEN,
     GIT_REF_NOT_FOUND,
     GITHUB_UNAVAILABLE,
@@ -96,6 +97,7 @@ _FAILURE_TEXT = {
     CODEX_QUOTA: "model provider quota exceeded — check plan and billing",
     CODEX_AUTH: "model API key missing or rejected",
     CODEX_UNAVAILABLE: "the model service was unavailable",
+    CODEX_UPSTREAM_UNAVAILABLE: "the model provider connection failed before a completed response",
 }
 
 

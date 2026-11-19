@@ -485,8 +485,10 @@ async def _run_review(
         _executor = get_review_executor(runner_backend)
         _owner_id = owner_id
 
+        _run_id = str(review_run_id)
+
         async def _codex_with_owner(**kwargs):
-            return await _executor.run(owner_id=_owner_id, **kwargs)
+            return await _executor.run(owner_id=_owner_id, review_run_id=_run_id, **kwargs)
 
         codex_fn = _codex_with_owner
     if github is None:

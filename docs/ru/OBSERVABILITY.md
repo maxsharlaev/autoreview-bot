@@ -110,4 +110,26 @@ Loki ([observability/dev/loki.yml](../../observability/dev/loki.yml)) работ
 
 `CODEX_QUOTA` при повторных попытках PR — это закончившиеся кредиты OpenAI: API по-прежнему отвечает 202, worker быстро падает. Это не зависание.
 
+<!-- section: model-proxy -->
+## Model proxy
+
+model-proxy отдаёт эти метрики на своём `/metrics` (job скрейпа `open-pr-review-model-proxy`). Метки ограничены (`result`, `outcome`, `kind`). В них нет id job, репозитория, URL и текста ошибки.
+
+| Метрика | Значение |
+| --- | --- |
+| `model_proxy_requests_total{result}` | Любой завершённый результат прокси, включая отказ allowlist и токена |
+| `model_proxy_model_attempts_total{outcome}` | Один сэмпл на реальную попытку к провайдеру: `ok`, `timeout`, `transport`, `upstream_5xx`, `stream_failed`, `rate_limit`, `quota`, `upstream_auth`, `client_error`, `incomplete`, `response_failed` |
+| `model_proxy_upstream_errors_total{kind}` | Подтип таймаута и транспорта (`connect_timeout`, `pool_timeout`, `read_timeout`, `write_timeout`, `dns`, `tls`, `connect`, `connection_reset`, `stream_disconnect`, …) |
+| `model_proxy_request_duration_seconds` | Длительность той же завершённой попытки |
+| `model_proxy_consecutive_upstream_failures` | Серия timeout / transport / 5xx / оборванного потока внутри процесса. Сбрасывается в 0 при рестарте процесса и когда завершённая попытка не является таким обрывом |
+| `model_proxy_last_upstream_success_timestamp_seconds` | Unix-время этого последнего 2xx. Остаётся 0, пока такого ответа не было |
+
+`ok` — только завершённый ответ провайдера 2xx. Редирект не выполняется и это `client_error`, а не успешный вызов модели. `401` провайдера — это `upstream_auth`: сеть до него есть, и это не успешный вызов модели. Квота, rate limit, прочие завершённые 4xx (`client_error`), ошибка ключа провайдера и терминальные SSE-события `response.incomplete` / `response.failed` входят в общее число попыток. Они сбрасывают серию обрывов и не двигают gauge последнего успеха. Алерт доли ошибок держит эти исходы только в знаменателе. Терминальное SSE-событие завершает попытку только после того, как всё событие, включая пустую строку, уже отправлено. Тот же текст внутри другого события попытку не завершает, и поздний idle или reset не подменяет готовое событие. `stream_failed` — это только SSE, закрытый до любого полного терминального события. Если попыток не было, gauge последнего успеха остаётся 0: это неизвестно, а не «здорово» и не авария.
+
+Строка старта `model_proxy starting … build=` берёт `OPEN_PR_REVIEW_BUILD`, затем `GIT_COMMIT`, иначе `unknown`. Слитый коммит не доказывает, какой образ сейчас запущен.
+
+Связать упавший прогон: `review_run_id` в логе worker (`container review start review_run_id=… job_id=…`) и тот же `job_id` в `model_proxy outcome`. Прокси не получает id прогона.
+
+Алерты: `OpenPrReviewModelProxyDown` (скрейп / процесс, только когда gauge worker'а `open_pr_review_model_proxy_expected` равен 1), `OpenPrReviewModelProxyConsecutiveFailures` (3 подряд в течение 2 мин), `OpenPrReviewModelProxyFailureRatio` (больше половины из не менее 5 попыток за 10 мин, в течение 2 мин). Контейнерный backend ставит этот gauge в 1. `in_process` ставит 0, поэтому общая цель скрейпа model-proxy не поднимает страницу, когда этого сервиса нет. При отсутствии трафика ratio не срабатывает. Автоматического перезапуска нет.
+
 Шаги дежурного: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

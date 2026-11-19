@@ -151,7 +151,8 @@ The service only writes to stdout; your log agent ships it. Locally: `./scripts/
 | `CODEX_QUOTA` | error | Model quota or billing. Not retried. |
 | `CODEX_AUTH` | error | Missing or rejected model key. Not retried. |
 | `CODEX_TIMEOUT` | error | One Codex call exceeded `codex.timeout_seconds`. |
-| `CODEX_UNAVAILABLE` | error | Codex failed to start or returned an unclassified error. |
+| `CODEX_UNAVAILABLE` | error | Codex failed to start or returned an unclassified error. Rate limit stays here. |
+| `CODEX_UPSTREAM_UNAVAILABLE` | error | The model connection failed before a completed response: connect, pool, read, or write timeout, overall deadline, idle timeout, DNS, TLS, reset, protocol error, generic transport error, upstream 5xx, or a stream that broke after headers. Not retried. |
 | `GIT_FORBIDDEN` | error | Clone denied. |
 | `GIT_REF_NOT_FOUND` | error | Commit or ref no longer exists. |
 | `GITHUB_UNAVAILABLE` | error | GitHub API or clone failure during the run. |
@@ -159,6 +160,41 @@ The service only writes to stdout; your log agent ships it. Locally: `./scripts/
 | `QUEUE_UNAVAILABLE` | error | Enqueueing to Redis failed. |
 | `REVIEW_TIMEOUT` | error | The job exceeded `WORKER_JOB_TIMEOUT`. |
 | `INTERNAL_ERROR` | error | Unexpected error, or a run whose job was lost. |
+
+<!-- section: model-proxy-connectivity -->
+## Model proxy connectivity
+
+Three different questions, and a `401` from the provider answers only the second:
+
+| Question | What to look at | What it does not mean |
+| --- | --- | --- |
+| Is the process up? | `up{job="open-pr-review-model-proxy"}` while `open_pr_review_model_proxy_expected` is 1. Alert `OpenPrReviewModelProxyDown` | Not that a model call works. `in_process` sets the gauge to 0, and a missing proxy does not page |
+| Can we reach the provider? | A fast `401`/`403` on a real request (`upstream_auth`) | Not a successful generation. Do not treat it as a green health check |
+| Did a real call succeed? | `model_proxy_last_upstream_success_timestamp_seconds` greater than 0, and `model_proxy outcome` with `kind=ok` | A gauge stuck at 0 means no success has been observed in this process. That is unknown, including when the proxy is idle |
+
+A cancelled caller, including one that disconnects after stream headers, is propagated and is not recorded as a timeout or a successful review. A completed provider response of 500 or higher keeps its HTTP status and is replaced with `{"error":"upstream_5xx"}`, so the review is `CODEX_UPSTREAM_UNAVAILABLE`. Codex's own `stream disconnected before completion` (when the text is not quota or auth) is the same code: the HTTP status was already sent and cannot carry the token. The proxy JSON `error` token is what shows up in the Codex session log and becomes `CODEX_UPSTREAM_UNAVAILABLE`. `kind` is the precise cause. HTTP status stays 504 for a deadline and 502 for transport. After response headers are already on the wire, the HTTP status cannot change. A later read timeout stays `upstream_read_timeout`, and a connection reset stays `upstream_reset`. A 200 SSE stream that ends before any complete terminal event (`response.completed`, `response.incomplete`, or `response.failed`) is `stream_disconnect`. Those events end the attempt only after the whole SSE event, including its blank line, has been forwarded. Text that only mentions the event name does not. A provider that then stays silent or drops the connection does not turn a finished response into a timeout. `response.incomplete` and `response.failed` are finished responses, not connectivity failures. A completed auth, quota, rate-limit, other 4xx, incomplete, or failed response clears the consecutive-failure streak and does not set last success. A 3xx is not followed and is not a successful model call. A proxy `504` (`upstream_timeout` or the text `504 Gateway Timeout`) is this same connection failure, not a sandbox failure. The upstream client does not reuse sockets. If the pool is exhausted (`upstream_pool_timeout`), the proxy opens a new client for later reviews and closes the old one only after its in-flight requests finish, so one pool timeout does not abort reviews that are already streaming. The next review does not need a container restart. None of these is a successful review. Worker, launcher, and model-proxy must be the same build: an older worker turns `CODEX_UPSTREAM_UNAVAILABLE` into `CODEX_SANDBOX`.
+
+| `error` token | Cause |
+| --- | --- |
+| `upstream_connect_timeout` | TCP connect deadline |
+| `upstream_pool_timeout` | No free connection from the pool |
+| `upstream_read_timeout` | Read deadline |
+| `upstream_write_timeout` | Write deadline |
+| `upstream_timeout` | Overall deadline, or a timeout whose subtype is not known |
+| `idle_timeout` | Stream went quiet longer than the idle limit |
+| `upstream_dns` | Name resolution failed |
+| `upstream_tls` | TLS handshake failed |
+| `upstream_connect` | Connect failed and the cause was not DNS or TLS |
+| `upstream_reset` | Connection reset or read/write error |
+| `upstream_protocol` | Protocol error, including an SSE event larger than 1 MiB with no blank line |
+| `upstream_error` | Transport error whose cause could not be classified |
+| `stream_disconnect` | SSE stream closed before any terminal response event |
+
+Logs contain the exception type and these tokens, not the URL, the token, the prompt, or the body. Join worker `container review start review_run_id=… job_id=…` to proxy `model_proxy outcome job_id=…`.
+
+Check the running build from the `model_proxy starting … build=` line (`OPEN_PR_REVIEW_BUILD` or `GIT_COMMIT`). The image that is running can be older than the commit that was just merged.
+
+These alerts do not restart anything. Consecutive failures live in process memory and go back to 0 on restart. `increase()` on the attempt counter still works across that restart. Quota stays `CODEX_QUOTA` and is a separate alert.
 
 <!-- section: restarts-and-data -->
 ## Restarts and data

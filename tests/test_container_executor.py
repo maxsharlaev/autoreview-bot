@@ -8,7 +8,14 @@ from pathlib import Path
 import httpx
 import pytest
 from app.services.codex_runner import CodexRunnerError
-from app.services.constants import CODEX_AUTH, CODEX_QUOTA, CODEX_SANDBOX, CODEX_TIMEOUT, CODEX_UNAVAILABLE
+from app.services.constants import (
+    CODEX_AUTH,
+    CODEX_QUOTA,
+    CODEX_SANDBOX,
+    CODEX_TIMEOUT,
+    CODEX_UNAVAILABLE,
+    CODEX_UPSTREAM_UNAVAILABLE,
+)
 from app.services.container_executor import ContainerReviewExecutor
 from app.services.review_executor import CONTAINER_BACKEND, get_review_executor
 
@@ -41,7 +48,7 @@ async def test_container_executor_success(tmp_path: Path, monkeypatch: pytest.Mo
         assert request.headers["Authorization"] == "Bearer test-launcher-token-32chars-ok"
         assert "X-Model-Api-Key" not in request.headers
         body = json_body(request)
-        assert set(body) == {"job_id", "checkout_ref", "proxy_token"}
+        assert set(body) == {"job_id", "checkout_ref", "proxy_token", "review_run_id"}
         assert body["checkout_ref"].endswith("/repo")
         assert body["proxy_token"] == PROXY_TOKEN
         assert not str(body["proxy_token"]).startswith("sk-")
@@ -379,6 +386,7 @@ async def test_container_executor_propagates_codex_timeout_from_launcher(
         ("CODEX_QUOTA", CODEX_QUOTA),
         ("CODEX_AUTH", CODEX_AUTH),
         ("CODEX_UNAVAILABLE", CODEX_UNAVAILABLE),
+        ("CODEX_UPSTREAM_UNAVAILABLE", CODEX_UPSTREAM_UNAVAILABLE),
     ],
 )
 async def test_container_executor_propagates_codex_error_codes(

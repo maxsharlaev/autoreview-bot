@@ -1,0 +1,1219 @@
+"""Upstream failure classification, one terminal metric, and no secret leakage."""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import json
+import logging
+import ssl
+import threading
+
+import httpx
+import pytest
+from app.model_proxy import metrics
+from app.model_proxy.failures import classify_transport, classify_upstream_status
+from app.model_proxy.proxy import _SseTerminals
+from fastapi.testclient import TestClient
+from tests.test_model_proxy_p1 import _issue, _open_proxy, _rebind_upstream
+
+
+def _sample(metric, **labels) -> float:
+    child = metric.labels(**labels) if labels else metric
+    return float(child._value.get())
+
+
+def _post(
+    monkeypatch: pytest.MonkeyPatch,
+    transport: httpx.AsyncBaseTransport,
+    jid: str,
+    *,
+    stream: bool = False,
+    **env: str,
+) -> tuple[int, bytes]:
+    with _open_proxy(monkeypatch, **env) as client:
+        assert isinstance(client, TestClient)
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=transport, http2=False, follow_redirects=False),
+        )
+        token = _issue(client, jid)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            if stream:
+                headers["Accept"] = "text/event-stream"
+                with client.stream(
+                    "POST",
+                    "/v1/responses",
+                    headers=headers,
+                    content=b'{"model":"x","stream":true}',
+                ) as response:
+                    return response.status_code, b"".join(response.iter_bytes())
+            response = client.post(
+                "/v1/responses",
+                headers=headers,
+                content=b'{"model":"x"}',
+            )
+            return response.status_code, response.content
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+
+
+class _Raise(httpx.AsyncBaseTransport):
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise self._exc
+
+
+class _Status(httpx.AsyncBaseTransport):
+    def __init__(self, status: int, body: bytes, *, content_type: str = "application/json") -> None:
+        self._status = status
+        self._body = body
+        self._content_type = content_type
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(self._status, content=self._body, headers={"content-type": self._content_type})
+
+
+class _BrokenStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data: hi\n\n"
+        raise httpx.RemoteProtocolError("peer closed")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _Stream(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_BrokenStream(),
+        )
+
+
+def test_classify_timeout_and_transport_subtypes() -> None:
+    cases = [
+        (TimeoutError("overall"), "upstream_timeout", "overall_timeout", 504, "timeout"),
+        (TimeoutError("idle"), "idle_timeout", "idle_timeout", 504, "idle_timeout"),
+        (httpx.ConnectTimeout(""), "upstream_connect_timeout", "connect_timeout", 504, "connect_timeout"),
+        (httpx.PoolTimeout(""), "upstream_pool_timeout", "pool_timeout", 504, "pool_timeout"),
+        (httpx.ReadTimeout(""), "upstream_read_timeout", "read_timeout", 504, "read_timeout"),
+        (httpx.WriteTimeout(""), "upstream_write_timeout", "write_timeout", 504, "write_timeout"),
+        (httpx.TimeoutException(""), "upstream_timeout", "timeout", 504, "timeout"),
+        (httpx.RemoteProtocolError(""), "upstream_reset", "connection_reset", 502, "connection_reset"),
+        (httpx.ReadError(""), "upstream_reset", "connection_reset", 502, "connection_reset"),
+        (httpx.WriteError(""), "upstream_reset", "connection_reset", 502, "connection_reset"),
+        (ConnectionResetError(), "upstream_reset", "connection_reset", 502, "connection_reset"),
+        (httpx.ProtocolError(""), "upstream_protocol", "protocol", 502, "protocol"),
+        (httpx.HTTPError(""), "upstream_error", "unknown_transport", 502, "http_error"),
+    ]
+    for exc, error, kind, status, metric_kind in cases:
+        assert classify_transport(exc) == (error, kind, status, metric_kind)
+
+    dns = httpx.ConnectError("connect")
+    dns.__cause__ = OSError("getaddrinfo failed: name or service not known")
+    assert classify_transport(dns)[0] == "upstream_dns"
+
+    tls = httpx.ConnectError("connect")
+    tls.__cause__ = ssl.SSLError("certificate verify failed")
+    assert classify_transport(tls)[0] == "upstream_tls"
+
+    secret = httpx.ConnectError("https://example sk-supersecret bearer abc")
+    error, kind, _status, metric_kind = classify_transport(secret)
+    blob = f"{error} {kind} {metric_kind}"
+    assert "sk-" not in blob
+    assert "bearer" not in blob
+
+
+def test_classify_status_keeps_auth_quota_and_rate_limit_apart() -> None:
+    assert classify_upstream_status(200, b"{}") == ("ok", "ok")
+    assert classify_upstream_status(204, b"") == ("ok", "ok")
+    assert classify_upstream_status(307, b"") == ("upstream_redirect", "client_error")
+    assert classify_upstream_status(302, b"") == ("upstream_redirect", "client_error")
+    assert classify_upstream_status(401, b"nope") == ("upstream_auth", "upstream_auth")
+    assert classify_upstream_status(500, b"nope") == ("upstream_5xx", "upstream_5xx")
+    assert classify_upstream_status(400, b"bad request") == ("upstream_status", "client_error")
+    assert classify_upstream_status(404, b"missing") == ("upstream_status", "client_error")
+    assert classify_upstream_status(429, b"slow down") == ("upstream_rate_limit", "rate_limit")
+    quota = b'{"error":{"code":"insufficient_quota","message":"exceeded your current quota"}}'
+    assert classify_upstream_status(429, quota) == ("upstream_quota", "quota")
+
+
+def test_health_gauges_count_only_connectivity_failures() -> None:
+    metrics.reset_model_health_for_tests()
+    before_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    metrics.note_model_attempt("upstream_connect_timeout", 0.1)
+    metrics.note_model_attempt("upstream_5xx", 0.1)
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 2
+    metrics.note_model_attempt("upstream_auth", 0.1)
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == before_success
+    metrics.note_model_attempt("upstream_timeout", 0.1)
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
+    for result in (
+        "upstream_quota",
+        "upstream_rate_limit",
+        "upstream_status",
+        "upstream_redirect",
+        "response_incomplete",
+        "response_failed",
+    ):
+        metrics.note_model_attempt(result, 0.1)
+        assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == before_success
+    metrics.note_model_attempt("ok", 0.2)
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+
+
+@pytest.mark.parametrize(
+    ("exc", "error", "kind", "status"),
+    [
+        (httpx.ConnectTimeout("connect"), "upstream_connect_timeout", "connect_timeout", 504),
+        (httpx.PoolTimeout("pool"), "upstream_pool_timeout", "pool_timeout", 504),
+        (httpx.ReadTimeout("read"), "upstream_read_timeout", "read_timeout", 504),
+        (httpx.WriteTimeout("write"), "upstream_write_timeout", "write_timeout", 504),
+        (httpx.TimeoutException("overall"), "upstream_timeout", "timeout", 504),
+    ],
+)
+def test_proxy_timeout_subtype_is_one_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    exc: BaseException,
+    error: str,
+    kind: str,
+    status: int,
+) -> None:
+    caplog.set_level(logging.INFO)
+    before = _sample(metrics.REQUESTS, result=error)
+    attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="timeout")
+    got_status, body = _post(monkeypatch, _Raise(exc), jid=("a" * 31) + error[-1])
+    assert got_status == status
+    payload = json.loads(body)
+    assert payload["error"] == error
+    assert payload["kind"] == kind
+    assert _sample(metrics.REQUESTS, result=error) == before + 1
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="timeout") == attempts + 1
+    assert "model_proxy outcome" in caplog.text
+    assert error in caplog.text
+
+
+def test_proxy_dns_tls_and_secret_are_not_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    dns = httpx.ConnectError("connect")
+    dns.__cause__ = OSError("getaddrinfo failed sk-should-not-leak")
+    status, body = _post(monkeypatch, _Raise(dns), jid="b" * 32)
+    assert status == 502
+    assert json.loads(body)["error"] == "upstream_dns"
+    assert "sk-should-not-leak" not in caplog.text
+    assert "sk-should-not-leak" not in body.decode()
+
+    tls = httpx.ConnectError("handshake")
+    tls.__cause__ = ssl.SSLError("certificate verify failed")
+    status, body = _post(monkeypatch, _Raise(tls), jid="c" * 32)
+    assert status == 502
+    assert json.loads(body)["error"] == "upstream_tls"
+
+
+def test_proxy_429_quota_and_rate_limit_pass_the_body_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    quota_body = b'{"error":{"code":"insufficient_quota","message":"exceeded your current quota"}}'
+    before_quota = _sample(metrics.MODEL_ATTEMPTS, outcome="quota")
+    status, body = _post(monkeypatch, _Status(429, quota_body), jid="d" * 32)
+    assert status == 429
+    assert body == quota_body
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="quota") == before_quota + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+
+    rate_body = b'{"error":{"code":"rate_limit_exceeded"}}'
+    before_rate = _sample(metrics.MODEL_ATTEMPTS, outcome="rate_limit")
+    status, body = _post(monkeypatch, _Status(429, rate_body), jid="e" * 32)
+    assert status == 429
+    assert body == rate_body
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="rate_limit") == before_rate + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+
+
+class _PoolTimeoutTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise httpx.PoolTimeout("pool")
+
+
+def test_pool_timeout_replaces_the_upstream_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before = _sample(metrics.REQUESTS, result="upstream_pool_timeout")
+    with _open_proxy(monkeypatch) as client:
+        assert isinstance(client, TestClient)
+        wedged = httpx.AsyncClient(transport=_PoolTimeoutTransport(), http2=False, follow_redirects=False)
+        _rebind_upstream(client, http=wedged)
+        token = _issue(client, "a" * 32)
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            content=b'{"model":"x"}',
+        )
+        assert response.status_code == 504
+        assert response.json()["error"] == "upstream_pool_timeout"
+        assert client.app.state.http is not wedged
+        assert wedged.is_closed
+        import anyio
+
+        anyio.run(client.app.state.http.aclose)
+    assert _sample(metrics.REQUESTS, result="upstream_pool_timeout") == before + 1
+
+
+class _PausedStream(httpx.AsyncByteStream):
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        self._started = started
+        self._release = release
+        self.closed = False
+
+    async def __aiter__(self):
+        yield b"data: one\n\n"
+        self._started.set()
+        await asyncio.to_thread(self._release.wait, 5)
+        yield b"data: two\n\n"
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_pool_timeout_does_not_abort_an_active_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    started = threading.Event()
+    release = threading.Event()
+    paused = _PausedStream(started, release)
+    calls = {"n": 0}
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=paused,
+                )
+            raise httpx.PoolTimeout("pool")
+
+    with _open_proxy(
+        monkeypatch,
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="30",
+        PROXY_UPSTREAM_TIMEOUT_SECONDS="30",
+    ) as client:
+        assert isinstance(client, TestClient)
+        wedged = httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False)
+        _rebind_upstream(client, http=wedged)
+        stream_token = _issue(client, "b" * 32)
+        pool_token = _issue(client, "c" * 32)
+        received: list[bytes] = []
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                with client.stream(
+                    "POST",
+                    "/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {stream_token}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    content=b'{"model":"x","stream":true}',
+                ) as response:
+                    assert response.status_code == 200
+                    received.append(b"".join(response.iter_bytes()))
+            except BaseException as exc:  # noqa: BLE001 — the assertion below reports it
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            assert started.wait(5)
+            assert not wedged.is_closed
+            assert not paused.closed
+            pool = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {pool_token}", "Content-Type": "application/json"},
+                content=b'{"model":"x"}',
+            )
+            assert pool.status_code == 504
+            assert pool.json()["error"] == "upstream_pool_timeout"
+            assert client.app.state.http is not wedged
+            assert not wedged.is_closed
+            assert not paused.closed
+        finally:
+            release.set()
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not errors
+        body = b"".join(received)
+        assert b"data: one\n\n" in body
+        assert b"data: two\n\n" in body
+        assert wedged.is_closed
+        import anyio
+
+        anyio.run(client.app.state.http.aclose)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_retirement_never_leases_a_closed_client() -> None:
+    from types import SimpleNamespace
+
+    from app.model_proxy.upstream_client import (
+        close_upstream_clients,
+        lease_app_client,
+        open_upstream_client,
+        retire_upstream_client,
+    )
+
+    app = SimpleNamespace()
+    app.state = SimpleNamespace(http=open_upstream_client(), http_lock=asyncio.Lock())
+
+    async def churn() -> None:
+        for _ in range(40):
+            lease = await lease_app_client(app)
+            assert lease.counted
+            assert not lease.client.is_closed
+            await retire_upstream_client(app, lease.client, reason="pool_timeout")
+            assert app.state.http is not lease.client
+            await lease.release()
+
+    try:
+        await asyncio.gather(churn(), churn(), churn(), churn())
+    finally:
+        await close_upstream_clients()
+
+
+def test_proxy_401_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before = _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_auth")
+    status, body = _post(monkeypatch, _Status(401, b'{"error":"bad key"}'), jid="f" * 32)
+    assert status == 401
+    assert body == b'{"error":"bad key"}'
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_auth") == before + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+
+
+def test_proxy_4xx_counts_as_an_attempt_but_not_a_connectivity_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before = _sample(metrics.MODEL_ATTEMPTS, outcome="client_error")
+    upstream = b'{"error":"invalid_request"}'
+    status, body = _post(monkeypatch, _Status(400, upstream), jid="6" * 32)
+    assert status == 400
+    assert body == upstream
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="client_error") == before + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+
+
+def test_proxy_5xx_is_a_connectivity_failure_with_a_stable_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before = _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_5xx")
+    status, body = _post(monkeypatch, _Status(503, b'{"error":"overloaded"}'), jid="1" * 32)
+    assert status == 503
+    payload = json.loads(body)
+    assert payload["error"] == "upstream_5xx"
+    assert payload["kind"] == "upstream_5xx"
+    assert b"overloaded" not in body
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="upstream_5xx") == before + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
+
+
+def test_stream_break_after_headers_is_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    before_reset = _sample(metrics.REQUESTS, result="upstream_reset")
+    before_attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="transport")
+    status, body = _post(monkeypatch, _Stream(), jid="2" * 32, stream=True)
+    assert status == 200
+    assert b"data: hi" in body
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok
+    assert _sample(metrics.REQUESTS, result="upstream_reset") == before_reset + 1
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="transport") == before_attempts + 1
+
+
+class _ReadTimeoutStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data: hi\n\n"
+        raise httpx.ReadTimeout("read timed out")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _ReadTimeoutTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ReadTimeoutStream(),
+        )
+
+
+def test_stream_read_timeout_after_headers_is_not_a_disconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before_timeout = _sample(metrics.REQUESTS, result="upstream_read_timeout")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    before_attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="timeout")
+    before_errors = _sample(metrics.UPSTREAM_ERRORS, kind="read_timeout")
+    status, body = _post(monkeypatch, _ReadTimeoutTransport(), jid="7" * 32, stream=True)
+    assert status == 200
+    assert b"data: hi" in body
+    assert _sample(metrics.REQUESTS, result="upstream_read_timeout") == before_timeout + 1
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="timeout") == before_attempts + 1
+    assert _sample(metrics.UPSTREAM_ERRORS, kind="read_timeout") == before_errors + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+
+
+_PARTIAL_SSE = (
+    b"event: response.created\n"
+    b'data: {"type":"response.created"}\n\n'
+    b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+)
+_COMPLETE_SSE = _PARTIAL_SSE + b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+
+
+def test_incomplete_sse_eof_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    before_attempts = _sample(metrics.MODEL_ATTEMPTS, outcome="stream_failed")
+    status, body = _post(
+        monkeypatch,
+        _Status(200, _PARTIAL_SSE, content_type="text/event-stream"),
+        jid="8" * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert b"response.output_text.delta" in body
+    assert b"response.completed" not in body
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect + 1
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="stream_failed") == before_attempts + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
+
+
+def test_completed_sse_is_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    status, body = _post(
+        monkeypatch,
+        _Status(200, _COMPLETE_SSE, content_type="text/event-stream"),
+        jid="9" * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert b"response.completed" in body
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok + 1
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+
+
+@pytest.mark.parametrize(
+    ("event", "result", "outcome"),
+    [
+        ("response.incomplete", "response_incomplete", "incomplete"),
+        ("response.failed", "response_failed", "response_failed"),
+    ],
+)
+def test_terminal_sse_failure_is_not_a_connectivity_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    result: str,
+    outcome: str,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before_result = _sample(metrics.REQUESTS, result=result)
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    before_outcome = _sample(metrics.MODEL_ATTEMPTS, outcome=outcome)
+    payload = _PARTIAL_SSE + f'event: {event}\ndata: {{"type":"{event}"}}\n\n'.encode()
+    status, body = _post(
+        monkeypatch,
+        _Status(200, payload, content_type="text/event-stream"),
+        jid=("c" if event.endswith("incomplete") else "d") * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert event.encode() in body
+    assert _sample(metrics.REQUESTS, result=result) == before_result + 1
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) == before_outcome + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+
+
+def test_redirect_is_not_a_successful_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before = _sample(metrics.MODEL_ATTEMPTS, outcome="client_error")
+    before_redirect = _sample(metrics.REQUESTS, result="upstream_redirect")
+    status, body = _post(monkeypatch, _Status(307, b"go elsewhere"), jid="e" * 32)
+    assert status == 307
+    assert body == b"go elsewhere"
+    assert _sample(metrics.REQUESTS, result="upstream_redirect") == before_redirect + 1
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome="client_error") == before + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+
+
+class _AfterTerminal(httpx.AsyncByteStream):
+    def __init__(self, body: bytes, mode: str) -> None:
+        self._body = body
+        self._mode = mode
+        self._release = asyncio.Event()
+
+    async def __aiter__(self):
+        yield self._body
+        if self._mode == "reset":
+            raise httpx.RemoteProtocolError("closed after terminal")
+        try:
+            await asyncio.wait_for(self._release.wait(), timeout=2)
+        except TimeoutError:
+            return
+
+    async def aclose(self) -> None:
+        self._release.set()
+
+
+class _AfterTerminalTransport(httpx.AsyncBaseTransport):
+    def __init__(self, body: bytes, mode: str) -> None:
+        self._body = body
+        self._mode = mode
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_AfterTerminal(self._body, self._mode),
+        )
+
+
+@pytest.mark.parametrize(
+    ("event", "result", "outcome", "success"),
+    [
+        ("response.completed", "ok", "ok", True),
+        ("response.incomplete", "response_incomplete", "incomplete", False),
+        ("response.failed", "response_failed", "response_failed", False),
+    ],
+)
+@pytest.mark.parametrize("mode", ["idle", "reset"])
+def test_terminal_sse_survives_a_late_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    result: str,
+    outcome: str,
+    success: bool,
+    mode: str,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before_result = _sample(metrics.REQUESTS, result=result)
+    before_idle = _sample(metrics.REQUESTS, result="idle_timeout")
+    before_reset = _sample(metrics.REQUESTS, result="upstream_reset")
+    payload = _PARTIAL_SSE + f'event: {event}\ndata: {{"type":"{event}"}}\n\n'.encode()
+    tag = {"response.completed": "1", "response.incomplete": "2", "response.failed": "3"}[event]
+    status, body = _post(
+        monkeypatch,
+        _AfterTerminalTransport(payload, mode),
+        jid=(tag + mode[0]) * 16,
+        stream=True,
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="0.4",
+    )
+    assert status == 200
+    assert event.encode() in body
+    assert _sample(metrics.REQUESTS, result=result) == before_result + 1
+    assert _sample(metrics.REQUESTS, result="idle_timeout") == before_idle
+    assert _sample(metrics.REQUESTS, result="upstream_reset") == before_reset
+    if success:
+        assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+    else:
+        assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+        assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) >= 1
+
+
+class _HoldAfterFrame(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self._release = asyncio.Event()
+
+    async def __aiter__(self):
+        yield self._body
+        try:
+            await asyncio.wait_for(self._release.wait(), timeout=2)
+        except TimeoutError:
+            return
+
+    async def aclose(self) -> None:
+        self._release.set()
+
+
+@pytest.mark.parametrize(
+    ("event", "result", "outcome", "success"),
+    [
+        ("response.completed", "ok", "ok", True),
+        ("response.incomplete", "response_incomplete", "incomplete", False),
+        ("response.failed", "response_failed", "response_failed", False),
+    ],
+)
+def test_downstream_close_after_terminal_frame_keeps_the_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    result: str,
+    outcome: str,
+    success: bool,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before = _sample(metrics.REQUESTS, result=result)
+    before_outcome = _sample(metrics.MODEL_ATTEMPTS, outcome=outcome)
+    payload = _PARTIAL_SSE + _terminal_frame(event)
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_HoldAfterFrame(payload),
+            )
+
+    tag = {"response.completed": "1", "response.incomplete": "2", "response.failed": "3"}[event]
+    with _open_proxy(monkeypatch, PROXY_STREAM_IDLE_TIMEOUT_SECONDS="30") as client:
+        assert isinstance(client, TestClient)
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, (tag * 32)[:32])
+        received = b""
+        try:
+            with client.stream(
+                "POST",
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                content=b'{"model":"x","stream":true}',
+            ) as response:
+                assert response.status_code == 200
+                for chunk in response.iter_bytes():
+                    received += chunk
+                    if payload in received:
+                        break
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+    assert payload in received
+    assert _sample(metrics.REQUESTS, result=result) == before + 1
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) == before_outcome + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    if success:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+    else:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+
+
+@pytest.mark.parametrize(
+    ("event", "result", "outcome", "success"),
+    [
+        ("response.completed", "ok", "ok", True),
+        ("response.incomplete", "response_incomplete", "incomplete", False),
+        ("response.failed", "response_failed", "response_failed", False),
+    ],
+)
+def test_cancel_while_the_terminal_frame_is_committed_keeps_the_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    result: str,
+    outcome: str,
+    success: bool,
+) -> None:
+    """Cancellation at the terminal yield must not replace the finished attempt."""
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before = _sample(metrics.REQUESTS, result=result)
+    before_outcome = _sample(metrics.MODEL_ATTEMPTS, outcome=outcome)
+    payload = _PARTIAL_SSE + _terminal_frame(event)
+    forwarded = {"n": 0}
+    child = metrics.BYTES.labels(direction="out")
+    original_inc = child.inc
+
+    def inc(amount: float = 1) -> None:
+        original_inc(amount)
+        forwarded["n"] += int(amount)
+        if forwarded["n"] >= len(payload):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(child, "inc", inc)
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_HoldAfterFrame(payload),
+            )
+
+    jid = {"response.completed": "e", "response.incomplete": "f", "response.failed": "g"}[event] * 32
+    with _open_proxy(monkeypatch, PROXY_STREAM_IDLE_TIMEOUT_SECONDS="30") as client:
+        assert isinstance(client, TestClient)
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, jid)
+        try:
+            with client.stream(
+                "POST",
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                content=b'{"model":"x","stream":true}',
+            ) as response:
+                assert response.status_code == 200
+                try:
+                    b"".join(response.iter_bytes())
+                except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                    pass
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+    assert forwarded["n"] >= len(payload)
+    assert _sample(metrics.REQUESTS, result=result) == before + 1
+    assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) == before_outcome + 1
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 0
+    if success:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+    else:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+
+
+class _ChunksThenIdle(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self._release = asyncio.Event()
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+        try:
+            await asyncio.wait_for(self._release.wait(), timeout=2)
+        except TimeoutError:
+            return
+
+    async def aclose(self) -> None:
+        self._release.set()
+
+
+class _ChunksThenIdleTransport(httpx.AsyncBaseTransport):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ChunksThenIdle(self._chunks),
+        )
+
+
+def _terminal_frame(event: str) -> bytes:
+    return f'event: {event}\ndata: {{"type":"{event}"}}\n\n'.encode()
+
+
+def _split_terminal(event: str, split: str) -> list[bytes]:
+    frame = _terminal_frame(event)
+    if split == "after_event":
+        at = len(f"event: {event}\n".encode())
+    else:
+        needle = f'"type":"{event}"'.encode()
+        at = frame.index(needle) + len(needle) - 4
+    return [frame[:at], frame[at:]]
+
+
+def _decoy_frame() -> bytes:
+    payload = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "delta": 'event: response.completed "type":"response.completed"',
+        }
+    ).encode()
+    return b"event: response.output_text.delta\ndata: " + payload + b"\n\n"
+
+
+def test_sse_terminal_waits_for_a_complete_frame() -> None:
+    seen = _SseTerminals()
+    seen.feed(b"event: response.completed\n")
+    assert seen.terminal == ""
+    seen.feed(b'data: {"type":"response.com')
+    assert seen.terminal == ""
+    seen.feed(b'pleted"}\n\n')
+    assert seen.terminal == "response.completed"
+
+    decoy = _SseTerminals()
+    decoy.feed(_decoy_frame())
+    assert decoy.terminal == ""
+
+    ranked = _SseTerminals()
+    ranked.feed(_terminal_frame("response.incomplete") + _terminal_frame("response.completed"))
+    assert ranked.terminal == "response.completed"
+
+
+def test_unterminated_sse_frame_is_capped() -> None:
+    from app.model_proxy.proxy import _MAX_SSE_FRAME_BYTES
+
+    seen = _SseTerminals()
+    chunk = b"x" * 4096
+    for _ in range((_MAX_SSE_FRAME_BYTES // len(chunk)) + 2):
+        seen.feed(chunk)
+    assert seen.overflow
+    assert seen._buf == bytearray()
+    assert seen.terminal == ""
+    seen.feed(b"\n\n")
+    assert seen.overflow
+
+    ok = _SseTerminals()
+    head = b"data: " + (b"y" * (_MAX_SSE_FRAME_BYTES - 64))
+    ok.feed(head[:100])
+    ok.feed(head[100:] + b"\n\n")
+    assert not ok.overflow
+    assert ok.terminal == ""
+    ok.feed(_terminal_frame("response.completed"))
+    assert ok.terminal == "response.completed"
+
+
+@pytest.mark.parametrize(
+    ("event", "result", "outcome", "success"),
+    [
+        ("response.completed", "ok", "ok", True),
+        ("response.incomplete", "response_incomplete", "incomplete", False),
+        ("response.failed", "response_failed", "response_failed", False),
+    ],
+)
+@pytest.mark.parametrize("split", ["after_event", "inside_json"])
+def test_terminal_sse_split_across_chunks_is_forwarded_whole(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    result: str,
+    outcome: str,
+    success: bool,
+    split: str,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    before_result = _sample(metrics.REQUESTS, result=result)
+    before_idle = _sample(metrics.REQUESTS, result="idle_timeout")
+    chunks = _split_terminal(event, split)
+    tag = {"response.completed": "1", "response.incomplete": "2", "response.failed": "3"}[event]
+    mark = "a" if split == "after_event" else "j"
+    status, body = _post(
+        monkeypatch,
+        _ChunksThenIdleTransport(chunks),
+        jid=(tag + mark) * 16,
+        stream=True,
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="0.4",
+    )
+    assert status == 200
+    assert body == b"".join(chunks)
+    assert _sample(metrics.REQUESTS, result=result) == before_result + 1
+    assert _sample(metrics.REQUESTS, result="idle_timeout") == before_idle
+    if success:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+    else:
+        assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+        assert _sample(metrics.MODEL_ATTEMPTS, outcome=outcome) >= 1
+
+
+def test_marker_text_inside_a_delta_is_not_a_terminal_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    before_disconnect = _sample(metrics.REQUESTS, result="stream_disconnect")
+    payload = _decoy_frame()
+    status, body = _post(
+        monkeypatch,
+        _Status(200, payload, content_type="text/event-stream"),
+        jid="m" * 32,
+        stream=True,
+    )
+    assert status == 200
+    assert body == payload
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok
+    assert _sample(metrics.REQUESTS, result="stream_disconnect") == before_disconnect + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == 0
+
+
+def test_marker_text_does_not_end_the_stream_before_the_real_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics.reset_model_health_for_tests()
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    chunks = [_decoy_frame(), _terminal_frame("response.completed")]
+    status, body = _post(
+        monkeypatch,
+        _ChunksThenIdleTransport(chunks),
+        jid="n" * 32,
+        stream=True,
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="0.4",
+    )
+    assert status == 200
+    assert body == b"".join(chunks)
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) > 0
+
+
+def test_stream_cancel_after_headers_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    metrics.note_model_attempt("upstream_connect_timeout", 0.01)
+    streak = _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES)
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+    before_ok = _sample(metrics.REQUESTS, result="ok")
+    calls = {"n": 0}
+    from app.model_proxy import proxy as proxy_mod
+
+    real = proxy_mod._anext_or_invalidated
+
+    async def cancel_on_next_chunk(aiter, rec, wait):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise asyncio.CancelledError()
+        return await real(aiter, rec, wait)
+
+    monkeypatch.setattr(proxy_mod, "_anext_or_invalidated", cancel_on_next_chunk)
+
+    class _QuietStream(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b"data: hi\n\ndata: more\n\n",
+            )
+
+    with _open_proxy(monkeypatch) as client:
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_QuietStream(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, "4" * 32)
+        try:
+            with pytest.raises((asyncio.CancelledError, concurrent.futures.CancelledError)):
+                with client.stream(
+                    "POST",
+                    "/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    content=b'{"model":"x","stream":true}',
+                ) as response:
+                    assert response.status_code == 200
+                    b"".join(response.iter_bytes())
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+    assert calls["n"] >= 2
+    assert _sample(metrics.REQUESTS, result="ok") == before_ok
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == streak
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+
+
+def test_cancelled_request_is_not_classified(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _open_proxy(monkeypatch) as client:
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_Raise(asyncio.CancelledError()), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, "3" * 32)
+        before = _sample(metrics.REQUESTS, result="upstream_timeout")
+        try:
+            try:
+                response = client.post(
+                    "/v1/responses",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    content=b'{"model":"x"}',
+                )
+            except BaseException as exc:
+                assert isinstance(exc, (asyncio.CancelledError, concurrent.futures.CancelledError))
+                assert "upstream_" not in str(exc)
+            else:
+                pytest.fail(f"status={response.status_code} body={response.content!r}")
+            assert _sample(metrics.REQUESTS, result="upstream_timeout") == before
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+
+
+class _Unterminated(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        chunk = b"x" * 65536
+        for _ in range(20):
+            yield chunk
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_unterminated_sse_stream_is_a_protocol_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics.reset_model_health_for_tests()
+    before = _sample(metrics.REQUESTS, result="upstream_protocol")
+    last_success = _sample(metrics.LAST_UPSTREAM_SUCCESS)
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_Unterminated(),
+            )
+
+    with _open_proxy(
+        monkeypatch,
+        PROXY_MAX_BYTES_PER_JOB="4000000",
+        PROXY_STREAM_IDLE_TIMEOUT_SECONDS="5",
+    ) as client:
+        assert isinstance(client, TestClient)
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, "h" * 32)
+        try:
+            with client.stream(
+                "POST",
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                content=b'{"model":"x","stream":true}',
+            ) as response:
+                assert response.status_code == 200
+                b"".join(response.iter_bytes())
+        finally:
+            import anyio
+
+            anyio.run(client.app.state.http.aclose)
+            client.app.state.http = old
+    assert _sample(metrics.REQUESTS, result="upstream_protocol") == before + 1
+    assert _sample(metrics.LAST_UPSTREAM_SUCCESS) == last_success
+    assert _sample(metrics.CONSECUTIVE_UPSTREAM_FAILURES) == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_headers_releases_slot_and_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.model_proxy.upstream_client import lease_app_client, retire_upstream_client
+
+    class _Hang(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield b""
+
+        async def aclose(self) -> None:
+            return None
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_Hang(),
+            )
+
+    class _Stopped(Exception):
+        pass
+
+    with _open_proxy(monkeypatch, PROXY_STREAM_IDLE_TIMEOUT_SECONDS="30") as client:
+        assert isinstance(client, TestClient)
+        old = _rebind_upstream(
+            client,
+            http=httpx.AsyncClient(transport=_Transport(), http2=False, follow_redirects=False),
+        )
+        token = _issue(client, "i" * 32)
+        store = client.app.state.store
+        rec = store.resolve(token)
+        assert rec is not None
+        assert store.begin_request(rec, body_len=0) is None
+        body = b'{"model":"x","stream":true}'
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [
+                (b"authorization", f"Bearer {token}".encode()),
+                (b"content-type", b"application/json"),
+                (b"accept", b"text/event-stream"),
+                (b"content-length", str(len(body)).encode()),
+                (b"host", b"test"),
+            ],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        incoming = [{"type": "http.request", "body": body, "more_body": False}]
+
+        async def receive():
+            if incoming:
+                return incoming.pop(0)
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                raise _Stopped()
+
+        try:
+            with pytest.raises(_Stopped):
+                await client.app(scope, receive, send)
+            assert store.active_stream_count(rec) == 1
+            lease = await lease_app_client(client.app)
+            await retire_upstream_client(client.app, lease.client, reason="pool_timeout")
+            await lease.release()
+            assert lease.client.is_closed
+        finally:
+            store.end_request(rec)
+            await client.app.state.http.aclose()
+            client.app.state.http = old

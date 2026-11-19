@@ -17,7 +17,7 @@ class JsonLogFormatter(logging.Formatter):
             "msg": record.getMessage(),
             "service": os.environ.get("OPEN_PR_REVIEW_SERVICE", "unknown"),
         }
-        for key in ("review_run_id", "repository", "pr_number", "error_code", "status"):
+        for key in ("review_run_id", "repository", "pr_number", "error_code", "status", "job_id", "kind"):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value

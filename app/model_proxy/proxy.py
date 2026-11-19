@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -12,11 +13,35 @@ from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.model_proxy import metrics
+from app.model_proxy.failures import classify_transport, classify_upstream_status, error_body
 from app.model_proxy.providers.base import Provider
 from app.model_proxy.settings import ProxySettings
 from app.model_proxy.tokens import JobTokenRecord, TokenStore
+from app.model_proxy.upstream_client import UpstreamLease, retire_upstream_client
 
 logger = logging.getLogger(__name__)
+
+
+class _OwnedStreamingResponse(StreamingResponse):
+    """Streaming response that releases the job slot even if the body never starts."""
+
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        release: Callable[[], Awaitable[None]],
+        status_code: int,
+        headers: dict[str, str] | None,
+        media_type: str,
+    ) -> None:
+        super().__init__(content, status_code=status_code, headers=headers, media_type=media_type)
+        self._release = release
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._release()
 
 
 _HOP_BY_HOP = {
@@ -37,6 +62,104 @@ _STRIP_RESPONSE_HEADERS = _HOP_BY_HOP | {
     "content-length",
     "transfer-encoding",
 }
+
+# Responses API terminal events. EOF before a complete one of them is a broken stream.
+# completed is a real success; incomplete and failed finished normally and are not connectivity failures.
+# A frame counts only after its terminating blank line. Marker text inside another event does not.
+_SSE_TERMINAL_RANK = {"response.completed": 3, "response.failed": 2, "response.incomplete": 1}
+# One event with no blank line must not grow toward the per-job byte cap.
+_MAX_SSE_FRAME_BYTES = 1024 * 1024
+
+
+def _find_sse_frame(buf: bytearray) -> tuple[int, int] | None:
+    """Return ``(separator index, index after separator)`` for one complete frame."""
+    found: tuple[int, int] | None = None
+    for sep in (b"\r\n\r\n", b"\n\n", b"\r\r"):
+        idx = buf.find(sep)
+        if idx == -1:
+            continue
+        if found is None or idx < found[0] or (idx == found[0] and len(sep) > found[1]):
+            found = (idx, len(sep))
+    if found is None:
+        return None
+    sep_at, sep_len = found
+    return sep_at, sep_at + sep_len
+
+
+def _sse_field(line: bytes, name: bytes) -> bytes | None:
+    prefix = name + b":"
+    if not line.startswith(prefix):
+        return None
+    value = line[len(prefix) :]
+    if value.startswith(b" "):
+        value = value[1:]
+    return value
+
+
+def _frame_terminal(frame: bytes) -> str:
+    """Terminal Responses event name, or empty. Only the event field or JSON type counts."""
+    event_name = ""
+    data_parts: list[bytes] = []
+    normalized = frame.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    for line in normalized.split(b"\n"):
+        if not line or line.startswith(b":"):
+            continue
+        event_value = _sse_field(line, b"event")
+        if event_value is not None:
+            event_name = event_value.decode("utf-8", "replace")
+            continue
+        data_value = _sse_field(line, b"data")
+        if data_value is not None:
+            data_parts.append(data_value)
+    if event_name in _SSE_TERMINAL_RANK:
+        return event_name
+    if not data_parts:
+        return ""
+    try:
+        payload = json.loads(b"\n".join(data_parts))
+    except (json.JSONDecodeError, UnicodeError):
+        return ""
+    if isinstance(payload, dict):
+        kind = payload.get("type")
+        if isinstance(kind, str) and kind in _SSE_TERMINAL_RANK:
+            return kind
+    return ""
+
+
+class _SseTerminals:
+    """Highest-ranked terminal event whose full SSE frame has arrived.
+
+    The unfinished frame lives in one ``bytearray``. An event that passes
+    ``_MAX_SSE_FRAME_BYTES`` without a blank line is discarded and ``overflow``
+    is set, so a provider that never sends a delimiter cannot pin the process.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self.terminal = ""
+        self.overflow = False
+
+    def feed(self, piece: bytes) -> None:
+        if self.overflow or not piece:
+            return
+        self._buf.extend(piece)
+        while True:
+            found = _find_sse_frame(self._buf)
+            if found is None:
+                if len(self._buf) > _MAX_SSE_FRAME_BYTES:
+                    self.overflow = True
+                    self._buf.clear()
+                return
+            sep_at, after = found
+            if sep_at > _MAX_SSE_FRAME_BYTES:
+                self.overflow = True
+                self._buf.clear()
+                return
+            frame = bytes(self._buf[:sep_at])
+            del self._buf[:after]
+            name = _frame_terminal(frame)
+            if _SSE_TERMINAL_RANK.get(name, 0) > _SSE_TERMINAL_RANK.get(self.terminal, 0):
+                self.terminal = name
 
 
 def allowlist_check(request: Request) -> str | None:
@@ -247,6 +370,10 @@ async def _race_primary_or_invalidated[T](
         if invalidated:
             raise TimeoutError("expired")
 
+        if primary_task in done and primary_task.cancelled():
+            # A cancelled upstream task is the caller's cancellation, not a timeout.
+            raise asyncio.CancelledError()
+
         if primary_task in done and not primary_task.cancelled():
             keep_result = True
             return primary_task.result()
@@ -308,6 +435,7 @@ async def forward_responses(
     rec: JobTokenRecord,
     upstream_api_key: str,
     client: httpx.AsyncClient,
+    lease: UpstreamLease | None = None,
 ) -> Response:
     """Forward POST /v1/responses under a slot owned by the caller.
 
@@ -340,7 +468,8 @@ async def forward_responses(
         if value:
             headers[name] = value
 
-    overall_deadline = time.monotonic() + float(settings.upstream_timeout_seconds)
+    started = time.monotonic()
+    overall_deadline = started + float(settings.upstream_timeout_seconds)
     idle = float(settings.stream_idle_timeout_seconds)
     httpx_timeout = httpx.Timeout(
         connect=min(10.0, float(settings.upstream_timeout_seconds)),
@@ -348,6 +477,19 @@ async def forward_responses(
         write=60.0,
         pool=10.0,
     )
+
+    def _finish(result: str, *, error_kind: str | None = None) -> None:
+        if error_kind:
+            metrics.UPSTREAM_ERRORS.labels(kind=error_kind).inc()
+        elapsed = time.monotonic() - started
+        metrics.note_model_attempt(result, elapsed)
+        logger.info(
+            "model_proxy outcome job_id=%s kind=%s duration_ms=%s",
+            rec.job_id,
+            result,
+            int(elapsed * 1000),
+            extra={"job_id": rec.job_id, "kind": result},
+        )
 
     response: httpx.Response | None = None
     try:
@@ -364,11 +506,10 @@ async def forward_responses(
         )
         budget = min(_remaining(overall_deadline), _token_remaining(rec))
         if budget <= 0:
-            metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-            metrics.REQUESTS.labels(result="upstream_timeout").inc()
+            _finish("upstream_timeout", error_kind="timeout")
             return Response(
                 status_code=504,
-                content='{"error":"upstream_timeout"}',
+                content=error_body("upstream_timeout", "overall_timeout"),
                 media_type="application/json",
             )
         try:
@@ -388,22 +529,21 @@ async def forward_responses(
                     content='{"error":"expired"}',
                     media_type="application/json",
                 )
-            metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-            metrics.REQUESTS.labels(result="upstream_timeout").inc()
+            _finish("upstream_timeout", error_kind="timeout")
             return Response(
                 status_code=504,
-                content='{"error":"upstream_timeout"}',
+                content=error_body("upstream_timeout", "overall_timeout"),
                 media_type="application/json",
             )
-    except httpx.TimeoutException:
-        metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-        metrics.REQUESTS.labels(result="upstream_timeout").inc()
-        return Response(status_code=504, content='{"error":"upstream_timeout"}', media_type="application/json")
-    except httpx.HTTPError as exc:
-        metrics.UPSTREAM_ERRORS.labels(kind="http_error").inc()
-        metrics.REQUESTS.labels(result="upstream_error").inc()
-        logger.warning("model_proxy upstream error job_id=%s: %s", rec.job_id, type(exc).__name__)
-        return Response(status_code=502, content='{"error":"upstream_error"}', media_type="application/json")
+    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.info("model_proxy upstream error kind=%s job_id=%s", type(exc).__name__, rec.job_id)
+        error, kind, status_code, metric_kind = classify_transport(exc)
+        if isinstance(exc, httpx.PoolTimeout):
+            # No free slot for this call. Later reviews use a new client.
+            # Calls already streaming on this one keep it until they finish.
+            await retire_upstream_client(request.app, client, reason="pool_timeout")
+        _finish(error, error_kind=metric_kind)
+        return Response(status_code=status_code, content=error_body(error, kind), media_type="application/json")
 
     assert response is not None
     metrics.BYTES.labels(direction="in").inc(len(body))
@@ -416,6 +556,24 @@ async def forward_responses(
             await response.aclose()
         except Exception:  # noqa: BLE001
             pass
+
+    ownership_released = False
+
+    async def _release_stream_ownership() -> None:
+        """Release the job slot and upstream lease once.
+
+        The body generator's finally is not run when the generator is closed
+        before its first iteration, which is the window after response headers.
+        The streaming response calls this from its own finally as well.
+        """
+        nonlocal ownership_released
+        if ownership_released:
+            return
+        ownership_released = True
+        await _close_upstream()
+        store.end_request(rec)
+        if lease is not None:
+            await lease.release()
 
     async def _next_chunk(aiter: AsyncIterator[bytes]) -> bytes | None:
         """Wait for next upstream chunk; revoke interrupts even when upstream is silent."""
@@ -452,12 +610,36 @@ async def forward_responses(
 
     async def stream_body() -> AsyncIterator[bytes]:
         aiter = response.aiter_bytes()
-        result_label = "ok" if response.status_code < 400 else "upstream_status"
+        result_label, _outcome = classify_upstream_status(response.status_code)
+        cancelled = False
+        seen = _SseTerminals()
+
+        def _see(piece: bytes) -> None:
+            seen.feed(piece)
+
+        def _keep_terminal() -> bool:
+            """Commit a finished terminal frame. Safe to call again after it is committed."""
+            nonlocal result_label
+            terminal = seen.terminal
+            if terminal == "response.completed":
+                return result_label == "ok"
+            if terminal == "response.incomplete":
+                if result_label == "ok":
+                    result_label = "response_incomplete"
+                return result_label == "response_incomplete"
+            if terminal == "response.failed":
+                if result_label == "ok":
+                    result_label = "response_failed"
+                return result_label == "response_failed"
+            return False
+
         try:
             while True:
                 try:
                     chunk = await _next_chunk(aiter)
                 except TimeoutError as exc:
+                    if _keep_terminal():
+                        return
                     kind = str(exc) or "timeout"
                     if kind == "idle":
                         metrics.UPSTREAM_ERRORS.labels(kind="idle_timeout").inc()
@@ -468,9 +650,26 @@ async def forward_responses(
                         metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
                         result_label = "upstream_timeout"
                     return
+                except httpx.HTTPError as exc:
+                    if _keep_terminal():
+                        return
+                    # Headers were already sent, so the HTTP status cannot change.
+                    # The metric still keeps the transport cause (read timeout versus reset).
+                    error, _kind, _status_code, metric_kind = classify_transport(exc)
+                    metrics.UPSTREAM_ERRORS.labels(kind=metric_kind).inc()
+                    result_label = error
+                    logger.info(
+                        "model_proxy upstream error kind=%s job_id=%s",
+                        type(exc).__name__,
+                        rec.job_id,
+                    )
+                    return
                 if chunk is None:
                     if not store.still_valid(rec):
                         result_label = "expired"
+                    elif not _keep_terminal() and result_label == "ok":
+                        metrics.UPSTREAM_ERRORS.labels(kind="stream_disconnect").inc()
+                        result_label = "stream_disconnect"
                     return
                 if not chunk:
                     continue
@@ -479,28 +678,77 @@ async def forward_responses(
                     await _close_upstream()
                     result_label = "byte_limit"
                     return
+                piece = chunk[:accepted]
+                _see(piece)
+                if seen.overflow:
+                    await _close_upstream()
+                    metrics.UPSTREAM_ERRORS.labels(kind="protocol").inc()
+                    result_label = "upstream_protocol"
+                    return
+                # Commit before yielding. The client can disconnect while this
+                # generator is suspended at the yield, and the lines below it
+                # then never run.
+                if accepted == len(chunk):
+                    _keep_terminal()
+                metrics.BYTES.labels(direction="out").inc(accepted)
+                yield piece
                 if accepted < len(chunk):
-                    metrics.BYTES.labels(direction="out").inc(accepted)
-                    yield chunk[:accepted]
                     await _close_upstream()
                     result_label = "byte_limit"
                     return
-                metrics.BYTES.labels(direction="out").inc(accepted)
-                yield chunk
+                if _keep_terminal():
+                    # The full terminal event, including its blank line, has been forwarded.
+                    # A later idle or reset must not replace this outcome.
+                    await _close_upstream()
+                    return
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client gone after headers. A frame already recognized as terminal
+            # is a finished attempt; anything else is not a successful model call.
+            if not _keep_terminal():
+                cancelled = True
+            raise
         finally:
-            await _close_upstream()
-            store.end_request(rec)
-            metrics.REQUESTS.labels(result=result_label).inc()
+            await _release_stream_ownership()
+            if cancelled:
+                result_label = "cancelled"
+            elif result_label in ("expired", "byte_limit"):
+                metrics.REQUESTS.labels(result=result_label).inc()
+            else:
+                metrics.note_model_attempt(result_label, time.monotonic() - started)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "model_proxy outcome job_id=%s kind=%s duration_ms=%s",
+                rec.job_id,
+                result_label,
+                elapsed_ms,
+                extra={"job_id": rec.job_id, "kind": result_label},
+            )
             metrics.ACTIVE_JOBS.set(store.active_job_count())
 
+    if response.status_code >= 500:
+        # Codex only classifies the body it can log. Keep the status, replace the body
+        # with the stable token so the review becomes CODEX_UPSTREAM_UNAVAILABLE.
+        await _close_upstream()
+        _finish("upstream_5xx")
+        return Response(
+            status_code=response.status_code,
+            content=error_body("upstream_5xx", "upstream_5xx"),
+            media_type="application/json",
+        )
+
     if is_stream:
-        # Ownership transfers to stream_body.finally on successful return.
-        return StreamingResponse(
+        # The response finally releases the slot even if the body generator never
+        # starts. stream_body.finally remains the path that records the outcome.
+        streaming = _OwnedStreamingResponse(
             stream_body(),
+            release=_release_stream_ownership,
             status_code=response.status_code,
             headers=out_headers,
             media_type=content_type,
         )
+        if lease is not None:
+            lease.hand_to_stream()
+        return streaming
 
     # Non-stream: caller retains slot ownership; we never end_request here.
     chunks: list[bytes] = []
@@ -512,11 +760,10 @@ async def forward_responses(
             except TimeoutError as exc:
                 kind = str(exc) or "timeout"
                 if kind == "idle":
-                    metrics.UPSTREAM_ERRORS.labels(kind="idle_timeout").inc()
-                    metrics.REQUESTS.labels(result="idle_timeout").inc()
+                    _finish("idle_timeout", error_kind="idle_timeout")
                     return Response(
                         status_code=504,
-                        content='{"error":"idle_timeout"}',
+                        content=error_body("idle_timeout", "idle_timeout"),
                         media_type="application/json",
                     )
                 if kind == "expired":
@@ -526,11 +773,19 @@ async def forward_responses(
                         content='{"error":"expired"}',
                         media_type="application/json",
                     )
-                metrics.UPSTREAM_ERRORS.labels(kind="timeout").inc()
-                metrics.REQUESTS.labels(result="upstream_timeout").inc()
+                _finish("upstream_timeout", error_kind="timeout")
                 return Response(
                     status_code=504,
-                    content='{"error":"upstream_timeout"}',
+                    content=error_body("upstream_timeout", "overall_timeout"),
+                    media_type="application/json",
+                )
+            except httpx.HTTPError as exc:
+                error, fail_kind, status_code, metric_kind = classify_transport(exc)
+                _finish(error, error_kind=metric_kind)
+                logger.info("model_proxy upstream error kind=%s job_id=%s", type(exc).__name__, rec.job_id)
+                return Response(
+                    status_code=status_code,
+                    content=error_body(error, fail_kind),
                     media_type="application/json",
                 )
             if chunk is None:
@@ -559,7 +814,15 @@ async def forward_responses(
             metrics.BYTES.labels(direction="out").inc(accepted)
 
         data = b"".join(chunks)
-        metrics.REQUESTS.labels(result="ok" if response.status_code < 400 else "upstream_status").inc()
+        result, _outcome = classify_upstream_status(response.status_code, data)
+        metrics.note_model_attempt(result, time.monotonic() - started)
+        logger.info(
+            "model_proxy outcome job_id=%s kind=%s duration_ms=%s",
+            rec.job_id,
+            result,
+            int((time.monotonic() - started) * 1000),
+            extra={"job_id": rec.job_id, "kind": result},
+        )
         metrics.ACTIVE_JOBS.set(store.active_job_count())
         return Response(
             content=data,

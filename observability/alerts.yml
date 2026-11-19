@@ -55,3 +55,33 @@ groups:
         annotations:
           summary: Review runs stuck in pending/running
           description: One or more review_runs have not updated for 15+ minutes. Worker crash, Codex hang, or dead ARQ job.
+
+      - alert: OpenPrReviewModelProxyDown
+        # in_process sets open_pr_review_model_proxy_expected to 0. Absence or a dead
+        # scrape target is then normal: that deployment has no model-proxy.
+        # absent() keeps the job label; max() does not. on() matches the two anyway.
+        expr: (absent(up{job="open-pr-review-model-proxy"}) or max(up{job="open-pr-review-model-proxy"}) == 0) and on() max(open_pr_review_model_proxy_expected) == 1
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: model-proxy is not being scraped
+          description: This deployment expects model-proxy, and Prometheus has no target or every known target is down. An in-process deployment sets open_pr_review_model_proxy_expected to 0 and does not page. This is process liveness, not model health. An HTTP 401 from the provider only shows that the network path works. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
+
+      - alert: OpenPrReviewModelProxyConsecutiveFailures
+        expr: max(model_proxy_consecutive_upstream_failures) >= 3
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Model provider connection is failing
+          description: Three or more real model attempts in a row failed on timeout, transport, upstream 5xx, or a broken stream. A completed provider response that is not one of those resets the streak, including auth, quota, rate limit, other 4xx, and a finished incomplete or failed response. That reset is not a successful model call. The gauge also resets to 0 when model-proxy restarts. No traffic does not fire it. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.
+
+      - alert: OpenPrReviewModelProxyFailureRatio
+        expr: (sum(increase(model_proxy_model_attempts_total{outcome=~"timeout|transport|upstream_5xx|stream_failed"}[10m])) / sum(increase(model_proxy_model_attempts_total[10m]))) > 0.5 and sum(increase(model_proxy_model_attempts_total[10m])) >= 5
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: More than half of recent model attempts failed
+          description: Over the last 10 minutes, more than half of at least 5 real model attempts failed on timeout, transport, upstream 5xx, or a broken stream. Idle (no attempts) does not fire. increase() survives a counter reset. See docs/TROUBLESHOOTING.md#model-proxy-connectivity.

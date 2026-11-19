@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from app.launcher.auth import require_launcher_auth
 from app.launcher.cancel_scheduler import cancel_review_job_bounded
 from app.launcher.docker_api import DockerApiError, DockerClient
-from app.launcher.jobs import LauncherJobError, run_review_job
+from app.launcher.jobs import LauncherJobError, run_review_job, safe_review_run_id
 from app.launcher.paths import CheckoutPathError, validate_job_id, validate_uuid_job_id
 from app.launcher.reaper import reaper_loop
 from app.launcher.timeouts import ensure_launcher_orphan_ttl_config
@@ -31,6 +31,7 @@ class RunReviewRequest(BaseModel):
     # Optional at the schema layer so missing token yields a clear upgrade error
     # (ARB34-007) instead of a bare Pydantic 422.
     proxy_token: str | None = Field(default=None, max_length=512)
+    review_run_id: str = Field(default="", max_length=64)
 
 
 class RunReviewResponse(BaseModel):
@@ -169,6 +170,7 @@ def start_review(
             job_id=body.job_id,
             checkout_ref=body.checkout_ref,
             proxy_token=token,
+            review_run_id=safe_review_run_id(body.review_run_id),
         )
     except LauncherJobError as exc:
         # Map all launcher/container failures to a fail-closed sandbox signal for the worker.

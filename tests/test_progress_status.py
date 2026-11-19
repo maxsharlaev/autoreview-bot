@@ -606,6 +606,9 @@ def test_failure_text_for_model_errors() -> None:
     unavailable = outcome("CODEX_UNAVAILABLE")
     assert "model service" in unavailable.summary.lower() or "unavailable" in unavailable.summary.lower()
 
+    upstream = outcome("CODEX_UPSTREAM_UNAVAILABLE")
+    assert "connection failed" in upstream.summary.lower()
+
 
 # --- Errors, timeouts and stale cleanup ---
 
